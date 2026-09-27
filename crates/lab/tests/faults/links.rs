@@ -101,7 +101,6 @@ fn f4_writes_through_files_open_across_an_authority_outage_commit_on_reconnect()
 /// F4 as a user meets it: files written while the authority is unreachable.
 // contract: C12
 #[test]
-#[ignore = "BUG: opening a file for writing asks the authority, so no file can be written offline"]
 fn f4_files_written_during_an_authority_outage_commit_on_reconnect() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
