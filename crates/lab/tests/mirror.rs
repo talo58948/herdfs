@@ -55,7 +55,7 @@ fn client_b_sees_what_a_local_directory_holds_after_the_same_operations() -> Res
         Ok(seed) => seed.parse().with_context(|| format!("MIRROR_SEED={seed:?}"))?,
         Err(_) => rand::random(),
     };
-    eprintln!("mirror seed {seed}; replay with MIRROR_SEED={seed}");
+    eprintln!("mirror seed {seed}; replay with MIRROR_SEED={seed} LAB_KEEP=1");
     let lab = Lab::start(
         LabConfig::default()
             .client("a", "alice", &[], Profile::Lan, Strategy::Stream)

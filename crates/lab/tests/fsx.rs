@@ -3,7 +3,9 @@
 //! read-write, so it reads A's journal copy; client B, cold, then reads the committed file
 //! through the strategy under test, and it must equal the same fsx run on a local directory.
 //!
-//! `FSX_OPS` sets the operations per run (nightly: 1,000,000); `FSX_SEED` replays a seed.
+//! `FSX_OPS` sets the operations per run; `FSX_SEED` replays a seed. The nightly 1,000,000 ops
+//! commit about 8,000 versions, and the store keeps every chunk of each (C14): about 15 GB per
+//! variant, so run the variants one at a time.
 
 use std::env;
 use std::fs;
@@ -54,7 +56,7 @@ fn exercise(strategy: impl FnOnce(u64) -> Strategy) -> Result<()> {
     let seed = setting("FSX_SEED", rand::random())?;
     let ops = setting("FSX_OPS", DEFAULT_OPS)?;
     let strategy = strategy(seed);
-    eprintln!("fsx seed {seed}, {ops} ops, {strategy:?}; replay with FSX_SEED={seed}");
+    eprintln!("fsx seed {seed}, {ops} ops, {strategy:?}; replay with FSX_SEED={seed} LAB_KEEP=1");
     let lab = Lab::start(
         LabConfig::default()
             .client("a", "alice", &[], Profile::Lan, strategy)
