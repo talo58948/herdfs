@@ -60,6 +60,9 @@ impl Call<'_> {
     ) -> Result<Response> {
         self.require_space(space)?;
         if let Some(version) = self.committed(request_id)? {
+            if version.entry != entry {
+                return Err(refuse(ErrorCode::Invalid, "request id reused for another entry"));
+            }
             return Ok(Response::Version { version });
         }
         let entry = self.entry_by_id(space, entry)?;
