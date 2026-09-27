@@ -92,10 +92,11 @@ impl Model {
             Request::Remove { space, path } => {
                 assert_eq!(*reply, Response::Done);
                 self.remove(space, path);
+                self.touch_parent(space, path, now_ms);
             }
             Request::Rename { space, from, to } => {
                 assert_eq!(*reply, Response::Done);
-                self.rename(space, from, to);
+                self.rename(space, from, to, now_ms);
             }
             Request::SetAttr {
                 space,
@@ -164,8 +165,16 @@ impl Model {
         };
         assert!(self.entry_ids.insert(entry.id), "entry id {:?} reused", entry.id);
         let nodes = &mut self.spaces.get_mut(space).expect("space exists").nodes;
+        let created_ms = node.mtime_ms;
         nodes.insert(path.clone(), Node { id: entry.id, ..node });
         assert_eq!(*entry, self.entry(space, path));
+        self.touch_parent(space, path, created_ms);
+    }
+
+    /// A directory's mtime moves when an entry is added to it or taken from it.
+    fn touch_parent(&mut self, space: &str, path: &SpacePath, now_ms: i64) {
+        let Some(parent) = path.parent() else { return };
+        self.node_mut(space, &parent).mtime_ms = now_ms;
     }
 
     fn remove(&mut self, space: &str, path: &SpacePath) {
@@ -176,7 +185,7 @@ impl Model {
         self.acked.retain(|version, _| !node.history.contains(version));
     }
 
-    fn rename(&mut self, space: &str, from: &SpacePath, to: &SpacePath) {
+    fn rename(&mut self, space: &str, from: &SpacePath, to: &SpacePath, now_ms: i64) {
         if from == to {
             return;
         }
@@ -193,6 +202,8 @@ impl Model {
             let node = nodes.remove(&old).expect("listed above");
             nodes.insert(old.rebase(from, to).expect("within from"), node);
         }
+        self.touch_parent(space, from, now_ms);
+        self.touch_parent(space, to, now_ms);
     }
 
     fn commit(&mut self, who: &Principal, request: &Request, reply: &Response, now_ms: i64) {

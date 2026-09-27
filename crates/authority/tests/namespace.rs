@@ -67,3 +67,18 @@ fn rename_into_itself_is_invalid_and_onto_itself_changes_nothing() {
     fx.rename(&alice(), "a", "a").unwrap();
     assert_eq!(fx.stat(&alice(), "a"), Ok(dir));
 }
+
+#[test]
+fn adding_or_taking_an_entry_moves_its_directory_mtime() {
+    let mut fx = Fixture::new();
+    let dir = fx.mkdir(&alice(), "a").unwrap();
+    assert_eq!(fx.stat(&alice(), "").unwrap().mtime_ms, dir.mtime_ms);
+    let file = fx.create(&alice(), "a/f").unwrap();
+    assert_eq!(fx.stat(&alice(), "a").unwrap().mtime_ms, file.mtime_ms);
+    fx.rename(&alice(), "a/f", "g").unwrap();
+    let (old_parent, new_parent) = (fx.stat(&alice(), "a").unwrap(), fx.stat(&alice(), "").unwrap());
+    assert!(old_parent.mtime_ms > file.mtime_ms);
+    assert_eq!(new_parent.mtime_ms, old_parent.mtime_ms);
+    fx.remove(&alice(), "g").unwrap();
+    assert!(fx.stat(&alice(), "").unwrap().mtime_ms > new_parent.mtime_ms);
+}

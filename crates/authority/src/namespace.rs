@@ -57,6 +57,7 @@ impl Call<'_> {
                 "INSERT INTO entries (space, path, kind, mode, mtime_ms, target) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?
             .execute(params![space, path.as_str(), kind_name(kind), mode, self.now_ms, target])?;
+        self.touch_parent(space, path)?;
         Ok(Response::Entry {
             entry: self.entry(space, path)?,
         })
@@ -68,6 +69,7 @@ impl Call<'_> {
             return Err(refuse(ErrorCode::Invalid, "the root cannot be removed"));
         }
         self.delete(space, &self.entry(space, path)?)?;
+        self.touch_parent(space, path)?;
         Ok(Response::Done)
     }
 
@@ -96,6 +98,8 @@ impl Call<'_> {
                  WHERE space = ?1 AND (path = ?2 OR (path > ?4 AND path < ?5))",
             )?
             .execute(params![space, from.as_str(), to.as_str(), lo, hi])?;
+        self.touch_parent(space, from)?;
+        self.touch_parent(space, to)?;
         Ok(Response::Done)
     }
 
@@ -145,6 +149,15 @@ impl Call<'_> {
         self.db
             .prepare_cached("DELETE FROM entries WHERE id = ?1")?
             .execute([entry.id.0])?;
+        Ok(())
+    }
+
+    /// A directory's mtime moves when an entry is added to it or taken from it.
+    fn touch_parent(&self, space: &str, path: &SpacePath) -> Result<()> {
+        let parent = path.parent().unwrap_or_default();
+        self.db
+            .prepare_cached("UPDATE entries SET mtime_ms = ?3 WHERE space = ?1 AND path = ?2")?
+            .execute(params![space, parent.as_str(), self.now_ms])?;
         Ok(())
     }
 
