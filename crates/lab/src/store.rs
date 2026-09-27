@@ -17,8 +17,9 @@ pub(crate) const BUCKET: &str = "herdfs";
 pub(crate) const REGION: &str = "us-east-1";
 const ACCESS_KEY: &str = "lab-access";
 const SECRET_KEY: &str = "lab-secret";
-/// The store's root credentials, as the authority reads them from its environment.
-pub(crate) const CREDENTIALS: [(&str, &str); 2] = [
+/// The store's root credentials, as the authority reads them from its environment. Only the
+/// authority may hold them (contract S1).
+pub const STORE_CREDENTIALS: [(&str, &str); 2] = [
     ("AWS_ACCESS_KEY_ID", ACCESS_KEY),
     ("AWS_SECRET_ACCESS_KEY", SECRET_KEY),
 ];
