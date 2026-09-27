@@ -1,15 +1,16 @@
 //! The mounted space: inode numbers, attributes and open handles over the remote namespace.
 
+mod answer;
 mod fuse;
 mod handles;
 mod namespace;
 
-use std::sync::{Arc, Mutex, atomic::AtomicU64};
+use std::sync::{Arc, Mutex, OnceLock, atomic::AtomicU64};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use std::{collections::HashMap, ffi::OsStr, io, os::unix::fs::MetadataExt};
 
 pub use fuse::Fuse;
-use fuser::{Errno, FileAttr, FileType, INodeNo};
+use fuser::{Errno, FileAttr, FileType, INodeNo, Notifier};
 use handles::Handle;
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{Entry, EntryId, Kind, Version};
@@ -23,6 +24,8 @@ use crate::{
 const TTL: Duration = Duration::from_secs(1);
 /// Only permission bits are stored; the file type comes from the entry kind.
 const PERMISSIONS: u32 = 0o7777;
+/// The longest name POSIX filesystems take, in bytes.
+const MAX_NAME: usize = 255;
 /// Past this many cached entries, expired ones are dropped.
 const RECENT_LIMIT: usize = 4096;
 
@@ -52,6 +55,8 @@ pub struct Space {
     /// Directory listings taken at opendir, by handle.
     listings: Mutex<HashMap<u64, Listing>>,
     next_handle: AtomicU64,
+    /// Tells the kernel to drop what it cached for an inode; set once mounted.
+    notifier: OnceLock<Notifier>,
 }
 
 impl Space {
@@ -81,6 +86,7 @@ impl Space {
             handles: Mutex::default(),
             listings: Mutex::default(),
             next_handle: AtomicU64::new(1),
+            notifier: OnceLock::new(),
         })
     }
 
@@ -98,7 +104,14 @@ impl Space {
         Ok(path.ok_or(Errno::ENOENT)?)
     }
 
+    pub fn set_notifier(&self, notifier: Notifier) {
+        let _ = self.notifier.set(notifier);
+    }
+
     fn child(&self, parent: INodeNo, name: &OsStr) -> Result<SpacePath, Error> {
+        if name.len() > MAX_NAME {
+            return Err(Errno::ENAMETOOLONG.into());
+        }
         let name = name.to_str().ok_or(Errno::EINVAL)?;
         Ok(self.path(parent)?.join(name).map_err(|_| Errno::EINVAL)?)
     }

@@ -111,8 +111,12 @@ impl Cache {
         };
         if ChunkId::of(&bytes) != *id {
             tracing::warn!(%id, "cached chunk failed verification; refetching");
-            lock(&self.index).chunks.remove(id);
-            let _ = fs::remove_file(&path);
+            let mut index = lock(&self.index);
+            // A concurrent fetch may have put the right bytes there since; they stay.
+            if fs::read(&path).is_ok_and(|now| ChunkId::of(&now) != *id) {
+                index.chunks.remove(id);
+                let _ = fs::remove_file(&path);
+            }
             return None;
         }
         lock(&self.index).chunks.insert(*id, bytes.len() as u64, ());
@@ -123,8 +127,10 @@ impl Cache {
     pub fn put(&self, id: &ChunkId, bytes: &[u8]) -> io::Result<()> {
         let temp = self.dir.join(format!("{id}.{:x}.tmp", rand::random::<u64>()));
         fs::write(&temp, bytes)?;
+        let mut index = lock(&self.index);
         fs::rename(&temp, self.path(id))?;
-        lock(&self.index).chunks.insert(*id, bytes.len() as u64, ());
+        index.chunks.insert(*id, bytes.len() as u64, ());
+        drop(index);
         self.evict();
         Ok(())
     }

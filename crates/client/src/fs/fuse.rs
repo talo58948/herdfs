@@ -2,57 +2,25 @@
 //! runtime and reply from the task, so one slow download never stalls other operations.
 //! fuser's defaults answer everything not implemented here: ENOSYS, and EPERM for hard links.
 
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 use std::{ffi::OsStr, io, path::Path, sync::Arc};
 
 use fuser::{
-    BsdFileFlags, Errno, FileAttr, FileHandle, Filesystem, FopenFlags, Generation, INodeNo, InitFlags,
-    KernelConfig, LockOwner, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
-    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
+    BsdFileFlags, Errno, FileHandle, Filesystem, INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags,
+    RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
+    ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
 use tokio::runtime::Handle as Runtime;
 
-use super::{Space, TTL, namespace::AttrChange};
+use super::answer::Answer;
+use super::{Space, namespace::AttrChange};
 use crate::{error::Error, unix_ms};
 
 const STATS_XATTR: &str = "user.herdfs.stats";
-const GENERATION: Generation = Generation(0);
 
 pub struct Fuse {
     space: Arc<Space>,
     runtime: Runtime,
-}
-
-/// A reply that carries a `T` on success and an errno otherwise.
-trait Answer<T> {
-    fn answer(self, value: T);
-    fn fail(self, errno: Errno);
-}
-
-macro_rules! answer {
-    ($reply:ty, $value:ty, |$this:ident, $pattern:pat_param| $body:expr) => {
-        impl Answer<$value> for $reply {
-            fn answer(self, $pattern: $value) {
-                let $this = self;
-                $body;
-            }
-            fn fail(self, errno: Errno) {
-                self.error(errno);
-            }
-        }
-    };
-}
-
-answer! { ReplyEntry, (FileAttr, Duration), |reply, (attr, ttl)| reply.entry(&ttl, &attr, GENERATION) }
-answer! { ReplyEntry, FileAttr, |reply, attr| reply.entry(&TTL, &attr, GENERATION) }
-answer! { ReplyAttr, (FileAttr, Duration), |reply, (attr, ttl)| reply.attr(&ttl, &attr) }
-answer! { ReplyAttr, FileAttr, |reply, attr| reply.attr(&TTL, &attr) }
-answer! { ReplyData, Vec<u8>, |reply, bytes| reply.data(&bytes) }
-answer! { ReplyEmpty, (), |reply, ()| reply.ok() }
-answer! { ReplyOpen, u64, |reply, fh| reply.opened(FileHandle(fh), FopenFlags::empty()) }
-answer! {
-    ReplyCreate, (FileAttr, u64),
-    |reply, (attr, fh)| reply.created(&TTL, &attr, GENERATION, FileHandle(fh), FopenFlags::empty())
 }
 
 impl Fuse {
@@ -143,6 +111,20 @@ impl Filesystem for Fuse {
 
     fn mkdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, mode: u32, umask: u32, reply: ReplyEntry) {
         self.spawn(reply, self.space().mkdir(parent, name.to_owned(), mode & !umask));
+    }
+
+    fn mknod(
+        &self,
+        _req: &Request,
+        _parent: INodeNo,
+        _name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        _rdev: u32,
+        reply: ReplyEntry,
+    ) {
+        // Devices, FIFOs and sockets are out of v0; regular files come through create.
+        reply.error(Errno::EPERM);
     }
 
     fn unlink(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {

@@ -47,6 +47,8 @@ impl Space {
         }
         let (path, mode) = (self.path(ino)?, change.mode.map(|mode| mode & PERMISSIONS));
         let entry = if mode.is_some() || change.mtime_ms.is_some() {
+            // A commit landing later would set the mtime to its own time.
+            self.committed(self.entry_id(ino)).await?;
             self.remote.set_attr(path, mode, change.mtime_ms).await?
         } else {
             self.remote.stat(path).await?
