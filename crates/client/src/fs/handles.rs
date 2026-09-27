@@ -8,7 +8,7 @@ use fuser::{Errno, FileAttr, INodeNo, OpenAccMode, OpenFlags};
 use herdfs_core::proto::{EntryId, Version};
 use herdfs_core::{ChunkId, SpacePath};
 
-use super::{PERMISSIONS, Space};
+use super::{PERMISSIONS, RECENT_LIMIT, Space};
 use crate::strategy::{OpenContext, Strategy};
 use crate::{error::Error, journal::Registration, lock, reader::OpenVersion};
 
@@ -141,7 +141,13 @@ impl Space {
         if self.journal.attach(entry, truncate)? {
             return Ok(());
         }
-        let head = self.head(entry, path).await?.map(OpenVersion::new);
+        let head = match self.head(entry, path).await {
+            // A truncating write needs no old bytes, and its unguarded commit is right on an
+            // unknown base too (C5, C12).
+            Err(err) if truncate && err.is_offline() => None,
+            head => head?,
+        };
+        let head = head.map(OpenVersion::new);
         let mut scratch = self.journal.scratch(entry)?;
         if let Some(head) = head.as_ref().filter(|_| !truncate) {
             self.reader.materialize(head, path, &mut scratch.file).await?;
@@ -153,13 +159,22 @@ impl Space {
         Ok(())
     }
 
-    /// The entry's current head. Every open asks, for close-to-open consistency (C2).
+    /// The entry's current head. Every open asks, for close-to-open consistency (C2); offline,
+    /// the last head seen lets writes and cached reads go on (C12).
     async fn head(&self, entry: EntryId, path: &SpacePath) -> Result<Option<Version>, Error> {
-        let (found, head) = self.remote.open(path.clone()).await?;
+        let (found, head) = match self.remote.open(path.clone()).await {
+            Err(err) if err.is_offline() => return lock(&self.heads).get(&entry).cloned().ok_or(err),
+            opened => opened?,
+        };
         if found.id != entry {
             return Err(Errno::ENOENT.into());
         }
         self.remember(&found);
+        let mut heads = lock(&self.heads);
+        if heads.len() > RECENT_LIMIT {
+            heads.clear();
+        }
+        heads.insert(entry, head.clone());
         Ok(head)
     }
 

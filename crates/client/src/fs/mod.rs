@@ -12,7 +12,7 @@ pub use fuse::Fuse;
 use fuser::{Errno, FileAttr, FileType, INodeNo};
 use handles::Handle;
 use herdfs_core::SpacePath;
-use herdfs_core::proto::{Entry, EntryId, Kind};
+use herdfs_core::proto::{Entry, EntryId, Kind, Version};
 
 use crate::{
     cache::Cache, error::Error, journal::Journal, lock, reader::Reader, remote::Remote, stats::Stats,
@@ -44,6 +44,8 @@ pub struct Space {
     /// Entries fetched from the authority, by path, with when and in which journal
     /// generation (count of settled commits) they were fetched.
     recent: Mutex<HashMap<SpacePath, (Instant, u64, Entry)>>,
+    /// The last head `Open` returned for each entry, for opens while offline (C12).
+    heads: Mutex<HashMap<EntryId, Option<Version>>>,
     handles: Mutex<HashMap<u64, Arc<Handle>>>,
     /// Directory listings taken at opendir, by handle.
     listings: Mutex<HashMap<u64, Listing>>,
@@ -72,6 +74,7 @@ impl Space {
             owner: (process.uid(), process.gid()),
             paths: Mutex::new(HashMap::from([(INodeNo::ROOT, (SpacePath::root(), 1))])),
             recent: Mutex::default(),
+            heads: Mutex::default(),
             handles: Mutex::default(),
             listings: Mutex::default(),
             next_handle: AtomicU64::new(1),
@@ -102,20 +105,26 @@ impl Space {
     /// authority.
     async fn entry(&self, path: &SpacePath) -> Result<(Entry, Duration), Error> {
         let cached = lock(&self.recent).get(path).cloned();
-        if let Some((fetched, settled, entry)) = cached {
+        if let Some((fetched, settled, entry)) = &cached {
             // A pending local write shadows the authority, even offline (C1, C12).
             if self.journal.copy(entry.id).is_some() {
-                return Ok((entry, TTL));
+                return Ok((entry.clone(), TTL));
             }
             // A local commit since the fetch has made the entry stale (C1).
-            let fresh = settled == self.journal.settled();
+            let fresh = *settled == self.journal.settled();
             if let Some(ttl) = TTL.checked_sub(fetched.elapsed()).filter(|_| fresh) {
-                return Ok((entry, ttl));
+                return Ok((entry.clone(), ttl));
             }
         }
-        let entry = self.remote.stat(path.clone()).await?;
-        self.remember(&entry);
-        Ok((entry, TTL))
+        match self.remote.stat(path.clone()).await {
+            Ok(entry) => {
+                self.remember(&entry);
+                Ok((entry, TTL))
+            }
+            // Offline, the last entry seen keeps writes to existing files working (C12).
+            Err(err) if err.is_offline() => cached.map(|(.., entry)| (entry, TTL)).ok_or(err),
+            Err(err) => Err(err),
+        }
     }
 
     /// Caches the entry and updates the path of its inode if the kernel holds it.
@@ -143,7 +152,6 @@ impl Space {
 
     /// Records an entry this client just made, whose reply hands the kernel its inode.
     fn added(&self, entry: &Entry) -> FileAttr {
-        self.changed();
         self.remember(entry);
         self.looked_up(entry)
     }
@@ -160,9 +168,9 @@ impl Space {
         }
     }
 
-    /// Drops cached entries after a local change.
-    fn changed(&self) {
-        lock(&self.recent).clear();
+    /// Drops the cached entries at or below `path`, which this client just moved or removed.
+    fn stale(&self, path: &SpacePath) {
+        lock(&self.recent).retain(|known, _| !known.is_within(path));
     }
 
     /// The entry's attributes, with size and mtime from its journal copy while it has one.
