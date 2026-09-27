@@ -12,10 +12,9 @@ use std::{env, fs};
 
 use anyhow::{Context, Result, ensure};
 use herdfs_client::{Jev, OpenContext, Strategy};
-use herdfs_lab::Profile;
-use serde_json::{Value, json};
+use serde_json::json;
 
-use crate::cases::{Case, LINKS, MIB, Workload, measure_all};
+use crate::cases::{Case, MIB, measure_all};
 
 const JEV_URL: &str = "https://ai-gateway.vercel.sh/v1/evaluate";
 
@@ -31,10 +30,7 @@ fn jev_beats_every_fixed_strategy_by_regret() -> Result<()> {
     let key_file = Path::new(&env::var("HOME")?).join(".config/herdfs/ai-gateway-key");
     let jev = Jev::new(&key_file, JEV_URL).with_context(|| format!("reading {}", key_file.display()))?;
     let cases = measure_all()?;
-    let contexts: Vec<OpenContext> = cases
-        .iter()
-        .map(|case| context(case, throughput(&cases, case.link)))
-        .collect();
+    let contexts: Vec<OpenContext> = cases.iter().map(context).collect();
     let asked = ask_all(&jev, &contexts)?;
     // As the client's decider does: an unsure or failed answer leaves the rule's choice.
     let by_jev = contexts
@@ -42,20 +38,19 @@ fn jev_beats_every_fixed_strategy_by_regret() -> Result<()> {
         .zip(&asked)
         .map(|(context, asked)| match asked.answer {
             Some((strategy, confidence)) if confidence >= Jev::CONFIDENT => strategy,
-            _ => Strategy::by_rule(context),
+            _ => rule(context),
         });
     let mut deciders: Vec<(&str, Vec<Strategy>)> = Strategy::ALL
         .into_iter()
         .map(|strategy| (strategy.name(), vec![strategy; cases.len()]))
         .collect();
-    deciders.push(("rule", contexts.iter().map(Strategy::by_rule).collect()));
+    deciders.push(("rule", contexts.iter().map(rule).collect()));
     deciders.push(("jev", by_jev.collect()));
     // Jev's answers whatever their confidence, to show what the threshold costs. Not asserted.
-    let raw = contexts.iter().zip(&asked).map(|(context, asked)| {
-        asked
-            .answer
-            .map_or(Strategy::by_rule(context), |(strategy, _)| strategy)
-    });
+    let raw = contexts
+        .iter()
+        .zip(&asked)
+        .map(|(context, asked)| asked.answer.map_or(rule(context), |(strategy, _)| strategy));
     deciders.push(("jev-raw", raw.collect()));
     let scores: Vec<(f64, f64)> = deciders
         .iter()
@@ -75,14 +70,26 @@ fn jev_beats_every_fixed_strategy_by_regret() -> Result<()> {
     Ok(())
 }
 
-/// The context the client would have at the case's first open, over a link of `throughput`.
-fn context(case: &Case, throughput: f64) -> OpenContext {
+/// The context a fresh client has at the case's first open: no download measured yet, and the
+/// round trip its first calls to the authority measured.
+fn context(case: &Case) -> OpenContext {
     OpenContext {
         size: case.mib * MIB,
         extension: Some("bin".into()),
         comm: case.workload.comm().into(),
         coverage: 0.0,
-        throughput,
+        throughput: None,
+        round_trip: case.round_trip,
+        opens: 0,
+    }
+}
+
+/// The client's rule decider: fetch files under 64 MiB whole, stream larger ones.
+fn rule(context: &OpenContext) -> Strategy {
+    if context.size < 64 * MIB {
+        Strategy::Fetch
+    } else {
+        Strategy::Stream
     }
 }
 
@@ -99,18 +106,6 @@ fn ask_all(jev: &Jev, contexts: &[OpenContext]) -> Result<Vec<Asked>> {
         Asked { answer, millis }
     };
     Ok(contexts.iter().map(ask).collect())
-}
-
-/// The link's throughput in bytes per second, as the Fetch runs of whole-file reads measured it.
-fn throughput(cases: &[Case], link: Profile) -> f64 {
-    let fetch = Strategy::Fetch as usize;
-    let reads = cases
-        .iter()
-        .filter(|case| case.link == link && matches!(case.workload, Workload::Read));
-    let (bytes, seconds) = reads.fold((0.0, 0.0), |(bytes, seconds), case| {
-        (bytes + case.bytes[fetch] as f64, seconds + case.seconds[fetch])
-    });
-    bytes / seconds
 }
 
 /// Mean and p90 regret of `choices`, one per case.
@@ -155,7 +150,7 @@ fn report(
             decisions[3], decisions[4], asked.millis
         );
         rows.push(json!({
-            "case": name, "seconds": case.seconds, "bytes": case.bytes, "best": best,
+            "case": name, "seconds": case.seconds, "bytes": case.bytes, "best": best, "round_trip": case.round_trip,
             "rule": decisions[3], "jev": decisions[4], "jev_answer": answer, "jev_ms": asked.millis,
         }));
     }
@@ -164,14 +159,9 @@ fn report(
         println!("{name:<7} regret: mean {mean:.2}, p90 {p90:.2}");
         regret.insert((*name).into(), json!({"mean": mean, "p90": p90}));
     }
-    let links: Value = LINKS
-        .map(|link| (format!("{link:?}"), throughput(cases, link)))
-        .into_iter()
-        .collect();
-    println!("measured throughput, bytes/s: {links}");
     let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("results");
     fs::create_dir_all(&out)?;
-    let table = json!({"throughput": links, "cases": rows, "regret": regret});
+    let table = json!({"cases": rows, "regret": regret});
     fs::write(
         out.join("strategy_eval.json"),
         serde_json::to_string_pretty(&table)?,

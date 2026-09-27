@@ -8,13 +8,15 @@ use std::{fs, path::Path, time::Duration};
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 
-use super::{Decision, OpenContext, Strategy};
+use super::{Decider, Decision, OpenContext, Strategy};
 use crate::stats::{Stats, bump};
 use crate::{error::Error, lock};
 
 const MODEL: &str = "typesafe-ai/jev";
 /// Jev answers warm in about 350 ms; past this the rule's choice stands (P2).
 const TIMEOUT: Duration = Duration::from_secs(2);
+/// Download throughput assumed until one is measured, in bytes per second.
+const FIRST_THROUGHPUT: f64 = 10e6;
 
 pub struct Jev {
     http: reqwest::Client,
@@ -25,8 +27,9 @@ pub struct Jev {
 }
 
 impl Jev {
-    /// Answers below this confidence leave the rule's choice in place (P2).
-    pub const CONFIDENT: f64 = 0.7;
+    /// Answers below this confidence leave the rule's choice (P2). R5's mean regret of Jev's top
+    /// choice by confidence: 0.2-0.3 n=1 1.15; 0.3-0.4 n=2 1.00; 0.4-0.6 n=6 1.00; 0.6+ n=15 1.00.
+    pub const CONFIDENT: f64 = 0.3;
 
     /// Jev at `url`, with the AI Gateway key in `key_file`.
     pub fn new(key_file: &Path, url: &str) -> Result<Self, Error> {
@@ -61,16 +64,13 @@ impl Jev {
         let answer = &reply["answers"]["strategy"];
         let choice = answer["choice"].as_str();
         let strategy = Strategy::ALL.into_iter().find(|s| Some(s.name()) == choice);
-        match (strategy, answer["confidence"].as_f64()) {
-            (Some(strategy), Some(confidence)) => Ok((strategy, confidence)),
-            _ => Err(Error::Protocol(format!("Jev answered {answer}"))),
-        }
+        let found = strategy.zip(answer["confidence"].as_f64());
+        found.ok_or_else(|| Error::Protocol(format!("Jev answered {answer}")))
     }
 
-    /// The remembered answer at once; on a miss, the rule's choice while Jev is asked in the
-    /// background, once per phrased context.
+    /// The remembered answer at once; on a miss, the rule's choice while Jev is asked, once per context.
     pub(super) fn decide(self: &Arc<Self>, open: &OpenContext, stats: &Arc<Stats>) -> Decision {
-        let (key, rule) = (phrase(open).to_string(), Strategy::by_rule(open));
+        let (key, rule) = (phrase(open).to_string(), Decider::Rule.decide(open).0);
         match lock(&self.answers).entry(key.clone()) {
             Entry::Occupied(known) => return (known.get().unwrap_or(rule), None),
             Entry::Vacant(asking) => asking.insert(None),
@@ -89,9 +89,7 @@ impl Jev {
     /// Asks Jev about `context` and remembers the answer under `key`, unless the ask failed.
     async fn learn(&self, key: String, context: &OpenContext, stats: &Stats) -> Option<Strategy> {
         let (answer, counter) = match self.ask(context).await {
-            Ok((strategy, confidence)) if confidence >= Self::CONFIDENT => {
-                (Some(strategy), &stats.jev_answers)
-            }
+            Ok((choice, confidence)) if confidence >= Self::CONFIDENT => (Some(choice), &stats.jev_answers),
             Ok(_) => (None, &stats.jev_unsure),
             Err(err) => {
                 tracing::warn!(%err, "asking Jev failed; the rule decides");
@@ -114,13 +112,21 @@ fn phrase(context: &OpenContext) -> Value {
         50..99 => "most of it",
         _ => "all of it",
     };
+    let opened = match context.opens {
+        0 => "for the first time",
+        1 => "once before",
+        _ => "several times in the last few minutes",
+    };
     let size = context.size as f64;
+    let download = size / context.throughput.unwrap_or(FIRST_THROUGHPUT);
     json!({
         "program": context.comm,
+        "opened by this program": opened,
         "file extension": context.extension.as_deref().unwrap_or("none"),
         "file size": magnitude(size / 1e6, "megabyte"),
         "already cached": cached,
-        "time to download the whole file": magnitude(size / context.throughput, "second"),
+        "network round trip": magnitude(context.round_trip * 1e3, "millisecond"),
+        "time to download the whole file": magnitude(download, "second"),
     })
 }
 
@@ -152,7 +158,9 @@ mod tests {
             extension: Some("mp4".into()),
             comm: "ffprobe".into(),
             coverage: 0.0,
-            throughput: 12.5e6,
+            throughput: Some(12.5e6),
+            round_trip: 0.09,
+            opens: 0,
         }
     }
 
@@ -182,23 +190,29 @@ mod tests {
     fn contexts_are_sent_as_words() {
         let expected = json!({
             "program": "ffprobe",
+            "opened by this program": "for the first time",
             "file extension": "mp4",
             "file size": "hundreds of megabytes",
             "already cached": "none of it",
+            "network round trip": "tens of milliseconds",
             "time to download the whole file": "tens of seconds",
         });
         assert_eq!(phrase(&context(BIG)), expected);
         let cached = OpenContext {
             extension: None,
             coverage: 1.0,
-            throughput: 100e6,
+            throughput: None,
+            round_trip: 0.0004,
+            opens: 2,
             ..context(4 << 20)
         };
         let expected = json!({
             "program": "ffprobe",
+            "opened by this program": "several times in the last few minutes",
             "file extension": "none",
             "file size": "a few megabytes",
             "already cached": "all of it",
+            "network round trip": "under a millisecond",
             "time to download the whole file": "under a second",
         });
         assert_eq!(phrase(&cached), expected);
@@ -224,7 +238,7 @@ mod tests {
     // contract: P2
     #[tokio::test]
     async fn an_unsure_answer_leaves_the_rules_choice_and_is_not_asked_again() {
-        let (jev, asked) = fake_jev(json!({"choice": "fetch", "confidence": 0.4}), Duration::ZERO).await;
+        let (jev, asked) = fake_jev(json!({"choice": "fetch", "confidence": 0.2}), Duration::ZERO).await;
         let stats: Arc<Stats> = Arc::default();
         let (now, upgrade) = jev.decide(&context(BIG), &stats);
         assert!(upgrade.unwrap().await.is_err(), "no upgrade");

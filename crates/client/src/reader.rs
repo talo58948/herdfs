@@ -4,14 +4,14 @@
 use std::sync::{Arc, Mutex};
 use std::{collections::HashMap, fs::File, io::Write, time::Instant, time::SystemTime};
 
-use futures::{StreamExt, TryStreamExt, stream};
+use futures::stream::{self, BoxStream, StreamExt};
 use herdfs_core::proto::{Version, VersionId};
 use herdfs_core::{ChunkId, SpacePath};
 use tokio::sync::{Mutex as FetchLock, OwnedMutexGuard};
 
 use crate::cache::{Cache, Lru};
 use crate::stats::{Stats, bump};
-use crate::{chunk_map::ChunkMap, error::Error, lock, remote::Remote, unix_ms};
+use crate::{Average, chunk_map::ChunkMap, error::Error, lock, remote::Remote, unix_ms};
 
 /// Concurrent downloads per request, which is also the prefetch batch size.
 const DOWNLOADS: usize = 8;
@@ -20,15 +20,11 @@ const GRANT_MARGIN_MS: i64 = 10_000;
 /// Verified chunks kept in memory, so the FUSE reads within one chunk do not each re-read
 /// and re-hash it from disk.
 const MEMORY_BYTES: u64 = 64 << 20;
-/// Download throughput assumed until one is measured, in bytes per second.
-const FIRST_THROUGHPUT: f64 = 10e6;
-/// How much each measured download moves the throughput average.
-const THROUGHPUT_WEIGHT: f64 = 0.2;
 
 /// Chunk bytes by id, as one read gathers them.
 type Found = HashMap<ChunkId, Arc<Vec<u8>>>;
-/// The bytes of fetched chunks, in the order asked.
-type Fetched = Result<Vec<Vec<u8>>, Error>;
+/// The bytes of fetched chunks, in the order asked, each as soon as it arrives.
+type Fetched<'a> = Result<BoxStream<'a, Result<Vec<u8>, Error>>, Error>;
 
 /// A version opened for reading.
 pub struct OpenVersion {
@@ -56,8 +52,8 @@ pub struct Reader {
     grants: Mutex<HashMap<(VersionId, usize), (String, i64)>>,
     /// A lock per chunk being fetched, so concurrent reads download it once.
     fetching: Mutex<HashMap<ChunkId, Arc<FetchLock<()>>>>,
-    /// Download throughput in bytes per second, a moving average over fetches.
-    pub throughput: Mutex<f64>,
+    /// Download throughput in bytes per second, over recent chunk downloads.
+    pub throughput: Average,
 }
 
 impl Reader {
@@ -70,7 +66,7 @@ impl Reader {
             memory,
             grants,
             fetching,
-            throughput: Mutex::new(FIRST_THROUGHPUT),
+            throughput: Average::default(),
         }
     }
 
@@ -116,12 +112,12 @@ impl Reader {
         Ok(())
     }
 
-    async fn read_with(
+    async fn read_with<'a>(
         &self,
         file: &OpenVersion,
         off: u64,
         len: u64,
-        fetch: impl AsyncFnOnce(Vec<usize>) -> Fetched,
+        fetch: impl AsyncFnOnce(Vec<usize>) -> Fetched<'a>,
     ) -> Result<Vec<u8>, Error> {
         let indices: Vec<usize> = file.map.overlapping(off, len).collect();
         let chunks = self.load(file, &indices, fetch).await?;
@@ -135,29 +131,29 @@ impl Reader {
 
     /// The chunks at `indices`, from memory or the disk cache where they are and from
     /// `fetch` otherwise.
-    async fn load(
+    async fn load<'a>(
         &self,
         file: &OpenVersion,
         indices: &[usize],
-        fetch: impl AsyncFnOnce(Vec<usize>) -> Fetched,
+        fetch: impl AsyncFnOnce(Vec<usize>) -> Fetched<'a>,
     ) -> Result<Vec<Arc<Vec<u8>>>, Error> {
         let mut found = Found::new();
         let missing = self.look_up(file, indices, &mut found);
         if !missing.is_empty() {
-            let claims = self.claim(file, &missing).await;
+            let mut claims = self.claim(file, &missing).await;
             // Another read may have fetched them while this one waited for its claims.
             let needed = self.look_up(file, &missing, &mut found);
-            let fetched = fetch(needed.clone()).await?;
-            if fetched.len() != needed.len() {
-                return Err(Error::Protocol("fetched a different number of chunks".into()));
-            }
-            for (index, bytes) in needed.into_iter().zip(fetched) {
-                let (id, bytes) = (file.id(index), Arc::new(bytes));
+            let mut fetched = fetch(needed.clone()).await?;
+            for index in needed {
+                let fewer = || Error::Protocol("fetched fewer chunks than asked".into());
+                let (id, bytes) = (file.id(index), Arc::new(fetched.next().await.ok_or_else(fewer)??));
                 if let Err(err) = self.cache.put(&id, &bytes) {
                     tracing::warn!(%err, "could not cache a chunk");
                 }
                 self.keep(id, bytes.clone());
                 found.insert(id, bytes);
+                // A read waiting for this chunk goes on without waiting for the rest.
+                claims.remove(&id);
             }
             drop(claims);
             lock(&self.fetching).retain(|_, fetch| Arc::strong_count(fetch) > 1);
@@ -208,7 +204,7 @@ impl Reader {
     }
 
     /// Takes the fetch lock of each chunk, in id order so that claims cannot deadlock.
-    async fn claim(&self, file: &OpenVersion, indices: &[usize]) -> Vec<OwnedMutexGuard<()>> {
+    async fn claim(&self, file: &OpenVersion, indices: &[usize]) -> HashMap<ChunkId, OwnedMutexGuard<()>> {
         let mut ids: Vec<ChunkId> = indices.iter().map(|&index| file.id(index)).collect();
         ids.sort();
         ids.dedup();
@@ -218,33 +214,38 @@ impl Reader {
                 .map(|id| fetching.entry(*id).or_default().clone())
                 .collect()
         };
-        let mut claims = Vec::with_capacity(locks.len());
-        for fetch in locks {
-            claims.push(fetch.lock_owned().await);
+        let mut claims = HashMap::new();
+        for (id, fetch) in ids.into_iter().zip(locks) {
+            claims.insert(id, fetch.lock_owned().await);
         }
         claims
     }
 
-    /// Grants and downloads chunks of `file`, verifying each against its id.
-    async fn fetch(&self, file: &OpenVersion, path: &SpacePath, indices: Vec<usize>) -> Fetched {
+    /// Grants chunks of `file`, then downloads them, verifying each against its id.
+    async fn fetch<'a>(
+        &'a self,
+        file: &'a OpenVersion,
+        path: &SpacePath,
+        indices: Vec<usize>,
+    ) -> Fetched<'a> {
         let urls = self.urls(file, path, &indices).await?;
+        let downloads = indices.into_iter().zip(urls);
+        let downloads = downloads.map(|(index, url)| self.download(file, index, url));
+        Ok(stream::iter(downloads).buffered(DOWNLOADS).boxed())
+    }
+
+    async fn download(&self, file: &OpenVersion, index: usize, url: String) -> Result<Vec<u8>, Error> {
         let started = Instant::now();
-        let downloads = indices.into_iter().zip(urls).map(|(index, url)| async move {
-            let chunk = self.remote.download(&url, file.version.chunks[index]).await;
-            if chunk.is_err() {
-                lock(&self.grants).remove(&(file.version.id, index));
-            }
-            chunk
-        });
-        let chunks: Vec<Vec<u8>> = stream::iter(downloads).buffered(DOWNLOADS).try_collect().await?;
-        let bytes: usize = chunks.iter().map(Vec::len).sum();
-        if bytes > 0 {
-            let (mut average, seconds) = (lock(&self.throughput), started.elapsed().as_secs_f64());
-            *average += THROUGHPUT_WEIGHT * (bytes as f64 / seconds - *average);
-        }
-        bump(&self.stats.chunks_fetched, chunks.len() as u64);
-        bump(&self.stats.bytes_fetched, bytes as u64);
-        Ok(chunks)
+        let chunk = self.remote.download(&url, file.version.chunks[index]).await;
+        let Ok(bytes) = &chunk else {
+            lock(&self.grants).remove(&(file.version.id, index));
+            return chunk;
+        };
+        bump(&self.stats.chunks_fetched, 1);
+        bump(&self.stats.bytes_fetched, bytes.len() as u64);
+        self.throughput
+            .add(bytes.len() as f64 / started.elapsed().as_secs_f64());
+        chunk
     }
 
     /// URLs for chunks `indices`, reusing unexpired grants and asking for the rest in one call.
@@ -270,11 +271,8 @@ impl Reader {
             bump(&self.stats.grants, 1);
             let mut grants = lock(&self.grants);
             grants.retain(|_, (_, expires)| *expires > usable_after);
-            let granted = wanted
-                .into_iter()
-                .zip(urls)
-                .map(|(index, url)| (index as usize, url));
-            grants.extend(granted.map(|(index, url)| ((version, index), (url, expires_ms))));
+            let granted = wanted.into_iter().zip(urls);
+            grants.extend(granted.map(|(index, url)| ((version, index as usize), (url, expires_ms))));
         }
         let missing = || Error::Protocol("grant lacks usable URLs".into());
         indices

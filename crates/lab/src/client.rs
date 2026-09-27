@@ -9,6 +9,7 @@ use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 
 use crate::issuer::Issuer;
+use crate::jev::FakeJev;
 use crate::process::{self, Proc};
 use crate::store::S3_HOST;
 use crate::{Profile, SPACE};
@@ -60,6 +61,8 @@ pub(crate) struct Client {
     /// Cache, journal, token file and log.
     pub(crate) dir: PathBuf,
     pub(crate) mount: PathBuf,
+    /// The fake Jev that a client deciding with Jev asks.
+    pub(crate) jev: Option<FakeJev>,
     process: Option<Proc>,
 }
 
@@ -70,7 +73,11 @@ impl Client {
         for path in [dir.join("cache"), dir.join("journal"), mount.clone()] {
             fs::create_dir_all(path)?;
         }
+        let jev = (spec.strategy == Strategy::Jev)
+            .then(FakeJev::start)
+            .transpose()?;
         Ok(Self {
+            jev,
             spec,
             space: SPACE.to_owned(),
             ip,
@@ -102,6 +109,14 @@ impl Client {
             .args(["--strategy", &self.spec.strategy.arg()])
             .args(["--resolve", &format!("{S3_HOST}={}", self.ip)])
             .arg(&self.mount);
+        if let Some(jev) = &self.jev {
+            let key = self.dir.join("jev-key");
+            fs::write(&key, "lab")?;
+            command
+                .arg("--jev-key-file")
+                .arg(key)
+                .args(["--jev-url", jev.url()]);
+        }
         let mut mount = Proc::spawn(&self.spec.name, command, &self.dir.join("client.log"))?;
         mount.wait_until("mounted", || is_mounted(&self.mount))?;
         self.process = Some(mount);

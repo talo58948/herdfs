@@ -8,15 +8,16 @@
 mod authority;
 mod client;
 mod issuer;
+mod jev;
 mod process;
 mod store;
 mod sweep;
 mod toxiproxy;
 
+use std::env;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::process::Command;
-use std::{env, fs};
 
 use anyhow::Result;
 use herdfs_core::SpacePath;
@@ -35,6 +36,7 @@ use crate::toxiproxy::Toxiproxy;
 
 pub use crate::client::Strategy;
 pub use crate::issuer::BadToken;
+pub use crate::jev::{FakeJev, JevMode};
 pub use crate::store::STORE_CREDENTIALS;
 pub use crate::sweep::{Hit, canary, sweep};
 pub use crate::toxiproxy::{Links, Profile};
@@ -194,14 +196,6 @@ impl Lab {
         let client = self.clients.iter_mut().find(|client| client.spec.name == name);
         let client = client.unwrap_or_else(|| no_client(name));
         client.start(&self.issuer, self.authority.port)
-    }
-
-    /// Mounts client `name` again with an empty cache, after killing it if it runs.
-    pub fn restart_client_cold(&mut self, name: &str) -> Result<()> {
-        self.kill_client(name)?;
-        // The client makes its cache directory again when it starts.
-        fs::remove_dir_all(self.client_dir(name).join("cache"))?;
-        self.restart_client(name)
     }
 
     /// Mounts client `name` on `space` from now on, such as a fork, after killing it if it runs.

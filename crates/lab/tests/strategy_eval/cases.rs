@@ -1,7 +1,7 @@
 //! The cases of R5 and their ground truth: each workload runs on a cold client under every
 //! strategy, which records its wall time and the bytes it fetched.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Write;
 use std::iter;
 use std::path::Path;
@@ -66,6 +66,8 @@ pub struct Case {
     pub link: Profile,
     pub seconds: [f64; 3],
     pub bytes: [u64; 3],
+    /// Seconds, as a fresh client of the link measures it by its first open.
+    pub round_trip: f64,
 }
 
 impl Case {
@@ -98,19 +100,26 @@ pub fn measure_all() -> Result<Vec<Case>> {
         .flat_map(|link| SIZES_MIB.map(|mib| (link, mib)));
     let mut cases = Vec::new();
     for ((link, mib), workload) in layout.flat_map(|pair| Workload::ALL.map(|workload| (pair, workload))) {
+        let round_trip = round_trip(&mut lab, link, mib)?;
         let mut case = Case {
             mib,
             workload,
             link,
             seconds: [0.0; 3],
             bytes: [0; 3],
+            round_trip,
         };
         for strategy in Strategy::ALL {
             let client = client(link, strategy);
             (case.seconds[strategy as usize], case.bytes[strategy as usize]) =
                 measure(&mut lab, &client, &case)?;
         }
-        eprintln!("{}: {:.2?} s, {:?} bytes", case.name(), case.seconds, case.bytes);
+        eprintln!(
+            "{}: {:.2?} s, {:?} bytes, {round_trip:.4} s round trip",
+            case.name(),
+            case.seconds,
+            case.bytes
+        );
         cases.push(case);
     }
     Ok(cases)
@@ -159,7 +168,7 @@ fn write_files(lab: &Lab) -> Result<()> {
 /// Runs the case's workload on a cold mount of `client`: its wall time in seconds, and the
 /// bytes the client had fetched when it ended.
 fn measure(lab: &mut Lab, client: &str, case: &Case) -> Result<(f64, u64)> {
-    lab.restart_client_cold(client)?;
+    restart_cold(lab, client)?;
     let script = case
         .workload
         .script(&lab.mount_path(client).join(file_name(case.mib)), case.mib);
@@ -173,4 +182,22 @@ fn measure(lab: &mut Lab, client: &str, case: &Case) -> Result<(f64, u64)> {
     // Stops a Fetch or Pin prefetch from competing with the next run.
     lab.kill_client(client)?;
     Ok((seconds, bytes))
+}
+
+/// Mounts `client` again with an empty cache.
+fn restart_cold(lab: &mut Lab, client: &str) -> Result<()> {
+    lab.kill_client(client)?;
+    // The client makes its cache directory again when it starts.
+    fs::remove_dir_all(lab.client_dir(client).join("cache"))?;
+    lab.restart_client(client)
+}
+
+/// The round trip, in seconds, that a fresh client of `link` has measured when it first opens
+/// the file of `mib` MiB, as its stats report it.
+fn round_trip(lab: &mut Lab, link: Profile, mib: u64) -> Result<f64> {
+    let client = client(link, Strategy::Stream);
+    restart_cold(lab, &client)?;
+    File::open(lab.mount_path(&client).join(file_name(mib)))?;
+    let millis = lab.stats(&client)?["round_trip_ms"].as_f64();
+    Ok(millis.context("stats lack round_trip_ms")? / 1e3)
 }

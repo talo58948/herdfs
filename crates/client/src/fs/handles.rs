@@ -2,6 +2,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use std::{ffi::OsString, fs::File, io, os::unix::fs::FileExt, path::Path};
 
 use fuser::{Errno, FileAttr, INodeNo, OpenAccMode, OpenFlags};
@@ -11,6 +12,9 @@ use herdfs_core::{ChunkId, SpacePath};
 use super::{PERMISSIONS, RECENT_LIMIT, Space};
 use crate::strategy::{OpenContext, Strategy, Upgrade};
 use crate::{error::Error, journal::Registration, lock, reader::OpenVersion};
+
+/// Opens of a file by one program count as repeated while each comes this soon after the last.
+const REOPENED_WITHIN: Duration = Duration::from_secs(300);
 
 pub struct Handle {
     entry: EntryId,
@@ -191,20 +195,36 @@ impl Space {
         let context = OpenContext {
             size: file.version.size,
             extension: extension.map(|extension| extension.to_string_lossy().into()),
+            opens: self.opened(file.version.entry, comm.trim_end()),
             comm: comm.trim_end().to_owned(),
             coverage: self.cache.coverage(&file.version.chunks),
-            throughput: *lock(&self.reader.throughput),
+            throughput: self.reader.throughput.get(),
+            round_trip: self.remote.round_trip.get().unwrap_or_default(),
         };
         let (strategy, upgrade) = lock(&self.decider).decide(&context);
         self.stats.decided(strategy);
-        tracing::debug!(
-            %path, ?strategy, size = context.size, extension = ?context.extension,
-            comm = context.comm, coverage = context.coverage, "access strategy"
-        );
+        tracing::debug!(%path, ?strategy, ?context, "access strategy");
         let file = Arc::new(file);
         self.begin(strategy, &file, path, handle);
         handle.content = Some(file);
         upgrade
+    }
+
+    /// How many times `comm` opened `entry` before, each within [`REOPENED_WITHIN`] of the last,
+    /// counting this open for the next.
+    fn opened(&self, entry: EntryId, comm: &str) -> u32 {
+        let mut opens = lock(&self.opens);
+        if opens.len() > RECENT_LIMIT {
+            opens.clear();
+        }
+        let (count, last) = opens
+            .entry((entry, comm.to_owned()))
+            .or_insert((0, Instant::now()));
+        if last.elapsed() > REOPENED_WITHIN {
+            *count = 0;
+        }
+        (*count, *last) = (*count + 1, Instant::now());
+        *count - 1
     }
 
     /// Pins every chunk for Pin, and prefetches them in the background for Fetch and Pin.

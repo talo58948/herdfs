@@ -34,18 +34,10 @@ impl Strategy {
             Self::Pin => "pin",
         }
     }
-
-    /// The rule decider's choice: fetch files under 64 MiB whole, stream larger ones.
-    pub fn by_rule(context: &OpenContext) -> Self {
-        match context.size {
-            ..FETCH_BELOW => Self::Fetch,
-            _ => Self::Stream,
-        }
-    }
 }
 
 /// What a decider knows about one open.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct OpenContext {
     pub size: u64,
     pub extension: Option<String>,
@@ -53,8 +45,12 @@ pub struct OpenContext {
     pub comm: String,
     /// The fraction of the version's bytes already cached.
     pub coverage: f64,
-    /// Recent download throughput, in bytes per second.
-    pub throughput: f64,
+    /// Recent download throughput in bytes per second, if any download was measured yet.
+    pub throughput: Option<f64>,
+    /// Recent round-trip time to the authority, in seconds.
+    pub round_trip: f64,
+    /// How many times this process name opened the file in the last few minutes before.
+    pub opens: u32,
 }
 
 /// A strategy Jev chose after an open that began with Stream.
@@ -65,6 +61,7 @@ pub type Decision = (Strategy, Option<Upgrade>);
 #[derive(Clone)]
 pub enum Decider {
     Fixed(Strategy),
+    /// Fetch files under 64 MiB, stream larger ones.
     Rule,
     /// Seeded random choices, so tests reach every strategy reproducibly (C8).
     Chaos(SmallRng),
@@ -76,7 +73,8 @@ impl Decider {
     pub fn decide(&mut self, context: &OpenContext) -> Decision {
         match self {
             Self::Fixed(strategy) => (*strategy, None),
-            Self::Rule => (Strategy::by_rule(context), None),
+            Self::Rule if context.size < FETCH_BELOW => (Strategy::Fetch, None),
+            Self::Rule => (Strategy::Stream, None),
             Self::Chaos(rng) => (Strategy::ALL[rng.random_range(0..Strategy::ALL.len())], None),
             Self::Jev(jev, stats) => jev.decide(context, stats),
         }
@@ -121,7 +119,9 @@ mod tests {
             extension: None,
             comm: "cat".into(),
             coverage: 0.0,
-            throughput: 10e6,
+            throughput: None,
+            round_trip: 0.001,
+            opens: 0,
         }
     }
 

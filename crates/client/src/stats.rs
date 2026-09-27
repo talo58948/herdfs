@@ -30,8 +30,9 @@ impl Stats {
         bump(&self.decisions[strategy as usize], 1);
     }
 
-    /// The counters as JSON. Pending commits are counted by the journal.
-    pub fn json(&self, pending_commits: usize) -> Vec<u8> {
+    /// The counters as JSON. Pending commits are counted by the journal, the round trip (seconds)
+    /// by the remote.
+    pub fn json(&self, pending_commits: usize, round_trip: Option<f64>) -> Vec<u8> {
         let decisions: Map<String, Value> = Strategy::ALL
             .into_iter()
             .map(|strategy| {
@@ -48,6 +49,7 @@ impl Stats {
             "grants": self.grants.load(Relaxed),
             "commits": self.commits.load(Relaxed),
             "pending_commits": pending_commits,
+            "round_trip_ms": round_trip.map(|seconds| seconds * 1e3),
             "jev_answers": self.jev_answers.load(Relaxed),
             "jev_unsure": self.jev_unsure.load(Relaxed),
             "jev_errors": self.jev_errors.load(Relaxed),
