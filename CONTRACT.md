@@ -20,7 +20,7 @@ Every test names the lines it checks with a `// contract: C9, S2` comment. Code 
 | C9 | A cold read of `[off, off+len)` fetches at most the chunks overlapping that range, plus configured prefetch. |
 | C10 | Mounting a space uses local disk proportional to metadata and cache, not to data size. |
 | C11 | The cache never serves bytes of a different version. A tampered cached chunk fails its hash and is refetched. |
-| C12 | Writes made offline are journaled and committed on reconnect, under C5. |
+| C12 | Content writes made offline to existing files are journaled and committed on reconnect, under C5. Namespace changes (create, mkdir, rename, remove) need the authority and fail with `EIO` while it is unreachable. |
 | C13 | A fork copies no chunk bytes, includes all commits acknowledged before it, and is isolated from its parent afterwards. Its time grows with entry count only (≤ 1 s per 100k entries). |
 | C14 | Any version in an entry's history is readable. Restore creates a new head and keeps history. |
 
