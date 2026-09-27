@@ -1,0 +1,230 @@
+//! The authority protocol. Each call is one JSON [`Request`] sent to
+//! `POST /v1/rpc` with a bearer token, answered by a [`Response`] or, with a
+//! non-2xx status, an [`Error`]. Chunk bytes are uploaded with
+//! `PUT /v1/spaces/{space}/chunks/{id}` and downloaded from presigned URLs,
+//! so they never travel inside RPC bodies.
+
+use serde::{Deserialize, Serialize};
+
+use crate::{ChunkRef, SpacePath};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EntryId(pub u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct VersionId(pub u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    File,
+    Dir,
+    Symlink,
+}
+
+/// Access levels. Each level includes the ones before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Perm {
+    Read,
+    Write,
+    Admin,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Entry {
+    pub id: EntryId,
+    pub path: SpacePath,
+    pub kind: Kind,
+    pub mode: u32,
+    pub mtime_ms: i64,
+    /// Current content. `None` for directories, symlinks and files that
+    /// were created but never committed.
+    pub head: Option<VersionId>,
+    pub size: u64,
+    pub target: Option<String>,
+}
+
+/// An immutable file version. It belongs to exactly one entry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Version {
+    pub id: VersionId,
+    pub entry: EntryId,
+    pub size: u64,
+    pub author: String,
+    pub created_ms: i64,
+    pub chunks: Vec<ChunkRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum Request {
+    Whoami,
+    /// Creates a space with the caller as its admin.
+    CreateSpace {
+        space: String,
+    },
+    /// Copies `space`'s namespace, ACLs and head versions into a new space
+    /// `name`. No chunk bytes are copied. Needs admin on `space`.
+    Fork {
+        space: String,
+        name: String,
+    },
+    Stat {
+        space: String,
+        path: SpacePath,
+    },
+    List {
+        space: String,
+        path: SpacePath,
+    },
+    /// The entry and its head version, including the chunk list.
+    Open {
+        space: String,
+        path: SpacePath,
+    },
+    /// Presigned download URLs for chunks of `version`, by chunk index.
+    /// `version` must belong to the entry at `path`.
+    Grant {
+        space: String,
+        path: SpacePath,
+        version: VersionId,
+        chunks: Vec<u32>,
+    },
+    /// Creates an empty file entry with no version yet.
+    Create {
+        space: String,
+        path: SpacePath,
+        mode: u32,
+    },
+    Mkdir {
+        space: String,
+        path: SpacePath,
+        mode: u32,
+    },
+    Symlink {
+        space: String,
+        path: SpacePath,
+        target: String,
+    },
+    /// Removes a file, a symlink or an empty directory.
+    Remove {
+        space: String,
+        path: SpacePath,
+    },
+    /// Moves an entry, or a directory with its subtree, in one step.
+    /// Replaces an existing file, or an empty directory, at `to`.
+    Rename {
+        space: String,
+        from: SpacePath,
+        to: SpacePath,
+    },
+    SetAttr {
+        space: String,
+        path: SpacePath,
+        mode: Option<u32>,
+        mtime_ms: Option<i64>,
+    },
+    /// Makes `chunks` the entry's new head version. Every chunk must be in
+    /// `base` or uploaded by the caller. A `guarded` commit fails with
+    /// `Conflict` unless the head is still `base`. Retrying with the same
+    /// `request_id` returns the first result instead of committing again.
+    Commit {
+        space: String,
+        entry: EntryId,
+        request_id: String,
+        base: Option<VersionId>,
+        guarded: bool,
+        chunks: Vec<ChunkRef>,
+    },
+    /// All versions of the entry at `path`, oldest first.
+    History {
+        space: String,
+        path: SpacePath,
+    },
+    /// Makes an old version of the entry the new head, as a new version.
+    Restore {
+        space: String,
+        path: SpacePath,
+        version: VersionId,
+    },
+    /// Sets `principal`'s access on `path` and below; `None` removes it.
+    /// Principals are `user:<sub>` or `group:<name>`.
+    SetAcl {
+        space: String,
+        path: SpacePath,
+        principal: String,
+        perm: Option<Perm>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Response {
+    Me { principal: String, groups: Vec<String> },
+    Entry { entry: Entry },
+    Entries { entries: Vec<Entry> },
+    Opened { entry: Entry, version: Option<Version> },
+    Grants { urls: Vec<String>, expires_ms: i64 },
+    Version { version: Version },
+    History { versions: Vec<Version> },
+    Done,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[error("{code:?}: {message}")]
+pub struct Error {
+    pub code: ErrorCode,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    NotFound,
+    Exists,
+    NotEmpty,
+    NotDir,
+    IsDir,
+    Denied,
+    Unauthenticated,
+    Conflict,
+    Invalid,
+    Unavailable,
+}
+
+impl Error {
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requests_are_tagged_by_op() {
+        let request = Request::Stat {
+            space: "team".into(),
+            path: SpacePath::try_from("a/b").unwrap(),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"op": "stat", "space": "team", "path": "a/b"})
+        );
+        assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
+    }
+
+    #[test]
+    fn invalid_paths_fail_to_decode() {
+        let json = serde_json::json!({"op": "stat", "space": "team", "path": "../etc"});
+        assert!(serde_json::from_value::<Request>(json).is_err());
+    }
+}
