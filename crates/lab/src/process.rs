@@ -12,6 +12,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 pub(crate) const AUTHORITY: &str = "herdfs-authority";
 pub(crate) const CLIENT: &str = "herdfs";
+pub(crate) const AGENTS: &str = "herdfs-agents";
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(50);

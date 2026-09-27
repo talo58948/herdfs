@@ -16,6 +16,7 @@ mod toxiproxy;
 use std::env;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
+use std::process::Command;
 
 use anyhow::Result;
 use herdfs_core::SpacePath;
@@ -28,6 +29,7 @@ use tempfile::TempDir;
 use crate::authority::Authority;
 use crate::client::{Client, ClientSpec};
 use crate::issuer::Issuer;
+use crate::process::Proc;
 use crate::store::{S3_HOST, Store};
 use crate::toxiproxy::Toxiproxy;
 
@@ -45,6 +47,7 @@ pub const ADMIN: &str = "admin";
 #[derive(Default)]
 pub struct LabConfig {
     clients: Vec<ClientSpec>,
+    on_tmpfs: bool,
 }
 
 impl LabConfig {
@@ -71,11 +74,18 @@ impl LabConfig {
         });
         self
     }
+
+    /// Keeps the lab's directory in `/dev/shm`, so that many changes do not each wait on fsync.
+    pub fn on_tmpfs(mut self) -> Self {
+        self.on_tmpfs = true;
+        self
+    }
 }
 
 /// A running lab. Dropping it tears everything down.
 pub struct Lab {
-    // Fields drop in order: mounts before the services they use, the directory last.
+    // Fields drop in order: plugins, then mounts, then the services they use, the directory last.
+    agents: Vec<Proc>,
     clients: Vec<Client>,
     authority: Authority,
     toxiproxy: Toxiproxy,
@@ -113,7 +123,11 @@ impl Lab {
     /// Starts MinIO, toxiproxy, the issuer and every client's proxies, but neither the
     /// authority nor any mount.
     pub fn start_infra(config: LabConfig) -> Result<Self> {
-        let mut dir = tempfile::Builder::new().prefix("herdfs-lab-").tempdir()?;
+        let parent = config.on_tmpfs.then(|| "/dev/shm".into());
+        let parent = parent.unwrap_or_else(env::temp_dir);
+        let mut dir = tempfile::Builder::new()
+            .prefix("herdfs-lab-")
+            .tempdir_in(parent)?;
         if env::var("LAB_KEEP").is_ok_and(|keep| keep == "1") {
             dir.disable_cleanup(true);
             eprintln!("lab: keeping {}", dir.path().display());
@@ -138,6 +152,7 @@ impl Lab {
             toxiproxy.add_links(&spec.name, client.ip, authority_port, store_port, spec.profile)?;
         }
         Ok(Self {
+            agents: Vec::new(),
             clients,
             authority: Authority::new(authority_port, http),
             toxiproxy,
@@ -170,6 +185,25 @@ impl Lab {
         let client = self.clients.iter_mut().find(|client| client.spec.name == name);
         let client = client.unwrap_or_else(|| no_client(name));
         client.start(&self.issuer, self.authority.port)
+    }
+
+    /// Mounts client `name` on `space` from now on, such as a fork, after killing it if it runs.
+    pub fn mount_space(&mut self, name: &str, space: &str) -> Result<()> {
+        space.clone_into(&mut self.client_mut(name).space);
+        self.restart_client(name)
+    }
+
+    /// Runs `herdfs-agents` for host `name` on client `name`'s mount until the lab is dropped.
+    pub fn start_agents(&mut self, name: &str, command: &str) -> Result<()> {
+        let client = self.client(name);
+        let mut runner = Command::new(process::binary(process::AGENTS)?);
+        runner
+            .arg("--mount")
+            .arg(&client.mount)
+            .args(["--host", name, "--command", command]);
+        let runner = Proc::spawn("agents", runner, &client.dir.join("agents.log"))?;
+        self.agents.push(runner);
+        Ok(())
     }
 
     pub fn mount_path(&self, name: &str) -> &Path {
@@ -250,9 +284,9 @@ impl Lab {
     }
 }
 
-/// Why [`Lab::start`] cannot run yet, if the authority or client binary is not built.
+/// Why the lab cannot run yet, if a workspace binary it runs is not built.
 pub fn missing_binaries() -> Option<String> {
-    [process::AUTHORITY, process::CLIENT]
+    [process::AUTHORITY, process::CLIENT, process::AGENTS]
         .into_iter()
         .find_map(|name| process::binary(name).err())
         .map(|error| error.to_string())

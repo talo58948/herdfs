@@ -51,6 +51,8 @@ pub(crate) struct ClientSpec {
 
 pub(crate) struct Client {
     pub(crate) spec: ClientSpec,
+    /// The space it mounts: [`SPACE`] unless a test chose another.
+    pub(crate) space: String,
     /// Where this client's proxies listen.
     pub(crate) ip: Ipv4Addr,
     /// Cache, journal, token file and log.
@@ -68,6 +70,7 @@ impl Client {
         }
         Ok(Self {
             spec,
+            space: SPACE.to_owned(),
             ip,
             dir,
             mount,
@@ -75,7 +78,7 @@ impl Client {
         })
     }
 
-    /// Mounts [`SPACE`] with a fresh token, after killing a running mount.
+    /// Mounts its space with a fresh token, after killing a running mount.
     pub(crate) fn start(&mut self, issuer: &Issuer, authority_port: u16) -> Result<()> {
         self.kill()?;
         let token = self.dir.join("token");
@@ -87,7 +90,7 @@ impl Client {
                 "--authority",
                 &format!("http://{}:{authority_port}", self.ip),
             ])
-            .args(["--space", SPACE, "--token-file"])
+            .args(["--space", &self.space, "--token-file"])
             .arg(token)
             .arg("--cache")
             .arg(self.dir.join("cache"))
