@@ -135,12 +135,9 @@ impl Fixture {
             id: ChunkId::of(bytes),
             len: u32::try_from(bytes.len()).unwrap(),
         };
-        self.authority
-            .may_upload(who, SPACE)
-            .map_err(|error| error.code)?;
-        self.authority
-            .record_upload(who, SPACE, chunk)
-            .map_err(|error| error.code)?;
+        self.now_ms += 1;
+        let recorded = self.authority.record_upload(who, SPACE, chunk, self.now_ms);
+        recorded.map_err(|error| error.code)?;
         Ok(chunk)
     }
 

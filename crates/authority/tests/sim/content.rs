@@ -214,12 +214,8 @@ impl Sim {
         let chunk = self.chunk();
         let principal = &self.actors[who];
         let want = self.model.upload_outcome(principal, space);
-        let asked = self
-            .authority
-            .may_upload(principal, space)
-            .map_err(|error| error.code);
-        assert_eq!(asked, want, "may {} upload to {space}", principal.user);
-        let got = self.authority.record_upload(principal, space, chunk);
+        self.now_ms += 1;
+        let got = self.authority.record_upload(principal, space, chunk, self.now_ms);
         assert_eq!(
             got.map_err(|error| error.code),
             want,

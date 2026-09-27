@@ -19,8 +19,6 @@ use rusqlite::Connection;
 
 /// How long a presigned chunk URL stays valid.
 const GRANT_TTL_MS: i64 = 5 * 60 * 1000;
-/// The clock of calls that read none: upload bookkeeping.
-const NO_CLOCK: i64 = 0;
 
 /// An authenticated caller.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,12 +63,6 @@ impl Authority {
         self.transact(who, now_ms, |call| call.dispatch(request))
     }
 
-    /// Fails unless `who` may upload to `space`, which takes write on some
-    /// path there. The server asks before it stores any bytes.
-    pub fn may_upload(&mut self, who: &Principal, space: &str) -> Result<(), proto::Error> {
-        self.transact(who, NO_CLOCK, |call| call.may_upload(space))
-    }
-
     /// Records that `who` uploaded `chunk`, so their commits may reference it
     /// at that length.
     pub fn record_upload(
@@ -78,8 +70,9 @@ impl Authority {
         who: &Principal,
         space: &str,
         chunk: ChunkRef,
+        now_ms: i64,
     ) -> Result<(), proto::Error> {
-        self.transact(who, NO_CLOCK, |call| call.record_upload(space, chunk))
+        self.transact(who, now_ms, |call| call.record_upload(space, chunk))
     }
 
     fn transact<T>(
