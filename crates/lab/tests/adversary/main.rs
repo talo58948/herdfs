@@ -14,6 +14,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail, ensure};
+use herdfs_core::chunk::MAX_CHUNK;
 use herdfs_core::proto::{EntryId, Perm, Request, Response, Version, VersionId};
 use herdfs_core::{ChunkRef, SpacePath};
 use herdfs_lab::{ADMIN, Hit, Lab, LabConfig, Profile, SPACE, Strategy, canary, sweep};
@@ -24,11 +25,12 @@ use serde_json::Value;
 /// Client and user names are the same.
 const ALICE: &str = "alice";
 const BOB: &str = "bob";
-const SECRET_LEN: usize = 3 << 20;
+/// Longer than a chunk can be, so it always has several.
+const SECRET_LEN: usize = MAX_CHUNK + (1 << 20);
 /// Every run of this many bytes of a secret starts with its canary.
 const CANARY_EVERY: usize = 1024;
-/// Several chunks, so attacks can mix them up.
-const PLAN_LEN: usize = 6 << 20;
+/// Longer than two chunks can be, so attacks have three to mix up.
+const PLAN_LEN: usize = 2 * MAX_CHUNK + (1 << 20);
 
 /// A committed file and the version the attacks aim at.
 struct Target {

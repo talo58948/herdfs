@@ -164,6 +164,9 @@ fn an_outstanding_grant_url_dies_with_its_ttl() -> Result<()> {
     Ok(())
 }
 
+/// The attacker forges bob's cache files before bob reads. A chunk the client already holds in
+/// memory is not read from disk again until it restarts, and bob cannot restart in this scene
+/// (see `bob_mounts_with_access_below_the_root_only`).
 // contract: C11
 #[test]
 fn a_tampered_cached_chunk_is_refetched() -> Result<()> {
@@ -171,26 +174,21 @@ fn a_tampered_cached_chunk_is_refetched() -> Result<()> {
         return Ok(());
     };
     let (plan, file) = (&scene.plan, scene.bob_mount("eng/plan.txt"));
-    assert_same(&fs::read(&file)?, &plan.bytes, "the plan");
     let cache = scene.lab.client_dir(BOB).join("cache");
     let cached = |index: usize| cache.join(plan.version.chunks[index].id.to_string());
     // Other bytes of the right length, a truncation, and a genuine chunk under another's name.
     fs::write(cached(0), vec![0; plan.chunk(0).len()])?;
     fs::write(cached(1), &plan.chunk(1)[..plan.chunk(1).len() / 2])?;
     fs::write(cached(2), plan.chunk(0))?;
-    let fetched = || -> Result<u64> {
-        let stats = scene.lab.stats(BOB)?;
-        stats["chunks_fetched"]
-            .as_u64()
-            .context("stats count fetched chunks")
-    };
-    let before = fetched()?;
-    assert_same(&fs::read(&file)?, &plan.bytes, "the plan after tampering");
-    // At least: concurrent reads of one chunk may fetch it twice.
-    let refetched = fetched()? - before;
+    assert_same(&fs::read(&file)?, &plan.bytes, "the plan read over forged chunks");
+    let stats = scene.lab.stats(BOB)?;
+    let fetched = stats["chunks_fetched"]
+        .as_u64()
+        .context("stats count fetched chunks")?;
+    let chunks = plan.version.chunks.len() as u64;
     assert!(
-        refetched >= 3,
-        "{refetched} chunks fetched again, not each tampered one"
+        fetched >= chunks,
+        "{fetched} of {chunks} chunks fetched: a forged one was served"
     );
     for index in 0..3 {
         assert_same(
