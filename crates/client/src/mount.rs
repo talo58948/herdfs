@@ -9,10 +9,11 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::fs::{Fuse, Space};
 use crate::journal::{Committer, Journal};
-use crate::{cache::Cache, remote::Remote, stats::Stats, strategy::Decider};
+use crate::strategy::{Decider, Jev, StrategyArg};
+use crate::{cache::Cache, remote::Remote, stats::Stats};
 
 /// Flags of `herdfs mount`.
-#[derive(Debug, clap::Args)]
+#[derive(clap::Args)]
 pub struct MountArgs {
     /// Authority base URL, e.g. http://127.0.0.1:7000.
     #[arg(long)]
@@ -32,9 +33,15 @@ pub struct MountArgs {
     /// Directory for writes not yet committed.
     #[arg(long)]
     journal: PathBuf,
-    /// stream, fetch, pin, rule (fetch below 64 MiB, else stream) or chaos:SEED.
+    /// stream, fetch, pin, rule (fetch below 64 MiB, else stream), chaos:SEED or jev.
     #[arg(long, default_value = "rule")]
-    strategy: Decider,
+    strategy: StrategyArg,
+    /// File holding the Vercel AI Gateway key, for `--strategy jev`.
+    #[arg(long, required_if_eq("strategy", "jev"))]
+    jev_key_file: Option<PathBuf>,
+    /// Jev's evaluation endpoint.
+    #[arg(long, default_value = "https://ai-gateway.vercel.sh/v1/evaluate")]
+    jev_url: String,
     /// HOST=IP: connect to IP for HOST, keeping the URL's port and host, like curl's --resolve.
     #[arg(long, value_parser = parse_resolve)]
     resolve: Vec<(String, IpAddr)>,
@@ -87,7 +94,17 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
         stats: stats.clone(),
     };
     tokio::spawn(Arc::new(committer).run(woken));
-    let space = Space::new(remote, cache, journal, stats, args.strategy.clone(), root.id)?;
+    let decider = match &args.strategy {
+        StrategyArg::Decider(decider) => decider.clone(),
+        StrategyArg::Jev => {
+            let key_file = args.jev_key_file.as_ref();
+            let key_file = key_file.context("--strategy jev needs --jev-key-file")?;
+            let jev = Jev::new(key_file, &args.jev_url);
+            let jev = jev.with_context(|| format!("reading the Jev key file {}", key_file.display()))?;
+            Decider::Jev(Arc::new(jev), stats.clone())
+        }
+    };
+    let space = Space::new(remote, cache, journal, stats, decider, root.id)?;
     Ok(Arc::new(space))
 }
 

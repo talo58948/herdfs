@@ -2,7 +2,7 @@
 //! here, so all of them return the same bytes (C8).
 
 use std::sync::{Arc, Mutex};
-use std::{collections::HashMap, fs::File, io::Write, time::SystemTime};
+use std::{collections::HashMap, fs::File, io::Write, time::Instant, time::SystemTime};
 
 use futures::{StreamExt, TryStreamExt, stream};
 use herdfs_core::proto::{Version, VersionId};
@@ -20,6 +20,10 @@ const GRANT_MARGIN_MS: i64 = 10_000;
 /// Verified chunks kept in memory, so the FUSE reads within one chunk do not each re-read
 /// and re-hash it from disk.
 const MEMORY_BYTES: u64 = 64 << 20;
+/// Download throughput assumed until one is measured, in bytes per second.
+const FIRST_THROUGHPUT: f64 = 10e6;
+/// How much each measured download moves the throughput average.
+const THROUGHPUT_WEIGHT: f64 = 0.2;
 
 /// Chunk bytes by id, as one read gathers them.
 type Found = HashMap<ChunkId, Arc<Vec<u8>>>;
@@ -52,6 +56,8 @@ pub struct Reader {
     grants: Mutex<HashMap<(VersionId, usize), (String, i64)>>,
     /// A lock per chunk being fetched, so concurrent reads download it once.
     fetching: Mutex<HashMap<ChunkId, Arc<FetchLock<()>>>>,
+    /// Download throughput in bytes per second, a moving average over fetches.
+    pub throughput: Mutex<f64>,
 }
 
 impl Reader {
@@ -64,6 +70,7 @@ impl Reader {
             memory,
             grants,
             fetching,
+            throughput: Mutex::new(FIRST_THROUGHPUT),
         }
     }
 
@@ -221,6 +228,7 @@ impl Reader {
     /// Grants and downloads chunks of `file`, verifying each against its id.
     async fn fetch(&self, file: &OpenVersion, path: &SpacePath, indices: Vec<usize>) -> Fetched {
         let urls = self.urls(file, path, &indices).await?;
+        let started = Instant::now();
         let downloads = indices.into_iter().zip(urls).map(|(index, url)| async move {
             let chunk = self.remote.download(&url, file.version.chunks[index]).await;
             if chunk.is_err() {
@@ -230,6 +238,10 @@ impl Reader {
         });
         let chunks: Vec<Vec<u8>> = stream::iter(downloads).buffered(DOWNLOADS).try_collect().await?;
         let bytes: usize = chunks.iter().map(Vec::len).sum();
+        if bytes > 0 {
+            let (mut average, seconds) = (lock(&self.throughput), started.elapsed().as_secs_f64());
+            *average += THROUGHPUT_WEIGHT * (bytes as f64 / seconds - *average);
+        }
         bump(&self.stats.chunks_fetched, chunks.len() as u64);
         bump(&self.stats.bytes_fetched, bytes as u64);
         Ok(chunks)

@@ -15,6 +15,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use mount::{MountArgs, mount};
+pub use strategy::{Jev, OpenContext, Strategy};
 
 /// Locks `mutex` even if a panicking request poisoned it, so one bug fails one request
 /// instead of the whole mount.

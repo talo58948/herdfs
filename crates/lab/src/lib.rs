@@ -13,9 +13,9 @@ mod store;
 mod sweep;
 mod toxiproxy;
 
-use std::env;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
+use std::{env, fs};
 
 use anyhow::Result;
 use herdfs_core::SpacePath;
@@ -170,6 +170,14 @@ impl Lab {
         let client = self.clients.iter_mut().find(|client| client.spec.name == name);
         let client = client.unwrap_or_else(|| no_client(name));
         client.start(&self.issuer, self.authority.port)
+    }
+
+    /// Mounts client `name` again with an empty cache, after killing it if it runs.
+    pub fn restart_client_cold(&mut self, name: &str) -> Result<()> {
+        self.kill_client(name)?;
+        // The client makes its cache directory again when it starts.
+        fs::remove_dir_all(self.client_dir(name).join("cache"))?;
+        self.restart_client(name)
     }
 
     pub fn mount_path(&self, name: &str) -> &Path {

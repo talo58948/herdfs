@@ -1,7 +1,7 @@
 //! Open files: reads through the journal copy or the chunk cache, writes into the journal.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::{Arc, Mutex};
 use std::{ffi::OsString, fs::File, io, os::unix::fs::FileExt, path::Path};
 
 use fuser::{Errno, FileAttr, INodeNo, OpenAccMode, OpenFlags};
@@ -9,7 +9,7 @@ use herdfs_core::proto::{EntryId, Version};
 use herdfs_core::{ChunkId, SpacePath};
 
 use super::{PERMISSIONS, Space};
-use crate::strategy::{OpenContext, Strategy};
+use crate::strategy::{OpenContext, Strategy, Upgrade};
 use crate::{error::Error, journal::Registration, lock, reader::OpenVersion};
 
 pub struct Handle {
@@ -19,7 +19,8 @@ pub struct Handle {
     writable: bool,
     /// Written since the journal copy was last sealed.
     dirty: AtomicBool,
-    pinned: Vec<ChunkId>,
+    /// Chunks this handle pinned, which release unpins.
+    pinned: Mutex<Vec<ChunkId>>,
     _registration: Registration,
 }
 
@@ -30,7 +31,7 @@ impl Handle {
             content: None,
             writable,
             dirty: AtomicBool::new(false),
-            pinned: Vec::new(),
+            pinned: Mutex::default(),
             _registration: registration,
         }
     }
@@ -41,15 +42,20 @@ impl Space {
         let (entry, path) = (self.entry_id(ino), self.path(ino)?);
         let writable = flags.acc_mode() != OpenAccMode::O_RDONLY;
         let mut handle = Handle::new(entry, writable, self.journal.opened(entry));
+        let mut upgrade = None;
         if writable {
             let truncate = flags.0 & libc::O_TRUNC != 0;
             self.writable(entry, &path, truncate).await?;
             handle.dirty = truncate.into();
         } else if self.journal.copy(entry).is_none() {
-            let content = self.head(entry, &path).await?.map(OpenVersion::new);
-            handle.content = content.map(|content| self.start(content, &path, pid, &mut handle.pinned));
+            let head = self.head(entry, &path).await?;
+            upgrade = head.and_then(|head| self.start(OpenVersion::new(head), &path, pid, &mut handle));
         }
-        Ok(self.register(handle))
+        let fh = self.register(handle);
+        if let Some(upgrade) = upgrade {
+            tokio::spawn(self.upgrade(fh, upgrade, path));
+        }
+        Ok(fh)
     }
 
     /// Creates an empty file and opens it for writing through a fresh journal copy.
@@ -102,7 +108,7 @@ impl Space {
         let Some(handle) = lock(&self.handles).remove(&fh) else {
             return Ok(());
         };
-        self.cache.unpin(&handle.pinned);
+        self.cache.unpin(&lock(&handle.pinned));
         self.seal(&handle)
     }
 
@@ -163,42 +169,55 @@ impl Space {
         Ok(head)
     }
 
-    /// Decides the access strategy for this open (P1) and starts its prefetch.
-    fn start(
-        &self,
-        content: OpenVersion,
-        path: &SpacePath,
-        pid: u32,
-        pinned: &mut Vec<ChunkId>,
-    ) -> Arc<OpenVersion> {
+    /// Decides the access strategy for this open (P1), begins it, and gives the handle its file.
+    fn start(&self, file: OpenVersion, path: &SpacePath, pid: u32, handle: &mut Handle) -> Option<Upgrade> {
         let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
         let extension = Path::new(path.name()).extension();
         let context = OpenContext {
-            size: content.version.size,
+            size: file.version.size,
             extension: extension.map(|extension| extension.to_string_lossy().into()),
             comm: comm.trim_end().to_owned(),
-            coverage: self.cache.coverage(&content.version.chunks),
+            coverage: self.cache.coverage(&file.version.chunks),
+            throughput: *lock(&self.reader.throughput),
         };
-        let strategy = lock(&self.decider).decide(&context);
+        let (strategy, upgrade) = lock(&self.decider).decide(&context);
         self.stats.decided(strategy);
         tracing::debug!(
             %path, ?strategy, size = context.size, extension = ?context.extension,
             comm = context.comm, coverage = context.coverage, "access strategy"
         );
-        let content = Arc::new(content);
+        let file = Arc::new(file);
+        self.begin(strategy, &file, path, handle);
+        handle.content = Some(file);
+        upgrade
+    }
+
+    /// Pins every chunk for Pin, and prefetches them in the background for Fetch and Pin.
+    fn begin(&self, strategy: Strategy, file: &Arc<OpenVersion>, path: &SpacePath, handle: &Handle) {
         if strategy == Strategy::Pin {
-            *pinned = content.version.chunks.iter().map(|chunk| chunk.id).collect();
-            self.cache.pin(pinned);
+            let mut pinned = lock(&handle.pinned);
+            *pinned = file.version.chunks.iter().map(|chunk| chunk.id).collect();
+            self.cache.pin(&pinned);
         }
         if strategy != Strategy::Stream {
-            let (reader, content, path) = (self.reader.clone(), content.clone(), path.clone());
+            let (reader, file, path) = (self.reader.clone(), file.clone(), path.clone());
             tokio::spawn(async move {
-                if let Err(err) = reader.prefetch(&content, &path).await {
+                if let Err(err) = reader.prefetch(&file, &path).await {
                     tracing::warn!(%err, %path, "prefetch failed");
                 }
             });
         }
-        content
+    }
+
+    /// Begins the strategy Jev chose after the open, unless the handle is closed by then.
+    async fn upgrade(self: Arc<Self>, fh: u64, upgrade: Upgrade, path: SpacePath) {
+        // Pinning under the handles lock: release either comes later and unpins, or came first.
+        if let Ok(strategy) = upgrade.await
+            && let Some(handle) = lock(&self.handles).get(&fh)
+            && let Some(file) = &handle.content
+        {
+            self.begin(strategy, file, &path, handle);
+        }
     }
 
     /// Persists the handle's writes, if any since the last seal, for the committer.
