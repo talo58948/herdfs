@@ -20,7 +20,7 @@ Every test names the lines it checks with a `// contract: C9, S2` comment. Code 
 | C9 | A cold read of `[off, off+len)` fetches at most the chunks overlapping that range, plus configured prefetch. |
 | C10 | Mounting a space uses local disk proportional to metadata and cache, not to data size. |
 | C11 | The cache never serves bytes of a different version. A tampered cached chunk fails its hash and is refetched. |
-| C12 | Writes made offline are journaled and committed on reconnect, under C5. |
+| C12 | Content writes made offline to existing files are journaled and committed on reconnect, under C5. Namespace changes (create, mkdir, rename, remove) need the authority and fail with `EIO` while it is unreachable. |
 | C13 | A fork copies no chunk bytes, includes all commits acknowledged before it, and is isolated from its parent afterwards. Its time grows with entry count only (≤ 1 s per 100k entries). |
 | C14 | Any version in an entry's history is readable. Restore creates a new head and keeps history. |
 
@@ -33,7 +33,7 @@ Every test names the lines it checks with a `// contract: C9, S2` comment. Code 
 | S3 | Root on a client gets no bytes beyond what that client's principal was granted. |
 | S4 | Revocation stops new grants immediately; outstanding grants die within the TTL. |
 | S5 | Tokens are checked for signature, `iss`, `aud` and `exp`; `alg=none` and unknown keys are rejected. |
-| S6 | Whether bytes exist anywhere in the store is not observable: uploads always happen, and commits may reference only chunks from a readable base or uploaded by the committer. |
+| S6 | Whether bytes exist anywhere in the store is not observable through the protocol: uploads always happen and get identical answers, and commits may reference only chunks from a readable base or uploaded by the committer. Known residual: the store's write latency can differ for bytes it already holds (measured median +4 ms of 52 ms on MinIO), which the R4 timing test bounds. |
 
 ## Strategy and plugins
 

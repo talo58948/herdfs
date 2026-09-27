@@ -13,7 +13,8 @@ use crate::process::{self, Proc};
 use crate::store::S3_HOST;
 use crate::{Profile, SPACE};
 
-const CACHE_BYTES: u64 = 1 << 30;
+/// The cache limit of a client unless [`crate::LabConfig::cache_bytes`] sets another.
+pub(crate) const CACHE_BYTES: u64 = 1 << 30;
 const STATS_XATTR: &str = "user.herdfs.stats";
 
 /// The access strategy a client's mount uses (`--strategy`).
@@ -47,10 +48,13 @@ pub(crate) struct ClientSpec {
     pub(crate) groups: Vec<String>,
     pub(crate) profile: Profile,
     pub(crate) strategy: Strategy,
+    pub(crate) cache_bytes: u64,
 }
 
 pub(crate) struct Client {
     pub(crate) spec: ClientSpec,
+    /// The space it mounts: [`SPACE`] unless a test chose another.
+    pub(crate) space: String,
     /// Where this client's proxies listen.
     pub(crate) ip: Ipv4Addr,
     /// Cache, journal, token file and log.
@@ -68,6 +72,7 @@ impl Client {
         }
         Ok(Self {
             spec,
+            space: SPACE.to_owned(),
             ip,
             dir,
             mount,
@@ -75,23 +80,24 @@ impl Client {
         })
     }
 
-    /// Mounts [`SPACE`] with a fresh token, after killing a running mount.
+    /// The authority's base URL through this client's link.
+    pub(crate) fn authority_url(&self, authority_port: u16) -> String {
+        format!("http://{}:{authority_port}", self.ip)
+    }
+
+    /// Mounts its space with a fresh token, after killing a running mount.
     pub(crate) fn start(&mut self, issuer: &Issuer, authority_port: u16) -> Result<()> {
         self.kill()?;
         let token = self.dir.join("token");
         fs::write(&token, issuer.token(&self.spec.user, &self.spec.groups))?;
         let mut command = Command::new(process::binary(process::CLIENT)?);
         command
-            .args([
-                "mount",
-                "--authority",
-                &format!("http://{}:{authority_port}", self.ip),
-            ])
-            .args(["--space", SPACE, "--token-file"])
+            .args(["mount", "--authority", &self.authority_url(authority_port)])
+            .args(["--space", &self.space, "--token-file"])
             .arg(token)
             .arg("--cache")
             .arg(self.dir.join("cache"))
-            .args(["--cache-bytes", &CACHE_BYTES.to_string(), "--journal"])
+            .args(["--cache-bytes", &self.spec.cache_bytes.to_string(), "--journal"])
             .arg(self.dir.join("journal"))
             .args(["--strategy", &self.spec.strategy.arg()])
             .args(["--resolve", &format!("{S3_HOST}={}", self.ip)])
@@ -118,6 +124,10 @@ impl Client {
             self.mount.display()
         );
         Ok(())
+    }
+
+    pub(crate) fn pid(&self) -> Option<u32> {
+        self.process.as_ref().map(Proc::id)
     }
 
     pub(crate) fn stats(&self) -> Result<Value> {

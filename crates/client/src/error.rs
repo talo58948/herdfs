@@ -51,6 +51,12 @@ impl Error {
         }
     }
 
+    /// True when the authority could not be reached, rather than refusing.
+    pub fn is_offline(&self) -> bool {
+        matches!(self, Self::Network(_))
+            || matches!(self, Self::Api(error) if error.code == ErrorCode::Unavailable)
+    }
+
     /// True when the authority refused for good, so retrying cannot help.
     pub fn is_final(&self) -> bool {
         matches!(self, Self::Api(error)

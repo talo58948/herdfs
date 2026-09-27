@@ -33,6 +33,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 xattr = "1"
 
+# The lab times the authority's SQL against contract C13; SQLite built at -O0 runs it 3x slower.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 
