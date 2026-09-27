@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use herdfs_authority::Outcome;
+use herdfs_authority::{Outcome, Principal};
 use herdfs_core::{
     SpacePath,
     proto::{Entry, EntryId, ErrorCode, Kind, Perm, Request, Response, Version, VersionId},
@@ -138,6 +138,24 @@ impl Sim {
                 Err(ErrorCode::NotFound),
                 "{old} stayed"
             );
+        }
+    }
+
+    /// After a refused request by id: `Commit` names its entry only by id.
+    pub fn check_refusal(&self, who: &Principal, message: &str) {
+        for (space, known) in &self.model.spaces {
+            let hidden = known
+                .nodes
+                .keys()
+                .filter(|path| self.model.perm(space, path, who) < Some(Perm::Read));
+            for path in hidden.filter(|path| !path.is_root()) {
+                // contract: S3 — a refusal of a request by id names no path the caller cannot read.
+                assert!(
+                    !message.contains(path.as_str()),
+                    "{} was told {message:?}",
+                    who.user
+                );
+            }
         }
     }
 

@@ -123,6 +123,10 @@ impl Model {
                 self.require(who, space, &SpacePath::root(), Perm::Admin)?;
                 self.new_space(name)
             }
+            Request::Stat { space, path } if path.is_root() => {
+                self.require_somewhere(who, space, Perm::Read)?;
+                self.node(space, path).map(drop)
+            }
             Request::Stat { space, path }
             | Request::Open { space, path }
             | Request::History { space, path } => {
@@ -194,14 +198,18 @@ impl Model {
 
     /// Uploads need write on some path of the space.
     pub fn upload_outcome(&self, who: &Principal, space: &str) -> Outcome {
+        self.require_somewhere(who, space, Perm::Write)
+    }
+
+    fn require_somewhere(&self, who: &Principal, space: &str, need: Perm) -> Outcome {
         let acl = &self.space(space)?.acl;
         let mine = |principal: &String| {
             *principal == who.user || who.groups.iter().any(|g| *principal == format!("group:{g}"))
         };
-        let writes = acl
+        let holds = acl
             .iter()
-            .any(|((_, principal), perm)| mine(principal) && *perm >= Perm::Write);
-        ensure(writes, ErrorCode::Denied)
+            .any(|((_, principal), perm)| mine(principal) && *perm >= need);
+        ensure(holds, ErrorCode::Denied)
     }
 
     fn new_space(&self, name: &str) -> Outcome {

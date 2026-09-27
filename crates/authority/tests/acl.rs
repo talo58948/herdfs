@@ -78,3 +78,36 @@ fn uploads_need_write_somewhere_in_the_space() {
     fx.set_acl("deep/down", "user:bob", Some(Perm::Write));
     assert!(fx.upload(&bob(), b"x").is_ok());
 }
+
+#[test]
+fn a_refused_commit_by_entry_id_names_no_hidden_path() {
+    // contract: S3
+    let mut fx = Fixture::new();
+    fx.mkdir(&alice(), "finance").unwrap();
+    let (file, _) = fx.file("finance/salaries", b"x");
+    let commit = Request::Commit {
+        space: SPACE.into(),
+        entry: file.id,
+        request_id: "probe".into(),
+        base: None,
+        guarded: false,
+        chunks: vec![],
+    };
+    let refused = fx.authority.handle(&bob(), commit, 0).unwrap_err();
+    assert_eq!(refused.code, ErrorCode::Denied);
+    assert!(!refused.message.contains("finance"), "{refused:?}");
+}
+
+#[test]
+fn any_grant_in_a_space_shows_its_root_but_listing_it_needs_read() {
+    let mut fx = Fixture::new();
+    fx.mkdir(&alice(), "eng").unwrap();
+    fx.set_acl("eng", "group:eng", Some(Perm::Read));
+    assert!(fx.stat(&carol(), "").is_ok());
+    let list = Request::List {
+        space: SPACE.into(),
+        path: path(""),
+    };
+    assert_eq!(fx.call(&carol(), list), Err(ErrorCode::Denied));
+    assert_eq!(fx.stat(&bob(), ""), Err(ErrorCode::Denied));
+}

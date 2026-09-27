@@ -17,7 +17,12 @@ pub(crate) const SYMLINK_MODE: u32 = 0o777;
 
 impl Call<'_> {
     pub(crate) fn stat(&self, space: &str, path: &SpacePath) -> Result<Response> {
-        self.require(space, path, Perm::Read)?;
+        // Any grant in the space shows its root, so a principal can mount above what it may read.
+        if path.is_root() {
+            self.require_somewhere(space, Perm::Read)?;
+        } else {
+            self.require(space, path, Perm::Read)?;
+        }
         Ok(Response::Entry {
             entry: self.entry(space, path)?,
         })
