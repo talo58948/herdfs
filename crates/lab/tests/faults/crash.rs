@@ -181,7 +181,6 @@ fn a_rewrite_while_a_closed_write_commits_publishes_only_whole_versions() -> Res
 /// minimal repro of the partial reads `f1_a_client_killed_before_its_commit_lands` meets.
 // contract: C3
 #[test]
-#[ignore = "BUG: an open that finds a longer version can read only the old length, so readers see partial versions"]
 fn a_reader_sees_a_file_that_grows_whole() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
@@ -202,7 +201,6 @@ fn a_reader_sees_a_file_that_grows_whole() -> Result<()> {
 
 // contract: C4a, C3
 #[test]
-#[ignore = "BUG: an open that finds a longer version can read only the old length, so readers see partial versions"]
 fn f1_a_client_killed_before_its_commit_lands_commits_after_restart() -> Result<()> {
     let Some(mut lab) = two_clients()? else {
         return Ok(());

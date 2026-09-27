@@ -1,4 +1,5 @@
-//! Product bugs pjdfstest found, each reduced to an ignored test that fails until it is fixed.
+//! Product bugs pjdfstest found, each reduced to a test: ignored while the bug stands, run once
+//! it is fixed.
 //! contract: none; these are POSIX behaviors, and the errors docs/architecture.md promises for
 //! features out of v0.
 
@@ -15,24 +16,6 @@ use crate::lab;
 
 /// The pjdfstest tests each bug fails, keyed by the test below that reproduces it.
 pub const BUGS: &[(&str, &[&str])] = &[
-    (
-        "an_overlong_name_fails_with_enametoolong",
-        &[
-            "chmod::enametoolong_component",
-            "chown::enametoolong_component",
-            "chown::lchown::enametoolong_component",
-            "link::enametoolong_component",
-            "mkdir::enametoolong_component",
-            "mkfifo::enametoolong_component",
-            "mknod::enametoolong_component",
-            "open::enametoolong_component",
-            "rename::enametoolong_component",
-            "rmdir::enametoolong_component",
-            "symlink::enametoolong_component",
-            "truncate::enametoolong_component",
-            "unlink::enametoolong_component",
-        ],
-    ),
     (
         "a_set_atime_sticks",
         &[
@@ -68,7 +51,6 @@ const TICK: Duration = Duration::from_millis(10);
 const VISIBLE_AFTER: Duration = Duration::from_millis(1_200);
 
 #[test]
-#[ignore = "BUG: a name over 255 bytes fails with EINVAL, not ENAMETOOLONG"]
 fn an_overlong_name_fails_with_enametoolong() -> Result<()> {
     let Some(lab) = lab()? else { return Ok(()) };
     let error = fs::create_dir(lab.mount_path("a").join("n".repeat(256))).unwrap_err();
@@ -134,7 +116,6 @@ fn an_unlinked_open_file_stays_usable() -> Result<()> {
 }
 
 #[test]
-#[ignore = "BUG: creating a special file fails with ENOSYS, not the documented EPERM or ENOTSUP"]
 fn creating_a_special_file_fails_cleanly() -> Result<()> {
     let Some(lab) = lab()? else { return Ok(()) };
     let error = UnixListener::bind(lab.mount_path("a").join("socket")).unwrap_err();
@@ -146,7 +127,6 @@ fn creating_a_special_file_fails_cleanly() -> Result<()> {
 }
 
 #[test]
-#[ignore = "BUG: a commit sets mtime to the commit time, losing an mtime set after the write"]
 fn an_mtime_set_after_a_write_survives_its_commit() -> Result<()> {
     let Some(lab) = lab()? else { return Ok(()) };
     let path = lab.mount_path("a").join("copied");

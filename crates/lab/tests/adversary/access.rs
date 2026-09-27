@@ -59,7 +59,6 @@ fn bob_gets_no_grant_and_no_metadata_for_alices_files() -> Result<()> {
 /// Entry ids are not secret, but the names of alice's entries are: bob may not list `/finance`.
 // contract: S3
 #[test]
-#[ignore = "BUG: refusing a commit to an entry id names the entry's path, so ids enumerate hidden names"]
 fn probing_entry_ids_reveals_no_names() -> Result<()> {
     let Some(scene) = Scene::start()? else {
         return Ok(());

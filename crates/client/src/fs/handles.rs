@@ -111,7 +111,12 @@ impl Space {
     pub async fn fsync(self: Arc<Self>, fh: u64) -> Result<(), Error> {
         let handle = self.handle(fh)?;
         self.seal(&handle)?;
-        let Some((sealed, mut attempts)) = self.journal.pending(handle.entry) else {
+        self.committed(handle.entry).await
+    }
+
+    /// Waits for the commit of the entry's pending write, if any. EIO if that attempt fails.
+    pub(super) async fn committed(&self, entry: EntryId) -> Result<(), Error> {
+        let Some((sealed, mut attempts)) = self.journal.pending(entry) else {
             return Ok(());
         };
         let attempt = attempts.wait_for(|(covered, _)| *covered >= sealed).await;
@@ -174,7 +179,17 @@ impl Space {
         if heads.len() > RECENT_LIMIT {
             heads.clear();
         }
-        heads.insert(entry, head.clone());
+        let id = |head: &Option<Version>| head.as_ref().map(|version| version.id);
+        let seen = heads.insert(entry, head.clone()).map(|seen| id(&seen));
+        drop(heads);
+        // The kernel may still hold an older version's size and pages, and would serve a
+        // longer new one cut short (C3).
+        if seen != Some(id(&head))
+            && let Some(notifier) = self.notifier.get()
+            && let Err(err) = tokio::task::block_in_place(|| notifier.inval_inode(self.ino(entry), 0, 0))
+        {
+            tracing::debug!(%err, "could not invalidate the kernel's cache");
+        }
         Ok(head)
     }
 

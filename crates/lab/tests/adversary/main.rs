@@ -234,7 +234,6 @@ fn errno<T>(result: io::Result<T>) -> Option<i32> {
 
 // contract: S3
 #[test]
-#[ignore = "BUG: the client stats the space root when it mounts, so a principal without read on the root cannot mount"]
 fn bob_mounts_with_access_below_the_root_only() -> Result<()> {
     let Some(Scene { mut lab, plan, .. }) = Scene::start()? else {
         return Ok(());
