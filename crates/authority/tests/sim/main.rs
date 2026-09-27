@@ -10,17 +10,11 @@
     reason = "helpers outside #[test] fns are test code too"
 )]
 
-#[path = "sim/apply.rs"]
 mod apply;
-#[path = "sim/check.rs"]
 mod check;
-#[path = "sim/choose.rs"]
 mod choose;
-#[path = "sim/content.rs"]
 mod content;
-#[path = "sim/model.rs"]
 mod model;
-#[path = "sim/steps.rs"]
 mod steps;
 
 use std::{

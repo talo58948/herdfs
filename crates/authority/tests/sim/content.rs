@@ -35,7 +35,21 @@ impl Sim {
             chunks,
         };
         self.sent.push((who, request.clone()));
-        if let Ok(outcome) = self.exec(who, &request)
+        let acked = self.exec(who, &request);
+        if let (Ok(_), Request::Commit { chunks, .. }) = (&acked, &request) {
+            let true_len = |chunk: &ChunkRef| {
+                self.chunks
+                    .iter()
+                    .find(|made| made.id == chunk.id)
+                    .map(|made| made.len)
+            };
+            // contract: S6 — no acknowledged commit claims a length its chunk does not have.
+            assert!(
+                chunks.iter().all(|chunk| true_len(chunk) == Some(chunk.len)),
+                "{request:?} was acknowledged"
+            );
+        }
+        if let Ok(outcome) = acked
             && !guarded
         {
             self.check_head(&space, entry, version_of(&outcome));
@@ -71,14 +85,21 @@ impl Sim {
     }
 
     fn commit_chunk(&mut self, who: usize, space: &str, base_chunks: &[ChunkRef]) -> ChunkRef {
-        match self.rng.below(20) {
+        let chunk = match self.rng.below(20) {
             0..=11 => self.upload(who, space),
             12..=18 => self.rng.pick(base_chunks).unwrap_or_else(|| self.chunk()),
             _ => self
                 .rng
                 .pick(&self.chunks.clone())
                 .unwrap_or_else(|| self.chunk()),
-        }
+        };
+        // Sometimes the client claims a length the chunk does not have.
+        let len = if self.rng.chance(5) {
+            chunk.len + 1
+        } else {
+            chunk.len
+        };
+        ChunkRef { len, ..chunk }
     }
 
     /// Several principals commit guarded on the same head of one file.
@@ -193,10 +214,12 @@ impl Sim {
         let chunk = self.chunk();
         let principal = &self.actors[who];
         let want = self.model.upload_outcome(principal, space);
-        self.now_ms += 1;
-        let got = self
+        let asked = self
             .authority
-            .record_upload(principal, space, chunk.id, self.now_ms);
+            .may_upload(principal, space)
+            .map_err(|error| error.code);
+        assert_eq!(asked, want, "may {} upload to {space}", principal.user);
+        let got = self.authority.record_upload(principal, space, chunk);
         assert_eq!(
             got.map_err(|error| error.code),
             want,
@@ -204,7 +227,9 @@ impl Sim {
             principal.user
         );
         if want.is_ok() {
-            self.model.uploads.insert((principal.user.clone(), chunk.id));
+            self.model
+                .uploads
+                .insert((principal.user.clone(), chunk.id), chunk.len);
         }
         chunk
     }

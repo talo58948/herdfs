@@ -13,7 +13,7 @@ use herdfs_core::{ChunkId, chunk::MAX_CHUNK};
 use serde_json::{Value, json};
 
 #[tokio::test]
-async fn uploads_are_verified_always_written_then_committable() {
+async fn only_a_caller_who_may_upload_causes_a_store_write() {
     // contract: S6, S1
     let lab = Lab::start().await;
     let alice = lab.user("alice");
@@ -21,36 +21,46 @@ async fn uploads_are_verified_always_written_then_committable() {
         .await;
     let bytes = b"chunk bytes".to_vec();
     let id = ChunkId::of(&bytes);
-    let key = format!("herdfs/chunks/{id}");
-
-    let (status, error) = lab.upload(&alice, "team", id, b"other bytes".to_vec()).await;
-    assert_eq!(
-        (status, &error["code"]),
-        (StatusCode::BAD_REQUEST, &json!("invalid"))
-    );
-    assert_eq!(
-        lab.upload(&alice, "team", id, vec![0; MAX_CHUNK + 1]).await.0,
-        StatusCode::BAD_REQUEST
-    );
+    let refused = [
+        (
+            alice.as_str(),
+            "team",
+            b"other bytes".to_vec(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (&alice, "team", vec![0; MAX_CHUNK + 1], StatusCode::BAD_REQUEST),
+        ("bad", "team", bytes.clone(), StatusCode::UNAUTHORIZED),
+        (&lab.user("bob"), "team", bytes.clone(), StatusCode::FORBIDDEN),
+        (&alice, "nowhere", bytes.clone(), StatusCode::NOT_FOUND),
+    ];
+    for (token, space, body, status) in refused {
+        assert_eq!(lab.upload(token, space, id, body).await.0, status);
+    }
     assert!(lab.objects.lock().unwrap().is_empty());
+    // Every accepted upload is written, even of bytes already stored.
+    for _ in 0..2 {
+        let reply = lab.upload(&alice, "team", id, bytes.clone()).await;
+        assert_eq!(reply, (StatusCode::OK, json!({"type": "done"})));
+    }
     assert_eq!(
-        lab.upload("bad", "team", id, bytes.clone()).await.0,
-        StatusCode::UNAUTHORIZED
+        lab.objects.lock().unwrap().get(&format!("herdfs/chunks/{id}")),
+        Some(&2)
     );
+}
 
-    assert_eq!(
-        lab.upload(&alice, "team", id, bytes.clone()).await,
-        (StatusCode::OK, json!({"type": "done"}))
-    );
+#[tokio::test]
+async fn an_uploaded_chunk_is_committable_and_granted_on_the_public_endpoint() {
+    // contract: S6, S2, S1
+    let lab = Lab::start().await;
+    let alice = lab.user("alice");
+    lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
+        .await;
+    let bytes = b"chunk bytes".to_vec();
+    let id = ChunkId::of(&bytes);
+    let key = format!("herdfs/chunks/{id}");
     assert_eq!(
         lab.upload(&alice, "team", id, bytes.clone()).await.0,
         StatusCode::OK
-    );
-    assert_eq!(lab.objects.lock().unwrap().get(&key), Some(&2));
-    // Without write in the space, the bytes are still stored but not recorded as bob's.
-    assert_eq!(
-        lab.upload(&lab.user("bob"), "team", id, bytes.clone()).await.0,
-        StatusCode::FORBIDDEN
     );
 
     let (_, file) = lab

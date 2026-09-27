@@ -16,7 +16,8 @@ pub struct Model {
     pub versions: BTreeMap<VersionId, Version>,
     /// Every entry id ever handed out.
     pub entry_ids: BTreeSet<EntryId>,
-    pub uploads: BTreeSet<(String, ChunkId)>,
+    /// Each chunk a user uploaded, with its length.
+    pub uploads: BTreeMap<(String, ChunkId), u32>,
     /// `(user, request id)` of each commit whose entry still exists.
     pub commits: BTreeMap<(String, String), VersionId>,
     /// Acknowledged commits, with their space and entry.
@@ -263,8 +264,7 @@ impl Model {
             None => &[],
         };
         let known = |chunk: &ChunkRef| {
-            base_chunks.iter().any(|known| known.id == chunk.id)
-                || self.uploads.contains(&(who.user.clone(), chunk.id))
+            base_chunks.contains(chunk) || self.uploads.get(&(who.user.clone(), chunk.id)) == Some(&chunk.len)
         };
         ensure(chunks.iter().all(known), ErrorCode::Invalid)?;
         ensure(

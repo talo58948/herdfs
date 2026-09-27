@@ -11,9 +11,10 @@ use tempfile::TempDir;
 pub const SPACE: &str = "team";
 
 pub fn user(name: &str, groups: &[&str]) -> Principal {
+    let groups = groups.iter().map(|group| (*group).to_owned()).collect();
     Principal {
         user: format!("user:{name}"),
-        groups: groups.iter().map(|group| (*group).to_owned()).collect(),
+        groups,
     }
 }
 
@@ -35,8 +36,8 @@ pub fn path(text: &str) -> SpacePath {
 
 pub struct Fixture {
     pub authority: Authority,
-    pub now_ms: i64,
-    dir: TempDir,
+    now_ms: i64,
+    _dir: TempDir,
 }
 
 impl Fixture {
@@ -46,7 +47,7 @@ impl Fixture {
         let mut fixture = Self {
             authority,
             now_ms: 1_000,
-            dir,
+            _dir: dir,
         };
         fixture
             .call(&alice(), Request::CreateSpace { space: SPACE.into() })
@@ -54,30 +55,13 @@ impl Fixture {
         fixture
     }
 
-    /// Drops the authority and opens the same database again.
-    pub fn reopen(&mut self) {
-        self.authority = Authority::open(&self.dir.path().join("authority.db")).unwrap();
-    }
-
     /// Handles `request` one millisecond after the previous one.
-    pub fn outcome(&mut self, who: &Principal, request: Request) -> Result<Outcome, ErrorCode> {
-        self.now_ms += 1;
-        self.authority
-            .handle(who, request, self.now_ms)
-            .map_err(|error| error.code)
-    }
-
     pub fn call(&mut self, who: &Principal, request: Request) -> Result<Response, ErrorCode> {
-        match self.outcome(who, request)? {
-            Outcome::Reply(reply) => Ok(reply),
-            Outcome::Sign { .. } => panic!("only Grant signs"),
-        }
-    }
-
-    pub fn entry(&mut self, who: &Principal, request: Request) -> Result<Entry, ErrorCode> {
-        match self.call(who, request)? {
-            Response::Entry { entry } => Ok(entry),
-            other => panic!("expected an entry, got {other:?}"),
+        self.now_ms += 1;
+        match self.authority.handle(who, request, self.now_ms) {
+            Ok(Outcome::Reply(reply)) => Ok(reply),
+            Ok(Outcome::Sign { .. }) => panic!("only Grant signs"),
+            Err(error) => Err(error.code),
         }
     }
 
@@ -134,46 +118,30 @@ impl Fixture {
         )
     }
 
-    pub fn list(&mut self, who: &Principal, at: &str) -> Result<Vec<String>, ErrorCode> {
-        match self.call(
-            who,
-            Request::List {
-                space: SPACE.into(),
-                path: path(at),
-            },
-        )? {
-            Response::Entries { entries } => Ok(entries.into_iter().map(|entry| entry.path.into()).collect()),
-            other => panic!("expected entries, got {other:?}"),
-        }
-    }
-
-    pub fn set_acl(
-        &mut self,
-        who: &Principal,
-        at: &str,
-        principal: &str,
-        perm: Option<Perm>,
-    ) -> Result<(), ErrorCode> {
+    pub fn set_acl(&mut self, at: &str, principal: &str, perm: Option<Perm>) {
+        let principal = principal.into();
         let request = Request::SetAcl {
             space: SPACE.into(),
             path: path(at),
-            principal: principal.into(),
+            principal,
             perm,
         };
-        self.call(who, request).map(drop)
+        self.call(&alice(), request).unwrap();
     }
 
-    /// Records `bytes` as uploaded by `who` and returns its reference.
+    /// Uploads `bytes` as `who`, as the server records it.
     pub fn upload(&mut self, who: &Principal, bytes: &[u8]) -> Result<ChunkRef, ErrorCode> {
-        let id = ChunkId::of(bytes);
-        self.now_ms += 1;
-        self.authority
-            .record_upload(who, SPACE, id, self.now_ms)
-            .map_err(|error| error.code)?;
-        Ok(ChunkRef {
-            id,
+        let chunk = ChunkRef {
+            id: ChunkId::of(bytes),
             len: u32::try_from(bytes.len()).unwrap(),
-        })
+        };
+        self.authority
+            .may_upload(who, SPACE)
+            .map_err(|error| error.code)?;
+        self.authority
+            .record_upload(who, SPACE, chunk)
+            .map_err(|error| error.code)?;
+        Ok(chunk)
     }
 
     pub fn commit(
@@ -185,13 +153,14 @@ impl Fixture {
         guarded: bool,
         chunks: &[ChunkRef],
     ) -> Result<Version, ErrorCode> {
+        let (request_id, chunks) = (request_id.into(), chunks.to_vec());
         let request = Request::Commit {
             space: SPACE.into(),
             entry,
-            request_id: request_id.into(),
+            request_id,
             base,
             guarded,
-            chunks: chunks.to_vec(),
+            chunks,
         };
         match self.call(who, request)? {
             Response::Version { version } => Ok(version),
@@ -199,12 +168,12 @@ impl Fixture {
         }
     }
 
-    /// Creates `at` as alice and commits one uploaded chunk of `bytes` to it.
+    /// Creates `at` as alice and commits `bytes` to it as one chunk.
     pub fn file(&mut self, at: &str, bytes: &[u8]) -> (Entry, Version) {
         let entry = self.create(&alice(), at).unwrap();
         let chunk = self.upload(&alice(), bytes).unwrap();
         let version = self
-            .commit(&alice(), entry.id, &format!("{at}-1"), None, false, &[chunk])
+            .commit(&alice(), entry.id, at, None, false, &[chunk])
             .unwrap();
         (entry, version)
     }
@@ -229,14 +198,15 @@ impl Fixture {
         version: VersionId,
         chunks: &[u32],
     ) -> Result<Vec<ChunkId>, ErrorCode> {
+        self.now_ms += 1;
         let request = Request::Grant {
             space: SPACE.into(),
             path: path(at),
             version,
             chunks: chunks.to_vec(),
         };
-        match self.outcome(who, request)? {
-            Outcome::Sign { chunks, expires_ms } => {
+        match self.authority.handle(who, request, self.now_ms) {
+            Ok(Outcome::Sign { chunks, expires_ms }) => {
                 assert_eq!(
                     expires_ms,
                     self.now_ms + 5 * 60 * 1000,
@@ -244,7 +214,15 @@ impl Fixture {
                 );
                 Ok(chunks)
             }
-            Outcome::Reply(reply) => panic!("expected grants, got {reply:?}"),
+            Ok(Outcome::Reply(reply)) => panic!("expected grants, got {reply:?}"),
+            Err(error) => Err(error.code),
+        }
+    }
+
+    fn entry(&mut self, who: &Principal, request: Request) -> Result<Entry, ErrorCode> {
+        match self.call(who, request)? {
+            Response::Entry { entry } => Ok(entry),
+            other => panic!("expected an entry, got {other:?}"),
         }
     }
 }

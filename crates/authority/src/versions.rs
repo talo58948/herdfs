@@ -48,6 +48,7 @@ impl Call<'_> {
         })
     }
 
+    /// Entry ids are not secret: an unknown id is `NotFound` before any permission check.
     pub(crate) fn commit(
         &self,
         space: &str,
@@ -79,11 +80,12 @@ impl Call<'_> {
             None => Vec::new(),
         };
         for chunk in chunks {
-            if !base_chunks.iter().any(|known| known.id == chunk.id) && !self.uploaded(chunk.id)? {
-                return Err(refuse(
-                    ErrorCode::Invalid,
-                    format!("chunk {} is not yours", chunk.id),
-                ));
+            if !base_chunks.contains(chunk) && self.uploaded_len(chunk.id)? != Some(chunk.len) {
+                let message = format!(
+                    "chunk {} of {} bytes is neither in the base nor uploaded by you",
+                    chunk.id, chunk.len
+                );
+                return Err(refuse(ErrorCode::Invalid, message));
             }
         }
         if guarded && entry.head != base {
@@ -118,11 +120,11 @@ impl Call<'_> {
         })
     }
 
-    pub(crate) fn record_upload(&self, space: &str, id: ChunkId) -> Result<()> {
+    pub(crate) fn record_upload(&self, space: &str, chunk: ChunkRef) -> Result<()> {
         self.may_upload(space)?;
         self.db
-            .prepare_cached("INSERT OR REPLACE INTO uploads (principal, chunk, at_ms) VALUES (?1, ?2, ?3)")?
-            .execute(params![self.who.user, id.to_string(), self.now_ms])?;
+            .prepare_cached("INSERT OR REPLACE INTO uploads (principal, chunk, len) VALUES (?1, ?2, ?3)")?
+            .execute(params![self.who.user, chunk.id.to_string(), chunk.len])?;
         Ok(())
     }
 
@@ -144,10 +146,13 @@ impl Call<'_> {
         }
     }
 
-    fn uploaded(&self, id: ChunkId) -> Result<bool> {
+    /// The length the caller uploaded chunk `id` with, if they did.
+    fn uploaded_len(&self, id: ChunkId) -> Result<Option<u32>> {
         let mut query = self
             .db
-            .prepare_cached("SELECT EXISTS (SELECT 1 FROM uploads WHERE principal = ?1 AND chunk = ?2)")?;
-        Ok(query.query_row(params![self.who.user, id.to_string()], |row| row.get(0))?)
+            .prepare_cached("SELECT len FROM uploads WHERE principal = ?1 AND chunk = ?2")?;
+        Ok(query
+            .query_row(params![self.who.user, id.to_string()], |row| row.get(0))
+            .optional()?)
     }
 }

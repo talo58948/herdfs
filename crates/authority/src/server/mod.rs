@@ -20,7 +20,7 @@ use axum::{
     routing::{get, post, put},
 };
 use herdfs_core::{
-    ChunkId,
+    ChunkId, ChunkRef,
     chunk::MAX_CHUNK,
     proto::{self, ErrorCode, Request, Response},
 };
@@ -131,7 +131,8 @@ async fn rpc(
 }
 
 /// Stores a chunk even if it already exists, so an upload never reveals
-/// whether the same bytes are stored elsewhere.
+/// whether the same bytes are stored elsewhere. Only a caller who may upload
+/// to the space causes a store write.
 async fn upload(
     State(server): State<Arc<Server>>,
     Path((space, id)): Path<(String, String)>,
@@ -144,9 +145,17 @@ async fn upload(
     if ChunkId::of(&bytes) != id {
         return Err(invalid(format!("body does not hash to {id}")).into());
     }
+    let len = u32::try_from(bytes.len()).map_err(|_| invalid("chunk too large"))?;
+    {
+        let (who, space) = (who.clone(), space.clone());
+        server
+            .run(move |authority, _| authority.may_upload(&who, &space))
+            .await?;
+    }
     server.put(id, bytes).await?;
+    let chunk = ChunkRef { id, len };
     server
-        .run(move |authority, now_ms| authority.record_upload(&who, &space, id, now_ms))
+        .run(move |authority, _| authority.record_upload(&who, &space, chunk))
         .await?;
     Ok(Json(Response::Done))
 }

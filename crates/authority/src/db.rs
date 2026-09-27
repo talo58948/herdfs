@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS acl (
 CREATE TABLE IF NOT EXISTS uploads (
     principal TEXT NOT NULL,
     chunk TEXT NOT NULL,
-    at_ms INTEGER NOT NULL,
+    len INTEGER NOT NULL,
     PRIMARY KEY (principal, chunk)
 );
 CREATE TABLE IF NOT EXISTS commits (
