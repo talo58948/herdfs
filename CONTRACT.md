@@ -2,7 +2,7 @@
 
 Every test names the lines it checks with a `// contract: C9, S2` comment. Code that serves no line here does not belong in v0.
 
-"Commit" means the authority has acknowledged a new version. Parameters: T_vis = 1 s, grant TTL = 5 min, decision budget = 300 ms.
+"Commit" means the authority has acknowledged a new version. Parameters: T_vis = 1 s, grant TTL = 5 min, Jev timeout = 2 s.
 
 ## Data and consistency
 
@@ -39,6 +39,6 @@ Every test names the lines it checks with a `// contract: C9, S2` comment. Code 
 
 | ID | Promise |
 |---|---|
-| P1 | The strategy is decided at `open` only, within the 300 ms budget; otherwise the default applies. |
+| P1 | The strategy is decided at `open` only, and `open` never waits for Jev: a remembered answer applies at once; otherwise the default applies and Jev's later answer may start a prefetch for that open. |
 | P2 | If Jev errors, times out or is unsure, the default applies and the filesystem stays available. |
 | A1 | The agents plugin uses only the public filesystem. Permission to spawn on a host is write access on `/.agents/<host>/`. |
