@@ -51,7 +51,6 @@ impl Space {
         } else {
             self.remote.stat(path).await?
         };
-        self.changed();
         self.remember(&entry);
         Ok(self.attr(&entry))
     }
@@ -87,7 +86,7 @@ impl Space {
     pub async fn remove(self: Arc<Self>, parent: INodeNo, name: OsString) -> Result<(), Error> {
         let path = self.child(parent, &name)?;
         self.remote.remove(path.clone()).await?;
-        self.changed();
+        self.stale(&path);
         lock(&self.paths).retain(|_, (known, _)| *known != path);
         Ok(())
     }
@@ -100,7 +99,8 @@ impl Space {
     ) -> Result<(), Error> {
         let (from, to) = (self.child(from.0, &from.1)?, self.child(to.0, &to.1)?);
         self.remote.rename(from.clone(), to.clone()).await?;
-        self.changed();
+        self.stale(&from);
+        self.stale(&to);
         let mut paths = lock(&self.paths);
         paths.retain(|_, (known, _)| *known != to);
         for (known, _) in paths.values_mut() {
