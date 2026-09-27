@@ -18,10 +18,8 @@ use std::env;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::process::Command;
-use std::thread;
-use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::Result;
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{self, Perm, Request, Response};
 use reqwest::Url;
@@ -48,8 +46,6 @@ pub use crate::toxiproxy::{Links, Profile};
 pub const SPACE: &str = "lab";
 /// The user who creates [`SPACE`] and grants each client's user `write` on its root.
 pub const ADMIN: &str = "admin";
-/// How long [`Lab::wait_committed`] waits; a 1 GiB file takes about a minute to commit.
-const COMMIT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// The clients of a lab.
 #[derive(Default)]
@@ -246,20 +242,9 @@ impl Lab {
         self.client(name).stats()
     }
 
-    /// Waits until client `name` has no commit pending, as if it fsynced every file it wrote.
+    /// Waits until client `name` has committed, or set aside, every write closed so far.
     pub fn wait_committed(&self, name: &str) -> Result<()> {
-        let deadline = Instant::now() + COMMIT_TIMEOUT;
-        loop {
-            let pending = self.stats(name)?["pending_commits"].as_u64();
-            if pending.context("stats lack pending_commits")? == 0 {
-                return Ok(());
-            }
-            ensure!(
-                Instant::now() < deadline,
-                "{name} has {pending:?} commits pending after {COMMIT_TIMEOUT:?}"
-            );
-            thread::sleep(Duration::from_millis(100));
-        }
+        self.client(name).wait_committed()
     }
 
     /// Takes client `name`'s links down; connects to them are refused.

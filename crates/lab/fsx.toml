@@ -1,0 +1,29 @@
+# fsx settings for ring R2 (crates/lab/tests/fsx.rs): every operation on one regular file that
+# herdfs supports. Waiting for a commit costs as much as a few hundred other operations, so
+# fsync and fdatasync are about 0.5% of the operations: 250 commits in a 50,000-op run.
+
+# 4 MiB, so the file spans several chunks (256 KiB to 4 MiB, 1 MiB on average).
+flen = 4194304
+# Dirty mapped pages reach the client through kernel writeback, flush and fsync, not msync,
+# which would wait for a commit on every mapwrite.
+nomsyncafterwrite = true
+
+[weights]
+read = 150
+write = 150
+mapread = 30
+mapwrite = 30
+# Rare: a file cut short and extended again is mostly zeros, and zeros never end a chunk.
+truncate = 3
+fsync = 1
+fdatasync = 1
+# Seals the write for the committer; the reopen starts from the committed head once it lands.
+close_open = 2
+invalidate = 1
+sendfile = 2
+posix_fadvise = 1
+copy_file_range = 2
+# glibc emulates it with writes, since the client does not implement fallocate (EOPNOTSUPP).
+posix_fallocate = 1
+# Needs fallocate(FALLOC_FL_PUNCH_HOLE), which the client does not implement.
+punch_hole = 0
