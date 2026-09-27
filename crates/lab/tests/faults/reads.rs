@@ -7,7 +7,7 @@ use std::path::Path;
 use std::thread;
 
 use anyhow::{Context, Result, anyhow};
-use herdfs_lab::{LabConfig, Profile, Strategy};
+use herdfs_lab::{Lab, LabConfig, Profile, Strategy};
 
 use crate::{VISIBLE_AFTER, commit, random_bytes, start};
 
@@ -20,11 +20,10 @@ const READERS: [(&str, Strategy); 3] = [
     ("fetch", Strategy::Fetch),
     ("pin", Strategy::Pin),
 ];
-/// F7's cache limit, and the files it reads: nine times as many bytes, before rewrites.
+/// F7's cache limit, and the files it reads: nine times as many bytes.
 const SMALL_CACHE: u64 = 1 << 20;
 const FILES: usize = 6;
 const FILE_LEN: usize = 1536 << 10;
-const PASSES: usize = 3;
 
 /// Reads `path` at random ranges, some across chunk boundaries or past the end, then whole, and
 /// compares every read with `expected`.
@@ -101,6 +100,8 @@ fn f5_every_strategy_reads_the_same_bytes_over_a_bad_link() -> Result<()> {
     Ok(())
 }
 
+/// The client keeps recent chunks in memory above its disk cache, so the reader restarts
+/// between passes: after that, every chunk comes from the small disk cache or the store.
 // contract: C11
 #[test]
 fn f7_a_small_cache_evicts_under_load_and_serves_only_the_right_bytes() -> Result<()> {
@@ -108,7 +109,7 @@ fn f7_a_small_cache_evicts_under_load_and_serves_only_the_right_bytes() -> Resul
         .client("writer", "alice", &[], Profile::Lan, Strategy::Stream)
         .client("reader", "bob", &[], Profile::Lan, Strategy::Chaos(7))
         .cache_bytes("reader", SMALL_CACHE);
-    let Some(lab) = start(config)? else {
+    let Some(mut lab) = start(config)? else {
         return Ok(());
     };
     let mut files: Vec<(String, Vec<u8>)> = (0..FILES)
@@ -118,21 +119,22 @@ fn f7_a_small_cache_evicts_under_load_and_serves_only_the_right_bytes() -> Resul
         commit(&lab, "writer", name, bytes)?;
     }
     thread::sleep(VISIBLE_AFTER);
-    let reader = lab.mount_path("reader");
-    for _ in 0..PASSES {
-        for (name, bytes) in &files {
-            check_reads(&reader.join(name), bytes)?;
-        }
-    }
+    check_all(&lab, &files)?;
+    lab.restart_client("reader")?;
+    check_all(&lab, &files)?;
+    let evicted = (FILES * FILE_LEN) as u64 - SMALL_CACHE;
+    let fetched = bytes_fetched(&lab)?;
+    assert!(
+        fetched >= evicted,
+        "{fetched} bytes fetched again: the cache kept more than it may"
+    );
     // New versions of half the files, whose old chunks the cache may still hold.
     for (name, bytes) in files.iter_mut().step_by(2) {
         *bytes = random_bytes(FILE_LEN);
         commit(&lab, "writer", name, bytes)?;
     }
     thread::sleep(VISIBLE_AFTER);
-    for (name, bytes) in &files {
-        check_reads(&reader.join(name), bytes)?;
-    }
+    check_all(&lab, &files)?;
     // Background prefetches of the last opens finish before the cache is measured.
     thread::sleep(VISIBLE_AFTER);
     let cache = fs::read_dir(lab.client_dir("reader").join("cache"))?;
@@ -141,14 +143,6 @@ fn f7_a_small_cache_evicts_under_load_and_serves_only_the_right_bytes() -> Resul
         .sum::<Result<u64>>()?;
     assert!(cached <= SMALL_CACHE, "the cache holds {cached} bytes");
     let stats = lab.stats("reader")?;
-    let fetched = stats["bytes_fetched"]
-        .as_u64()
-        .context("stats count fetched bytes")?;
-    let distinct = (FILES + FILES.div_ceil(2)) * FILE_LEN;
-    assert!(
-        fetched > 2 * distinct as u64,
-        "{fetched} bytes fetched: the load never evicted"
-    );
     for (strategy, _) in READERS {
         assert!(
             stats["decisions"][strategy].as_u64() >= Some(1),
@@ -156,4 +150,19 @@ fn f7_a_small_cache_evicts_under_load_and_serves_only_the_right_bytes() -> Resul
         );
     }
     Ok(())
+}
+
+/// Checks every file's reads on the reader.
+fn check_all(lab: &Lab, files: &[(String, Vec<u8>)]) -> Result<()> {
+    let reader = lab.mount_path("reader");
+    files
+        .iter()
+        .try_for_each(|(name, bytes)| check_reads(&reader.join(name), bytes))
+}
+
+fn bytes_fetched(lab: &Lab) -> Result<u64> {
+    let stats = lab.stats("reader")?;
+    stats["bytes_fetched"]
+        .as_u64()
+        .context("stats count fetched bytes")
 }
