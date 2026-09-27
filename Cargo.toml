@@ -19,7 +19,6 @@ fuser = { version = "0.18", default-features = false }
 futures = "0.3"
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 libc = "0.2"
-object_store = { version = "0.14", features = ["aws"] }
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
