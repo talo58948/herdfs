@@ -1,31 +1,16 @@
 //! Open files: reads through the journal copy or the chunk cache, writes into the journal.
 
-use std::{
-    ffi::OsString,
-    fs::File,
-    io,
-    os::unix::fs::FileExt,
-    path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering::Relaxed},
-    },
-};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::{ffi::OsString, fs::File, io, os::unix::fs::FileExt, path::Path};
 
 use fuser::{Errno, FileAttr, INodeNo, OpenAccMode, OpenFlags};
-use herdfs_core::{
-    ChunkId, SpacePath,
-    proto::{EntryId, Version},
-};
+use herdfs_core::proto::{EntryId, Version};
+use herdfs_core::{ChunkId, SpacePath};
 
 use super::{PERMISSIONS, Space};
-use crate::{
-    error::Error,
-    journal::Registration,
-    lock,
-    reader::OpenVersion,
-    strategy::{OpenContext, Strategy},
-};
+use crate::strategy::{OpenContext, Strategy};
+use crate::{error::Error, journal::Registration, lock, reader::OpenVersion};
 
 pub struct Handle {
     entry: EntryId,
@@ -40,13 +25,12 @@ pub struct Handle {
 
 impl Handle {
     fn new(entry: EntryId, writable: bool, registration: Registration) -> Self {
-        let (content, dirty, pinned) = (None, AtomicBool::new(false), Vec::new());
         Self {
             entry,
-            content,
+            content: None,
             writable,
-            dirty,
-            pinned,
+            dirty: AtomicBool::new(false),
+            pinned: Vec::new(),
             _registration: registration,
         }
     }
@@ -62,11 +46,8 @@ impl Space {
             self.writable(entry, &path, truncate).await?;
             handle.dirty = truncate.into();
         } else if self.journal.copy(entry).is_none() {
-            let content = self
-                .head(entry, &path)
-                .await?
-                .map(|head| OpenVersion::new(path, head));
-            handle.content = content.map(|content| self.start(content, pid, &mut handle.pinned));
+            let content = self.head(entry, &path).await?.map(OpenVersion::new);
+            handle.content = content.map(|content| self.start(content, &path, pid, &mut handle.pinned));
         }
         Ok(self.register(handle))
     }
@@ -79,12 +60,11 @@ impl Space {
         mode: u32,
     ) -> Result<(FileAttr, u64), Error> {
         let path = self.child(parent, &name)?;
-        let entry = self.remote.create(&path, mode & PERMISSIONS).await?;
-        self.changed();
+        let entry = self.remote.create(path, mode & PERMISSIONS).await?;
         let handle = Handle::new(entry.id, true, self.journal.opened(entry.id));
         self.journal
             .install(entry.id, self.journal.scratch(entry.id)?, None)?;
-        Ok((self.remember(&entry), self.register(handle)))
+        Ok((self.added(&entry), self.register(handle)))
     }
 
     pub async fn read(self: Arc<Self>, fh: u64, off: u64, len: u32) -> Result<Vec<u8>, Error> {
@@ -93,16 +73,21 @@ impl Space {
         if let Some(copy) = self.journal.copy(handle.entry) {
             return Ok(read_copy(&copy, off, len)?);
         }
-        match &handle.content {
-            Some(content) => self.reader.read(content, off, len.into()).await,
-            None => Ok(Vec::new()),
-        }
+        let Some(content) = &handle.content else {
+            return Ok(Vec::new());
+        };
+        // The inode's current path, so a rename on this client keeps reads working; one on
+        // another host fails grants until the file is reopened.
+        let path = self.path(self.ino(handle.entry))?;
+        self.reader.read(content, &path, off, len.into()).await
     }
 
     pub fn write(&self, fh: u64, off: u64, data: &[u8]) -> Result<u32, Error> {
         let handle = self.handle(fh)?;
-        let copy = self.journal.copy(handle.entry).filter(|_| handle.writable);
-        copy.ok_or(Errno::EBADF)?.write_all_at(data, off)?;
+        if !handle.writable {
+            return Err(Errno::EBADF.into());
+        }
+        self.journal.write(handle.entry, off, data)?;
         handle.dirty.store(true, Relaxed);
         Ok(data.len() as u32)
     }
@@ -143,7 +128,7 @@ impl Space {
         let entry = handle.as_ref().map_or(self.entry_id(ino), |handle| handle.entry);
         let _registration = self.journal.opened(entry);
         self.writable(entry, &self.path(ino)?, size == 0).await?;
-        self.journal.copy(entry).ok_or(Errno::EIO)?.set_len(size)?;
+        self.journal.set_len(entry, size)?;
         match handle {
             Some(handle) => handle.dirty.store(true, Relaxed),
             None => tokio::task::block_in_place(|| self.journal.seal(entry))?,
@@ -156,13 +141,10 @@ impl Space {
         if self.journal.attach(entry, truncate)? {
             return Ok(());
         }
-        let head = self
-            .head(entry, path)
-            .await?
-            .map(|head| OpenVersion::new(path.clone(), head));
+        let head = self.head(entry, path).await?.map(OpenVersion::new);
         let mut scratch = self.journal.scratch(entry)?;
         if let Some(head) = head.as_ref().filter(|_| !truncate) {
-            self.reader.materialize(head, &mut scratch.file).await?;
+            self.reader.materialize(head, path, &mut scratch.file).await?;
         }
         self.journal
             .install(entry, scratch, head.as_ref().map(|head| &head.version))?;
@@ -173,7 +155,7 @@ impl Space {
 
     /// The entry's current head. Every open asks, for close-to-open consistency (C2).
     async fn head(&self, entry: EntryId, path: &SpacePath) -> Result<Option<Version>, Error> {
-        let (found, head) = self.remote.open(path).await?;
+        let (found, head) = self.remote.open(path.clone()).await?;
         if found.id != entry {
             return Err(Errno::ENOENT.into());
         }
@@ -182,9 +164,15 @@ impl Space {
     }
 
     /// Decides the access strategy for this open (P1) and starts its prefetch.
-    fn start(&self, content: OpenVersion, pid: u32, pinned: &mut Vec<ChunkId>) -> Arc<OpenVersion> {
+    fn start(
+        &self,
+        content: OpenVersion,
+        path: &SpacePath,
+        pid: u32,
+        pinned: &mut Vec<ChunkId>,
+    ) -> Arc<OpenVersion> {
         let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
-        let extension = Path::new(content.path.name()).extension();
+        let extension = Path::new(path.name()).extension();
         let context = OpenContext {
             size: content.version.size,
             extension: extension.map(|extension| extension.to_string_lossy().into()),
@@ -194,7 +182,7 @@ impl Space {
         let strategy = lock(&self.decider).decide(&context);
         self.stats.decided(strategy);
         tracing::debug!(
-            path = %content.path, ?strategy, size = context.size, extension = ?context.extension,
+            %path, ?strategy, size = context.size, extension = ?context.extension,
             comm = context.comm, coverage = context.coverage, "access strategy"
         );
         let content = Arc::new(content);
@@ -203,10 +191,10 @@ impl Space {
             self.cache.pin(pinned);
         }
         if strategy != Strategy::Stream {
-            let (reader, content) = (self.reader.clone(), content.clone());
+            let (reader, content, path) = (self.reader.clone(), content.clone(), path.clone());
             tokio::spawn(async move {
-                if let Err(err) = reader.prefetch(&content).await {
-                    tracing::warn!(%err, path = %content.path, "prefetch failed");
+                if let Err(err) = reader.prefetch(&content, &path).await {
+                    tracing::warn!(%err, %path, "prefetch failed");
                 }
             });
         }

@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-use serde_json::{Map, json};
+use serde_json::{Map, Value, json};
 
 use crate::strategy::Strategy;
 
@@ -28,11 +28,13 @@ impl Stats {
 
     /// The counters as JSON. Pending commits are counted by the journal.
     pub fn json(&self, pending_commits: usize) -> Vec<u8> {
-        let decisions: Map<_, _> = Strategy::ALL
+        let decisions: Map<String, Value> = Strategy::ALL
             .into_iter()
             .map(|strategy| {
-                let count = self.decisions[strategy as usize].load(Relaxed);
-                (strategy.name().to_owned(), count.into())
+                (
+                    strategy.name().into(),
+                    self.decisions[strategy as usize].load(Relaxed).into(),
+                )
             })
             .collect();
         json!({

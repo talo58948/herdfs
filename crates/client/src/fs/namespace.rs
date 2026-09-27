@@ -1,11 +1,7 @@
 //! Namespace operations: lookups, attributes, directories and renames.
 
-use std::{
-    ffi::OsString,
-    path::PathBuf,
-    sync::{Arc, atomic::Ordering::Relaxed},
-    time::Duration,
-};
+use std::sync::{Arc, atomic::Ordering::Relaxed};
+use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 use fuser::{Errno, FileAttr, INodeNo, ReplyDirectory};
 
@@ -29,7 +25,7 @@ impl Space {
         name: OsString,
     ) -> Result<(FileAttr, Duration), Error> {
         let (entry, ttl) = self.entry(&self.child(parent, &name)?).await?;
-        Ok((self.attr(&entry), ttl))
+        Ok((self.looked_up(&entry), ttl))
     }
 
     pub async fn getattr(self: Arc<Self>, ino: INodeNo) -> Result<(FileAttr, Duration), Error> {
@@ -51,12 +47,13 @@ impl Space {
         }
         let (path, mode) = (self.path(ino)?, change.mode.map(|mode| mode & PERMISSIONS));
         let entry = if mode.is_some() || change.mtime_ms.is_some() {
-            self.remote.set_attr(&path, mode, change.mtime_ms).await?
+            self.remote.set_attr(path, mode, change.mtime_ms).await?
         } else {
-            self.remote.stat(&path).await?
+            self.remote.stat(path).await?
         };
         self.changed();
-        Ok(self.remember(&entry))
+        self.remember(&entry);
+        Ok(self.attr(&entry))
     }
 
     pub async fn readlink(self: Arc<Self>, ino: INodeNo) -> Result<Vec<u8>, Error> {
@@ -71,9 +68,8 @@ impl Space {
         mode: u32,
     ) -> Result<FileAttr, Error> {
         let path = self.child(parent, &name)?;
-        let entry = self.remote.mkdir(&path, mode & PERMISSIONS).await?;
-        self.changed();
-        Ok(self.remember(&entry))
+        let entry = self.remote.mkdir(path, mode & PERMISSIONS).await?;
+        Ok(self.added(&entry))
     }
 
     pub async fn symlink(
@@ -83,17 +79,16 @@ impl Space {
         target: PathBuf,
     ) -> Result<FileAttr, Error> {
         let target = target.into_os_string().into_string().map_err(|_| Errno::EINVAL)?;
-        let entry = self.remote.symlink(&self.child(parent, &name)?, target).await?;
-        self.changed();
-        Ok(self.remember(&entry))
+        let entry = self.remote.symlink(self.child(parent, &name)?, target).await?;
+        Ok(self.added(&entry))
     }
 
     /// Unlinks a file or symlink, or removes an empty directory.
     pub async fn remove(self: Arc<Self>, parent: INodeNo, name: OsString) -> Result<(), Error> {
         let path = self.child(parent, &name)?;
-        self.remote.remove(&path).await?;
+        self.remote.remove(path.clone()).await?;
         self.changed();
-        lock(&self.paths).retain(|_, known| *known != path);
+        lock(&self.paths).retain(|_, (known, _)| *known != path);
         Ok(())
     }
 
@@ -104,11 +99,11 @@ impl Space {
         to: (INodeNo, OsString),
     ) -> Result<(), Error> {
         let (from, to) = (self.child(from.0, &from.1)?, self.child(to.0, &to.1)?);
-        self.remote.rename(&from, &to).await?;
+        self.remote.rename(from.clone(), to.clone()).await?;
         self.changed();
         let mut paths = lock(&self.paths);
-        paths.retain(|_, known| *known != to);
-        for known in paths.values_mut() {
+        paths.retain(|_, (known, _)| *known != to);
+        for (known, _) in paths.values_mut() {
             if let Some(moved) = known.rebase(&from, &to) {
                 *known = moved;
             }
@@ -118,9 +113,10 @@ impl Space {
 
     /// Lists the directory once, for the readdir calls on this handle to page through.
     pub async fn opendir(self: Arc<Self>, ino: INodeNo) -> Result<u64, Error> {
-        let entries = self.remote.list(&self.path(ino)?).await?;
+        let entries = self.remote.list(self.path(ino)?).await?;
         let listed = |entry| {
-            let attr = self.remember(entry);
+            self.remember(entry);
+            let attr = self.attr(entry);
             (attr.ino, attr.kind, entry.path.name().to_owned())
         };
         let listing = entries.iter().map(listed).collect();

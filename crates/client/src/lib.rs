@@ -11,10 +11,8 @@ mod remote;
 mod stats;
 mod strategy;
 
-use std::{
-    sync::{Mutex, MutexGuard, PoisonError},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use mount::{MountArgs, mount};
 

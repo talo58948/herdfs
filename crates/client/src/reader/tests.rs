@@ -24,7 +24,7 @@ fn setup(dir: &std::path::Path) -> (Reader, OpenVersion, Vec<Vec<u8>>) {
         created_ms: 0,
         chunks: refs.collect(),
     };
-    (reader, OpenVersion::new("f".try_into().unwrap(), version), chunks)
+    (reader, OpenVersion::new(version), chunks)
 }
 
 async fn read(
@@ -71,6 +71,19 @@ async fn a_warm_read_is_served_from_the_cache() {
     assert!(fetched.is_empty());
 }
 
+// contract: C9
+#[tokio::test]
+async fn verified_chunks_are_served_from_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let (reader, file, chunks) = setup(dir.path());
+    read(&reader, &file, &chunks, (0, 1_000)).await;
+    std::fs::remove_dir_all(dir.path().join("cache")).unwrap();
+
+    let (bytes, fetched) = read(&reader, &file, &chunks, (0, 1_000)).await;
+    assert_eq!(bytes, chunks.concat());
+    assert!(fetched.is_empty());
+}
+
 // contract: C11
 #[tokio::test]
 async fn a_tampered_cached_chunk_is_fetched_again() {
@@ -78,6 +91,8 @@ async fn a_tampered_cached_chunk_is_fetched_again() {
     let (reader, file, chunks) = setup(dir.path());
     read(&reader, &file, &chunks, (0, 1_000)).await;
     std::fs::write(dir.path().join("cache").join(file.id(3).to_string()), b"evil").unwrap();
+    // The first reader keeps verified chunks in memory; a fresh one loads them from disk.
+    let (reader, ..) = setup(dir.path());
 
     let (bytes, fetched) = read(&reader, &file, &chunks, (0, 1_000)).await;
     assert_eq!(bytes, chunks.concat());

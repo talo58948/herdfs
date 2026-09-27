@@ -1,18 +1,12 @@
 //! Typed calls to the authority, chunk uploads and verified chunk downloads.
 
-use std::{
-    fs,
-    net::{IpAddr, SocketAddr},
-    path::{Path, PathBuf},
-    sync::Mutex,
-    time::Duration,
-};
+use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
+use std::{fs, sync::Mutex, time::Duration};
 
 use bytes::Bytes;
-use herdfs_core::{
-    ChunkId, ChunkRef, SpacePath,
-    proto::{self, Entry, Request, Response, Version, VersionId},
-};
+use herdfs_core::proto::{self, Entry, Request, Response, Version, VersionId};
+use herdfs_core::{ChunkId, ChunkRef, SpacePath};
 use reqwest::{RequestBuilder, StatusCode};
 
 use crate::{error::Error, journal::Record, lock};
@@ -55,23 +49,20 @@ impl Remote {
         })
     }
 
-    pub async fn stat(&self, path: &SpacePath) -> Result<Entry, Error> {
-        let (space, path) = (self.space.clone(), path.clone());
-        self.entry(Request::Stat { space, path }).await
+    pub async fn stat(&self, path: SpacePath) -> Result<Entry, Error> {
+        self.entry(|space| Request::Stat { space, path }).await
     }
 
-    pub async fn list(&self, path: &SpacePath) -> Result<Vec<Entry>, Error> {
-        let (space, path) = (self.space.clone(), path.clone());
-        match self.call(Request::List { space, path }).await? {
+    pub async fn list(&self, path: SpacePath) -> Result<Vec<Entry>, Error> {
+        match self.call(|space| Request::List { space, path }).await? {
             Response::Entries { entries } => Ok(entries),
             other => Err(unexpected(&other)),
         }
     }
 
     /// The entry at `path` and its head version, `None` until its first commit.
-    pub async fn open(&self, path: &SpacePath) -> Result<(Entry, Option<Version>), Error> {
-        let (space, path) = (self.space.clone(), path.clone());
-        match self.call(Request::Open { space, path }).await? {
+    pub async fn open(&self, path: SpacePath) -> Result<(Entry, Option<Version>), Error> {
+        match self.call(|space| Request::Open { space, path }).await? {
             Response::Opened { entry, version } => Ok((entry, version)),
             other => Err(unexpected(&other)),
         }
@@ -80,48 +71,41 @@ impl Remote {
     /// Presigned URLs for chunks of `version`, in the order asked, and their expiry (Unix ms).
     pub async fn grant(
         &self,
-        path: &SpacePath,
+        path: SpacePath,
         version: VersionId,
         chunks: Vec<u32>,
     ) -> Result<(Vec<String>, i64), Error> {
-        let (space, path) = (self.space.clone(), path.clone());
-        match self
-            .call(Request::Grant {
-                space,
-                path,
-                version,
-                chunks,
-            })
-            .await?
-        {
+        let request = |space| Request::Grant {
+            space,
+            path,
+            version,
+            chunks,
+        };
+        match self.call(request).await? {
             Response::Grants { urls, expires_ms } => Ok((urls, expires_ms)),
             other => Err(unexpected(&other)),
         }
     }
 
-    pub async fn create(&self, path: &SpacePath, mode: u32) -> Result<Entry, Error> {
-        let (space, path) = (self.space.clone(), path.clone());
-        self.entry(Request::Create { space, path, mode }).await
+    pub async fn create(&self, path: SpacePath, mode: u32) -> Result<Entry, Error> {
+        self.entry(|space| Request::Create { space, path, mode }).await
     }
 
-    pub async fn mkdir(&self, path: &SpacePath, mode: u32) -> Result<Entry, Error> {
-        let (space, path) = (self.space.clone(), path.clone());
-        self.entry(Request::Mkdir { space, path, mode }).await
+    pub async fn mkdir(&self, path: SpacePath, mode: u32) -> Result<Entry, Error> {
+        self.entry(|space| Request::Mkdir { space, path, mode }).await
     }
 
-    pub async fn symlink(&self, path: &SpacePath, target: String) -> Result<Entry, Error> {
-        let (space, path) = (self.space.clone(), path.clone());
-        self.entry(Request::Symlink { space, path, target }).await
+    pub async fn symlink(&self, path: SpacePath, target: String) -> Result<Entry, Error> {
+        self.entry(|space| Request::Symlink { space, path, target }).await
     }
 
     pub async fn set_attr(
         &self,
-        path: &SpacePath,
+        path: SpacePath,
         mode: Option<u32>,
         mtime_ms: Option<i64>,
     ) -> Result<Entry, Error> {
-        let (space, path) = (self.space.clone(), path.clone());
-        self.entry(Request::SetAttr {
+        self.entry(|space| Request::SetAttr {
             space,
             path,
             mode,
@@ -130,14 +114,14 @@ impl Remote {
         .await
     }
 
-    pub async fn remove(&self, path: &SpacePath) -> Result<(), Error> {
-        let (space, path) = (self.space.clone(), path.clone());
-        self.call(Request::Remove { space, path }).await.map(drop)
+    pub async fn remove(&self, path: SpacePath) -> Result<(), Error> {
+        self.call(|space| Request::Remove { space, path }).await.map(drop)
     }
 
-    pub async fn rename(&self, from: &SpacePath, to: &SpacePath) -> Result<(), Error> {
-        let (space, from, to) = (self.space.clone(), from.clone(), to.clone());
-        self.call(Request::Rename { space, from, to }).await.map(drop)
+    pub async fn rename(&self, from: SpacePath, to: SpacePath) -> Result<(), Error> {
+        self.call(|space| Request::Rename { space, from, to })
+            .await
+            .map(drop)
     }
 
     /// Makes `chunks` the entry's head. Unguarded, so the last commit wins (C5).
@@ -148,18 +132,15 @@ impl Remote {
             request_id,
             ..
         } = record.clone();
-        let (space, guarded) = (self.space.clone(), false);
-        match self
-            .call(Request::Commit {
-                space,
-                entry,
-                request_id,
-                base,
-                guarded,
-                chunks,
-            })
-            .await?
-        {
+        let request = |space| Request::Commit {
+            space,
+            entry,
+            request_id,
+            base,
+            guarded: false,
+            chunks,
+        };
+        match self.call(request).await? {
             Response::Version { version } => Ok(version),
             other => Err(unexpected(&other)),
         }
@@ -181,15 +162,16 @@ impl Remote {
         Ok(bytes.into())
     }
 
-    async fn entry(&self, request: Request) -> Result<Entry, Error> {
+    async fn entry(&self, request: impl FnOnce(String) -> Request) -> Result<Entry, Error> {
         match self.call(request).await? {
             Response::Entry { entry } => Ok(entry),
             other => Err(unexpected(&other)),
         }
     }
 
-    async fn call(&self, request: Request) -> Result<Response, Error> {
-        let url = format!("{}/v1/rpc", self.authority);
+    /// Sends the request that `request` builds for this client's space.
+    async fn call(&self, request: impl FnOnce(String) -> Request) -> Result<Response, Error> {
+        let (url, request) = (format!("{}/v1/rpc", self.authority), request(self.space.clone()));
         let rpc = |token: &str| self.http.post(&url).bearer_auth(token).json(&request);
         Ok(self.send(rpc).await?.json().await?)
     }
@@ -209,7 +191,8 @@ impl Remote {
             return Ok(response);
         }
         let body = response.bytes().await?;
-        Err(serde_json::from_slice::<proto::Error>(&body).map_or(Error::Status(status), Error::Api))
+        let failed = || Error::Protocol(format!("HTTP {status}"));
+        Err(serde_json::from_slice::<proto::Error>(&body).map_or_else(|_| failed(), Error::Api))
     }
 }
 

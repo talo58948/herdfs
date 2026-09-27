@@ -1,11 +1,8 @@
 //! How `herdfs mount` starts, which the lab relies on. No contract line: these check the
 //! flags in docs/architecture.md.
 
-use std::{
-    io,
-    path::Path,
-    process::{Command, Output},
-};
+use std::process::{Command, Output};
+use std::{io, path::Path};
 
 fn mount(dir: &Path, strategy: &str) -> io::Result<Output> {
     let token = dir.join("token");

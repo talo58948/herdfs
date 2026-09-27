@@ -1,8 +1,10 @@
-use std::os::unix::fs::FileExt;
+use std::future::ready;
 
 use herdfs_core::ChunkRef;
 
-use super::{commit::Outcome, *};
+use super::commit::{Outcome, snapshot};
+use super::*;
+use crate::{cache::Cache, error::Error};
 
 const ENTRY: EntryId = EntryId(7);
 
@@ -29,7 +31,7 @@ fn sealed(dir: &Path, bytes: &[u8]) -> (Arc<Journal>, mpsc::UnboundedReceiver<En
     journal
         .install(ENTRY, journal.scratch(ENTRY).unwrap(), Some(&base()))
         .unwrap();
-    journal.copy(ENTRY).unwrap().write_all_at(bytes, 0).unwrap();
+    journal.write(ENTRY, 0, bytes).unwrap();
     journal.seal(ENTRY).unwrap();
     drop(registration);
     (journal, woken)
@@ -106,4 +108,39 @@ fn an_open_handle_keeps_a_committed_copy() {
     assert!(journal.copy(ENTRY).is_some());
     drop(reader);
     assert!(journal.copy(ENTRY).is_none());
+}
+
+// contract: C3, S6
+#[tokio::test]
+async fn a_write_during_a_commit_attempt_voids_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (journal, _woken) = sealed(dir.path(), b"first");
+    let cache = Cache::open(dir.path().join("cache"), 1 << 20).unwrap();
+    let job = journal.next(ENTRY).unwrap();
+    let write_while_uploading = |_, _| ready(journal.write(ENTRY, 0, b"second").map_err(Error::from));
+    assert_eq!(
+        snapshot(&journal, &cache, &job, write_while_uploading)
+            .await
+            .unwrap(),
+        None
+    );
+
+    let uploaded = std::sync::Mutex::new(Vec::new());
+    let upload = |id, _| {
+        uploaded.lock().unwrap().push(id);
+        ready(Ok(()))
+    };
+    let chunks = snapshot(&journal, &cache, &job, upload).await.unwrap().unwrap();
+    let second = ChunkId::of(b"second");
+    assert_eq!(chunks, [ChunkRef { id: second, len: 6 }]);
+    assert_eq!(*uploaded.lock().unwrap(), [second]);
+    assert!(cache.contains(&second));
+
+    // A chunk the base already has is referenced without an upload.
+    journal.set_len(ENTRY, 0).unwrap();
+    journal.write(ENTRY, 0, b"old").unwrap();
+    uploaded.lock().unwrap().clear();
+    let chunks = snapshot(&journal, &cache, &job, upload).await.unwrap().unwrap();
+    assert_eq!(chunks, base().chunks);
+    assert!(uploaded.lock().unwrap().is_empty());
 }

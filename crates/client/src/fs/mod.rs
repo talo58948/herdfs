@@ -4,22 +4,15 @@ mod fuse;
 mod handles;
 mod namespace;
 
-use std::{
-    collections::HashMap,
-    ffi::OsStr,
-    io,
-    os::unix::fs::MetadataExt,
-    sync::{Arc, Mutex, atomic::AtomicU64},
-    time::{Duration, Instant, UNIX_EPOCH},
-};
+use std::sync::{Arc, Mutex, atomic::AtomicU64};
+use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::{collections::HashMap, ffi::OsStr, io, os::unix::fs::MetadataExt};
 
 pub use fuse::Fuse;
 use fuser::{Errno, FileAttr, FileType, INodeNo};
 use handles::Handle;
-use herdfs_core::{
-    SpacePath,
-    proto::{Entry, EntryId, Kind},
-};
+use herdfs_core::SpacePath;
+use herdfs_core::proto::{Entry, EntryId, Kind};
 
 use crate::{
     cache::Cache, error::Error, journal::Journal, lock, reader::Reader, remote::Remote, stats::Stats,
@@ -46,7 +39,8 @@ pub struct Space {
     root: EntryId,
     /// The mounting user and group, shown as the owner of every entry.
     owner: (u32, u32),
-    paths: Mutex<HashMap<INodeNo, SpacePath>>,
+    /// The path of each inode the kernel holds, with its lookup count, which `forget` lowers.
+    paths: Mutex<HashMap<INodeNo, (SpacePath, u64)>>,
     /// Entries fetched from the authority, by path, with when and in which journal
     /// generation (count of settled commits) they were fetched.
     recent: Mutex<HashMap<SpacePath, (Instant, u64, Entry)>>,
@@ -76,7 +70,7 @@ impl Space {
             decider: Mutex::new(decider),
             root,
             owner: (process.uid(), process.gid()),
-            paths: Mutex::new(HashMap::from([(INodeNo::ROOT, SpacePath::root())])),
+            paths: Mutex::new(HashMap::from([(INodeNo::ROOT, (SpacePath::root(), 1))])),
             recent: Mutex::default(),
             handles: Mutex::default(),
             listings: Mutex::default(),
@@ -94,7 +88,8 @@ impl Space {
     }
 
     fn path(&self, ino: INodeNo) -> Result<SpacePath, Error> {
-        Ok(lock(&self.paths).get(&ino).cloned().ok_or(Errno::ENOENT)?)
+        let path = lock(&self.paths).get(&ino).map(|(path, _)| path.clone());
+        Ok(path.ok_or(Errno::ENOENT)?)
     }
 
     fn child(&self, parent: INodeNo, name: &OsStr) -> Result<SpacePath, Error> {
@@ -118,22 +113,51 @@ impl Space {
                 return Ok((entry, ttl));
             }
         }
-        let entry = self.remote.stat(path).await?;
+        let entry = self.remote.stat(path.clone()).await?;
         self.remember(&entry);
         Ok((entry, TTL))
     }
 
-    /// Maps the entry's inode to its path, caches it, and returns its attributes.
-    fn remember(&self, entry: &Entry) -> FileAttr {
-        lock(&self.paths).insert(self.ino(entry.id), entry.path.clone());
+    /// Caches the entry and updates the path of its inode if the kernel holds it.
+    fn remember(&self, entry: &Entry) {
+        if let Some(known) = lock(&self.paths).get_mut(&self.ino(entry.id)) {
+            known.0 = entry.path.clone();
+        }
         let mut recent = lock(&self.recent);
         if recent.len() > RECENT_LIMIT {
             recent.retain(|_, (fetched, ..)| fetched.elapsed() < TTL);
         }
         let cached = (Instant::now(), self.journal.settled(), entry.clone());
         recent.insert(entry.path.clone(), cached);
-        drop(recent);
+    }
+
+    /// Counts a reply that hands the kernel a reference to the entry's inode, and returns
+    /// its attributes for that reply.
+    fn looked_up(&self, entry: &Entry) -> FileAttr {
+        let mut paths = lock(&self.paths);
+        let known = paths.entry(self.ino(entry.id)).or_default();
+        (known.0, known.1) = (entry.path.clone(), known.1 + 1);
+        drop(paths);
         self.attr(entry)
+    }
+
+    /// Records an entry this client just made, whose reply hands the kernel its inode.
+    fn added(&self, entry: &Entry) -> FileAttr {
+        self.changed();
+        self.remember(entry);
+        self.looked_up(entry)
+    }
+
+    /// Drops the kernel's `lookups` references to `ino`, and its path with the last one.
+    pub fn forget(&self, ino: INodeNo, lookups: u64) {
+        let mut paths = lock(&self.paths);
+        let Some((_, count)) = paths.get_mut(&ino) else {
+            return;
+        };
+        *count = count.saturating_sub(lookups);
+        if *count == 0 && ino != INodeNo::ROOT {
+            paths.remove(&ino);
+        }
     }
 
     /// Drops cached entries after a local change.

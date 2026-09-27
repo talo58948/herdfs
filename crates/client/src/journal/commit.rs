@@ -2,29 +2,18 @@
 //! authority answers (C4a, C12). Each entry gets its own task, so one slow file does not
 //! hold up the others.
 
-use std::{
-    collections::HashSet,
-    fs::{self, File},
-    io,
-    path::PathBuf,
-    sync::{Arc, atomic::Ordering::Relaxed},
-    time::Duration,
-};
+use std::fs::{self, File};
+use std::sync::{Arc, atomic::Ordering::Relaxed};
+use std::{collections::HashSet, io, path::PathBuf, time::Duration};
 
 use bytes::Bytes;
-use herdfs_core::{
-    ChunkId, chunk,
-    proto::{EntryId, Version},
-};
+use herdfs_core::proto::{EntryId, Version};
+use herdfs_core::{ChunkId, ChunkRef, chunk};
 use tokio::sync::{mpsc, watch};
 
 use super::{Journal, REJECTED, Record, chunk_ids, write_record};
-use crate::{
-    error::Error,
-    lock,
-    remote::Remote,
-    stats::{Stats, bump},
-};
+use crate::stats::{Stats, bump};
+use crate::{cache::Cache, error::Error, lock, remote::Remote};
 
 const FIRST_RETRY: Duration = Duration::from_secs(1);
 const LAST_RETRY: Duration = Duration::from_secs(30);
@@ -42,50 +31,79 @@ pub enum Outcome {
     Retrying,
 }
 
-/// Starts a commit task for each entry the journal wakes.
-pub async fn committer(
-    journal: Arc<Journal>,
-    remote: Arc<Remote>,
-    stats: Arc<Stats>,
-    mut woken: mpsc::UnboundedReceiver<EntryId>,
-) {
-    while let Some(entry) = woken.recv().await {
-        tokio::spawn(commit(journal.clone(), remote.clone(), stats.clone(), entry));
-    }
+/// What the commit tasks share.
+pub struct Committer {
+    pub journal: Arc<Journal>,
+    pub remote: Arc<Remote>,
+    pub cache: Arc<Cache>,
+    pub stats: Arc<Stats>,
 }
 
-/// Commits the entry's latest sealed write until none is left. Network failures back off
-/// from 1 s to 30 s and retry forever; a refusal sets the write aside.
-async fn commit(journal: Arc<Journal>, remote: Arc<Remote>, stats: Arc<Stats>, entry: EntryId) {
-    let mut delay = FIRST_RETRY;
-    while let Some(job) = journal.next(entry) {
-        let outcome = match attempt(&remote, &job).await {
-            Ok(version) => {
-                bump(&stats.commits, 1);
-                delay = FIRST_RETRY;
-                Outcome::Committed(version)
-            }
-            Err(err) if err.is_final() => {
-                tracing::warn!(%err, entry = entry.0, "commit rejected; write set aside");
-                Outcome::Rejected
-            }
-            Err(err) => {
-                tracing::warn!(%err, entry = entry.0, ?delay, "commit failed; retrying");
-                Outcome::Retrying
-            }
-        };
-        let retry = matches!(outcome, Outcome::Retrying);
-        journal.finish(&job, outcome);
-        if retry {
-            tokio::time::sleep(delay).await;
-            delay = (delay * 2).min(LAST_RETRY);
+impl Committer {
+    /// Starts a commit task for each entry the journal wakes.
+    pub async fn run(self: Arc<Self>, mut woken: mpsc::UnboundedReceiver<EntryId>) {
+        while let Some(entry) = woken.recv().await {
+            tokio::spawn(self.clone().commit(entry));
         }
     }
+
+    /// Commits the entry's latest sealed write until none is left. Network failures back
+    /// off from 1 s to 30 s and retry forever; a refusal sets the write aside.
+    async fn commit(self: Arc<Self>, entry: EntryId) {
+        let mut delay = FIRST_RETRY;
+        while let Some(job) = self.journal.next(entry) {
+            let outcome = match self.attempt(&job).await {
+                Ok(Some(version)) => {
+                    bump(&self.stats.commits, 1);
+                    delay = FIRST_RETRY;
+                    Outcome::Committed(version)
+                }
+                // The copy changed while it was read; try again with what it holds now.
+                Ok(None) => continue,
+                Err(err) if err.is_final() => {
+                    tracing::warn!(%err, entry = entry.0, "commit rejected; write set aside");
+                    Outcome::Rejected
+                }
+                Err(err) => {
+                    tracing::warn!(%err, entry = entry.0, ?delay, "commit failed; retrying");
+                    Outcome::Retrying
+                }
+            };
+            let retry = matches!(outcome, Outcome::Retrying);
+            self.journal.finish(&job, outcome);
+            if retry {
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(LAST_RETRY);
+            }
+        }
+    }
+
+    async fn attempt(&self, job: &Job) -> Result<Option<Version>, Error> {
+        let upload = |id, bytes| self.remote.put_chunk(id, bytes);
+        let Some(chunks) = snapshot(&self.journal, &self.cache, job, upload).await? else {
+            return Ok(None);
+        };
+        self.remote.commit(&job.record, chunks).await.map(Some)
+    }
 }
 
-/// Chunks the copy, uploads every chunk its base lacks, without asking whether the store
-/// already has it (S6), and commits.
-async fn attempt(remote: &Remote, job: &Job) -> Result<Version, Error> {
+/// The copy's chunks as of one instant, each cached and, unless the base has it, uploaded
+/// without asking whether the store already does (S6). `None` if a write landed meanwhile,
+/// since a version must equal the copy at one instant (C3).
+pub async fn snapshot<F, Fut>(
+    journal: &Journal,
+    cache: &Cache,
+    job: &Job,
+    mut upload: F,
+) -> Result<Option<Vec<ChunkRef>>, Error>
+where
+    F: FnMut(ChunkId, Bytes) -> Fut,
+    Fut: Future<Output = Result<(), Error>>,
+{
+    let Some(writes) = journal.writes(job.record.entry) else {
+        tokio::task::yield_now().await;
+        return Ok(None);
+    };
     let base: HashSet<ChunkId> = job.record.base_chunks.iter().copied().collect();
     let copy = File::open(&job.copy)?;
     let (sender, mut chunks) = mpsc::channel(2);
@@ -97,18 +115,23 @@ async fn attempt(remote: &Remote, job: &Job) -> Result<Version, Error> {
             }
         }
     });
-    let mut refs = Vec::new();
-    let mut uploaded = HashSet::new();
+    let (mut refs, mut uploaded) = (Vec::new(), HashSet::new());
     while let Some(chunk) = chunks.recv().await {
         let (chunk, bytes) = chunk?;
+        // Reading the file back then needs no download of what was just uploaded.
+        if !cache.contains(&chunk.id)
+            && let Err(err) = cache.put(&chunk.id, &bytes)
+        {
+            tracing::warn!(%err, "could not cache a chunk");
+        }
         if !base.contains(&chunk.id) && uploaded.insert(chunk.id) {
-            remote.put_chunk(chunk.id, Bytes::from(bytes)).await?;
+            upload(chunk.id, Bytes::from(bytes)).await?;
         }
         refs.push(chunk);
     }
     // A splitter that died early would otherwise commit a truncated file.
     splitter.await.map_err(io::Error::other)?;
-    remote.commit(&job.record, refs).await
+    Ok((journal.writes(job.record.entry) == Some(writes)).then_some(refs))
 }
 
 impl Journal {

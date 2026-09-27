@@ -1,15 +1,9 @@
 //! The on-disk chunk cache. Files are named by chunk id and verified on every read, so the
 //! cache never serves bytes other than the chunk asked for (C11).
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    fs, io,
-    path::PathBuf,
-    sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering::Relaxed},
-    },
-};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Mutex;
+use std::{fs, io, path::PathBuf};
 
 use herdfs_core::{ChunkId, ChunkRef, chunk::total_len};
 
@@ -19,49 +13,65 @@ pub struct Cache {
     dir: PathBuf,
     capacity: u64,
     index: Mutex<Index>,
-    temps: AtomicU64,
 }
 
 #[derive(Default)]
 struct Index {
-    /// Length and last use of each cached chunk.
-    chunks: HashMap<ChunkId, (u64, u64)>,
-    /// Cached chunks by last use, oldest first.
-    by_use: BTreeMap<u64, ChunkId>,
+    chunks: Lru<()>,
     /// Open counts of chunks that must not be evicted.
     pins: HashMap<ChunkId, usize>,
+}
+
+/// Chunks in order of last use, each with its length and a `T`.
+#[derive(Default)]
+pub struct Lru<T> {
+    chunks: HashMap<ChunkId, (u64, u64, T)>,
+    by_use: BTreeMap<u64, ChunkId>,
     bytes: u64,
     clock: u64,
 }
 
-impl Index {
-    fn touch(&mut self, id: ChunkId, len: u64) {
-        self.forget(&id);
+impl<T: Clone> Lru<T> {
+    pub fn insert(&mut self, id: ChunkId, len: u64, value: T) {
+        self.remove(&id);
         self.clock += 1;
-        self.chunks.insert(id, (len, self.clock));
+        self.chunks.insert(id, (len, self.clock, value));
         self.by_use.insert(self.clock, id);
         self.bytes += len;
     }
 
-    fn forget(&mut self, id: &ChunkId) {
-        if let Some((len, used)) = self.chunks.remove(id) {
+    /// The chunk's value, marking it used.
+    pub fn get(&mut self, id: &ChunkId) -> Option<T> {
+        let (len, _, value) = self.chunks.get(id)?.clone();
+        self.insert(*id, len, value.clone());
+        Some(value)
+    }
+
+    pub fn remove(&mut self, id: &ChunkId) {
+        if let Some((len, used, _)) = self.chunks.remove(id) {
             self.by_use.remove(&used);
             self.bytes -= len;
         }
     }
 
-    /// The least recently used unpinned chunks whose removal brings the cache under `capacity`.
-    fn victims(&self, capacity: u64) -> Vec<ChunkId> {
+    fn contains(&self, id: &ChunkId) -> bool {
+        self.chunks.contains_key(id)
+    }
+
+    /// Drops the least recently used chunks, except those `keep` names, until the total
+    /// fits `capacity`. Returns the dropped ids.
+    pub fn evict(&mut self, capacity: u64, keep: impl Fn(&ChunkId) -> bool) -> Vec<ChunkId> {
         let mut excess = self.bytes.saturating_sub(capacity);
-        let mut victims = Vec::new();
-        for id in self.by_use.values().filter(|id| !self.pins.contains_key(id)) {
+        let mut dropped = Vec::new();
+        for id in self.by_use.values().filter(|id| !keep(id)) {
             if excess == 0 {
                 break;
             }
-            excess = excess.saturating_sub(self.chunks.get(id).map_or(0, |(len, _)| *len));
-            victims.push(*id);
+            excess = excess.saturating_sub(self.chunks.get(id).map_or(0, |chunk| chunk.0));
+            dropped.push(*id);
         }
-        victims
+        dropped.iter().for_each(|id| self.remove(id));
+        dropped
     }
 }
 
@@ -83,14 +93,10 @@ impl Cache {
         found.sort();
         let mut index = Index::default();
         for (_, id, len) in found {
-            index.touch(id, len);
+            index.chunks.insert(id, len, ());
         }
-        let cache = Self {
-            dir,
-            capacity,
-            index: Mutex::new(index),
-            temps: AtomicU64::new(0),
-        };
+        let index = Mutex::new(index);
+        let cache = Self { dir, capacity, index };
         cache.evict();
         Ok(cache)
     }
@@ -100,32 +106,31 @@ impl Cache {
     pub fn get(&self, id: &ChunkId) -> Option<Vec<u8>> {
         let path = self.path(id);
         let Ok(bytes) = fs::read(&path) else {
-            lock(&self.index).forget(id);
+            lock(&self.index).chunks.remove(id);
             return None;
         };
         if ChunkId::of(&bytes) != *id {
             tracing::warn!(%id, "cached chunk failed verification; refetching");
-            lock(&self.index).forget(id);
+            lock(&self.index).chunks.remove(id);
             let _ = fs::remove_file(&path);
             return None;
         }
-        lock(&self.index).touch(*id, bytes.len() as u64);
+        lock(&self.index).chunks.insert(*id, bytes.len() as u64, ());
         Some(bytes)
     }
 
     /// Stores a verified chunk. The temp file and rename mean a crash never leaves a torn one.
     pub fn put(&self, id: &ChunkId, bytes: &[u8]) -> io::Result<()> {
-        let number = self.temps.fetch_add(1, Relaxed);
-        let temp = self.dir.join(format!("{id}.{number}.tmp"));
+        let temp = self.dir.join(format!("{id}.{:x}.tmp", rand::random::<u64>()));
         fs::write(&temp, bytes)?;
         fs::rename(&temp, self.path(id))?;
-        lock(&self.index).touch(*id, bytes.len() as u64);
+        lock(&self.index).chunks.insert(*id, bytes.len() as u64, ());
         self.evict();
         Ok(())
     }
 
     pub fn contains(&self, id: &ChunkId) -> bool {
-        lock(&self.index).chunks.contains_key(id)
+        lock(&self.index).chunks.contains(id)
     }
 
     /// The fraction of `chunks`' bytes that are cached.
@@ -137,7 +142,7 @@ impl Cache {
         let index = lock(&self.index);
         let cached: u64 = chunks
             .iter()
-            .filter(|chunk| index.chunks.contains_key(&chunk.id))
+            .filter(|chunk| index.chunks.contains(&chunk.id))
             .map(|chunk| u64::from(chunk.len))
             .sum();
         cached as f64 / total as f64
@@ -165,9 +170,8 @@ impl Cache {
     }
 
     fn evict(&self) {
-        let mut index = lock(&self.index);
-        for id in index.victims(self.capacity) {
-            index.forget(&id);
+        let Index { chunks, pins } = &mut *lock(&self.index);
+        for id in chunks.evict(self.capacity, |id| pins.contains_key(id)) {
             let _ = fs::remove_file(self.path(&id));
         }
     }

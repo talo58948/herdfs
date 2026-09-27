@@ -2,7 +2,8 @@
 //! runtime and reply from the task, so one slow download never stalls other operations.
 //! fuser's defaults answer everything not implemented here: ENOSYS, and EPERM for hard links.
 
-use std::{ffi::OsStr, io, path::Path, sync::Arc, time::SystemTime};
+use std::time::{Duration, SystemTime};
+use std::{ffi::OsStr, io, path::Path, sync::Arc};
 
 use fuser::{
     BsdFileFlags, Errno, FileAttr, FileHandle, Filesystem, FopenFlags, Generation, INodeNo, InitFlags,
@@ -22,16 +23,37 @@ pub struct Fuse {
     runtime: Runtime,
 }
 
-/// A reply that can carry an errno.
-trait Fail {
+/// A reply that carries a `T` on success and an errno otherwise.
+trait Answer<T> {
+    fn answer(self, value: T);
     fn fail(self, errno: Errno);
 }
 
-macro_rules! fail_with_error {
-    ($($reply:ty),*) => { $(impl Fail for $reply { fn fail(self, errno: Errno) { self.error(errno); } })* };
+macro_rules! answer {
+    ($reply:ty, $value:ty, |$this:ident, $pattern:pat_param| $body:expr) => {
+        impl Answer<$value> for $reply {
+            fn answer(self, $pattern: $value) {
+                let $this = self;
+                $body;
+            }
+            fn fail(self, errno: Errno) {
+                self.error(errno);
+            }
+        }
+    };
 }
 
-fail_with_error! { ReplyAttr, ReplyCreate, ReplyData, ReplyEmpty, ReplyEntry, ReplyOpen }
+answer! { ReplyEntry, (FileAttr, Duration), |reply, (attr, ttl)| reply.entry(&ttl, &attr, GENERATION) }
+answer! { ReplyEntry, FileAttr, |reply, attr| reply.entry(&TTL, &attr, GENERATION) }
+answer! { ReplyAttr, (FileAttr, Duration), |reply, (attr, ttl)| reply.attr(&ttl, &attr) }
+answer! { ReplyAttr, FileAttr, |reply, attr| reply.attr(&TTL, &attr) }
+answer! { ReplyData, Vec<u8>, |reply, bytes| reply.data(&bytes) }
+answer! { ReplyEmpty, (), |reply, ()| reply.ok() }
+answer! { ReplyOpen, u64, |reply, fh| reply.opened(FileHandle(fh), FopenFlags::empty()) }
+answer! {
+    ReplyCreate, (FileAttr, u64),
+    |reply, (attr, fh)| reply.created(&TTL, &attr, GENERATION, FileHandle(fh), FopenFlags::empty())
+}
 
 impl Fuse {
     pub fn new(space: Arc<Space>, runtime: Runtime) -> Self {
@@ -42,16 +64,15 @@ impl Fuse {
         self.space.clone()
     }
 
-    /// Runs `work` on the runtime, then answers with `done` or the error's errno.
-    fn spawn<R: Fail + Send + 'static, T>(
+    /// Runs `work` on the runtime and answers with its value or its error's errno.
+    fn spawn<T>(
         &self,
-        reply: R,
+        reply: impl Answer<T> + Send + 'static,
         work: impl Future<Output = Result<T, Error>> + Send + 'static,
-        done: impl FnOnce(R, T) + Send + 'static,
     ) {
         self.runtime.spawn(async move {
             match work.await {
-                Ok(value) => done(reply, value),
+                Ok(value) => reply.answer(value),
                 Err(err) => {
                     tracing::debug!(%err, "request failed");
                     reply.fail(err.errno());
@@ -71,15 +92,15 @@ impl Filesystem for Fuse {
     }
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
-        let work = self.space().lookup(parent, name.to_owned());
-        self.spawn(reply, work, |reply, (attr, ttl)| {
-            reply.entry(&ttl, &attr, GENERATION);
-        });
+        self.spawn(reply, self.space().lookup(parent, name.to_owned()));
+    }
+
+    fn forget(&self, _req: &Request, ino: INodeNo, lookups: u64) {
+        self.space.forget(ino, lookups);
     }
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
-        let work = self.space().getattr(ino);
-        self.spawn(reply, work, |reply, (attr, ttl)| reply.attr(&ttl, &attr));
+        self.spawn(reply, self.space().getattr(ino));
     }
 
     fn setattr(
@@ -113,18 +134,15 @@ impl Filesystem for Fuse {
             mtime_ms,
             fh,
         };
-        let work = self.space().setattr(ino, change);
-        self.spawn(reply, work, |reply, attr| reply.attr(&TTL, &attr));
+        self.spawn(reply, self.space().setattr(ino, change));
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
-        let work = self.space().readlink(ino);
-        self.spawn(reply, work, |reply, target| reply.data(&target));
+        self.spawn(reply, self.space().readlink(ino));
     }
 
     fn mkdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, mode: u32, umask: u32, reply: ReplyEntry) {
-        let work = self.space().mkdir(parent, name.to_owned(), mode & !umask);
-        self.spawn(reply, work, created);
+        self.spawn(reply, self.space().mkdir(parent, name.to_owned(), mode & !umask));
     }
 
     fn unlink(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
@@ -132,13 +150,14 @@ impl Filesystem for Fuse {
     }
 
     fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
-        let work = self.space().remove(parent, name.to_owned());
-        self.spawn(reply, work, |reply, ()| reply.ok());
+        self.spawn(reply, self.space().remove(parent, name.to_owned()));
     }
 
     fn symlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, target: &Path, reply: ReplyEntry) {
-        let work = self.space().symlink(parent, name.to_owned(), target.to_owned());
-        self.spawn(reply, work, created);
+        self.spawn(
+            reply,
+            self.space().symlink(parent, name.to_owned(), target.to_owned()),
+        );
     }
 
     fn rename(
@@ -156,13 +175,11 @@ impl Filesystem for Fuse {
             return reply.error(Errno::EINVAL);
         }
         let (from, to) = ((parent, name.to_owned()), (new_parent, new_name.to_owned()));
-        let work = self.space().rename(from, to);
-        self.spawn(reply, work, |reply, ()| reply.ok());
+        self.spawn(reply, self.space().rename(from, to));
     }
 
     fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
-        let work = self.space().open(ino, flags, req.pid());
-        self.spawn(reply, work, opened);
+        self.spawn(reply, self.space().open(ino, flags, req.pid()));
     }
 
     fn read(
@@ -176,8 +193,7 @@ impl Filesystem for Fuse {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        let work = self.space().read(fh.0, offset, size);
-        self.spawn(reply, work, |reply, bytes| reply.data(&bytes));
+        self.spawn(reply, self.space().read(fh.0, offset, size));
     }
 
     fn write(
@@ -200,7 +216,7 @@ impl Filesystem for Fuse {
     }
 
     fn flush(&self, _req: &Request, _ino: INodeNo, fh: FileHandle, _owner: LockOwner, reply: ReplyEmpty) {
-        self.spawn(reply, self.space().flush(fh.0), |reply, ()| reply.ok());
+        self.spawn(reply, self.space().flush(fh.0));
     }
 
     fn release(
@@ -213,16 +229,15 @@ impl Filesystem for Fuse {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        self.spawn(reply, self.space().release(fh.0), |reply, ()| reply.ok());
+        self.spawn(reply, self.space().release(fh.0));
     }
 
     fn fsync(&self, _req: &Request, _ino: INodeNo, fh: FileHandle, _datasync: bool, reply: ReplyEmpty) {
-        self.spawn(reply, self.space().fsync(fh.0), |reply, ()| reply.ok());
+        self.spawn(reply, self.space().fsync(fh.0));
     }
 
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        let work = self.space().opendir(ino);
-        self.spawn(reply, work, opened);
+        self.spawn(reply, self.space().opendir(ino));
     }
 
     fn readdir(&self, _req: &Request, _ino: INodeNo, fh: FileHandle, offset: u64, reply: ReplyDirectory) {
@@ -269,19 +284,8 @@ impl Filesystem for Fuse {
         _flags: i32,
         reply: ReplyCreate,
     ) {
-        let work = self.space().create(parent, name.to_owned(), mode & !umask);
-        self.spawn(reply, work, |reply, (attr, fh)| {
-            reply.created(&TTL, &attr, GENERATION, FileHandle(fh), FopenFlags::empty());
-        });
+        self.spawn(reply, self.space().create(parent, name.to_owned(), mode & !umask));
     }
-}
-
-fn opened(reply: ReplyOpen, fh: u64) {
-    reply.opened(FileHandle(fh), FopenFlags::empty());
-}
-
-fn created(reply: ReplyEntry, attr: FileAttr) {
-    reply.entry(&TTL, &attr, GENERATION);
 }
 
 /// Answers an xattr read: its size when asked with size 0, ERANGE when it does not fit.

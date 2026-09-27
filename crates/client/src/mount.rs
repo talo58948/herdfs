@@ -7,13 +7,9 @@ use fuser::{Config, MountOption, Session};
 use herdfs_core::SpacePath;
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::{
-    cache::Cache,
-    fs::{Fuse, Space},
-    journal::{Journal, committer},
-    remote::Remote,
-    strategy::Decider,
-};
+use crate::fs::{Fuse, Space};
+use crate::journal::{Committer, Journal};
+use crate::{cache::Cache, remote::Remote, stats::Stats, strategy::Decider};
 
 /// Flags of `herdfs mount`.
 #[derive(Debug, clap::Args)]
@@ -73,43 +69,31 @@ pub fn mount(args: &MountArgs) -> anyhow::Result<()> {
 }
 
 async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
-    let MountArgs {
-        authority,
-        space,
-        token_file,
-        ..
-    } = args;
+    let (authority, space, token_file) = (&args.authority, &args.space, &args.token_file);
     let remote = Remote::new(authority, space, token_file.clone(), &args.resolve)
         .with_context(|| format!("reading token file {}", token_file.display()))?;
-    let root = remote.stat(&SpacePath::root()).await;
+    let root = remote.stat(SpacePath::root()).await;
     let root = root.with_context(|| format!("cannot reach space {space:?} at the authority {authority}"))?;
     let cache = Cache::open(args.cache.clone(), args.cache_bytes)
         .with_context(|| format!("opening cache {}", args.cache.display()))?;
     let (journal, woken) = Journal::open(args.journal.clone())
         .with_context(|| format!("opening journal {}", args.journal.display()))?;
-    let (remote, journal, stats) = (Arc::new(remote), Arc::new(journal), Arc::default());
-    tokio::spawn(committer(
-        journal.clone(),
-        remote.clone(),
-        Arc::clone(&stats),
-        woken,
-    ));
-    let decider = args.strategy.clone();
-    Ok(Arc::new(Space::new(
-        remote,
-        Arc::new(cache),
-        journal,
-        stats,
-        decider,
-        root.id,
-    )?))
+    let (remote, cache, journal) = (Arc::new(remote), Arc::new(cache), Arc::new(journal));
+    let stats = Arc::new(Stats::default());
+    let committer = Committer {
+        journal: journal.clone(),
+        remote: remote.clone(),
+        cache: cache.clone(),
+        stats: stats.clone(),
+    };
+    tokio::spawn(Arc::new(committer).run(woken));
+    let space = Space::new(remote, cache, journal, stats, args.strategy.clone(), root.id)?;
+    Ok(Arc::new(space))
 }
 
 fn parse_resolve(value: &str) -> Result<(String, IpAddr), String> {
     let (host, ip) = value.split_once('=').ok_or("expected HOST=IP")?;
-    let ip = ip
-        .parse()
-        .map_err(|err| format!("invalid IP address {ip:?}: {err}"))?;
+    let ip = ip.parse().map_err(|_| format!("invalid IP address {ip:?}"))?;
     Ok((host.to_owned(), ip))
 }
 

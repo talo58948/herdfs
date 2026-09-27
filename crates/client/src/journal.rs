@@ -1,22 +1,15 @@
 //! Journal copies of files being written, and the records that carry a closed write
 //! through a crash until the authority commits it (C1, C4a, C12).
 
-use std::{
-    collections::HashMap,
-    ffi::OsStr,
-    fs::{self, File, OpenOptions},
-    io::{self, Write},
-    path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering::Relaxed},
-    },
-};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, Mutex};
+use std::{collections::HashMap, ffi::OsStr, os::unix::fs::FileExt};
 
-use herdfs_core::{
-    ChunkId,
-    proto::{EntryId, Version, VersionId},
-};
+use herdfs_core::ChunkId;
+use herdfs_core::proto::{EntryId, Version, VersionId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
@@ -24,7 +17,7 @@ use crate::lock;
 
 mod commit;
 
-pub use commit::committer;
+pub use commit::Committer;
 
 const REJECTED: &str = "rejected";
 
@@ -42,7 +35,6 @@ pub struct Journal {
     dir: PathBuf,
     entries: Mutex<HashMap<EntryId, Tracked>>,
     wake: mpsc::UnboundedSender<EntryId>,
-    scratches: AtomicU64,
     /// Counts settled commits, so cached remote state from before one can be told apart.
     settled: AtomicU64,
 }
@@ -61,6 +53,10 @@ struct Tracked {
     committing: bool,
     /// The seal the last commit attempt covered, and whether it committed.
     attempts: watch::Sender<(u64, bool)>,
+    /// Writes to the copy so far and those under way, so a commit can tell whether it read
+    /// the copy at one instant (C3).
+    writes: u64,
+    writing: usize,
 }
 
 /// Keeps an entry's journal copy alive while one of its handles is open.
@@ -98,12 +94,11 @@ impl Journal {
     pub fn open(dir: PathBuf) -> io::Result<(Self, mpsc::UnboundedReceiver<EntryId>)> {
         fs::create_dir_all(dir.join(REJECTED))?;
         let (wake, woken) = mpsc::unbounded_channel();
-        let (entries, scratches, settled) = (Mutex::default(), AtomicU64::default(), AtomicU64::default());
+        let (entries, settled) = (Mutex::default(), AtomicU64::default());
         let journal = Self {
             dir,
             entries,
             wake,
-            scratches,
             settled,
         };
         for item in fs::read_dir(&journal.dir)? {
@@ -151,13 +146,43 @@ impl Journal {
 
     /// Joins the entry's journal copy, truncating it if asked. False if it has none.
     pub fn attach(&self, entry: EntryId, truncate: bool) -> io::Result<bool> {
-        let Some(copy) = self.copy(entry) else {
+        if self.copy(entry).is_none() {
             return Ok(false);
-        };
+        }
         if truncate {
-            copy.set_len(0)?;
+            self.set_len(entry, 0)?;
         }
         Ok(true)
+    }
+
+    pub fn write(&self, entry: EntryId, off: u64, data: &[u8]) -> io::Result<()> {
+        self.change(entry, |copy| copy.write_all_at(data, off))
+    }
+
+    pub fn set_len(&self, entry: EntryId, size: u64) -> io::Result<()> {
+        self.change(entry, |copy| copy.set_len(size))
+    }
+
+    /// Changes the entry's copy, counted before it starts and marked while under way.
+    fn change(&self, entry: EntryId, change: impl FnOnce(&File) -> io::Result<()>) -> io::Result<()> {
+        let copy = self
+            .copy(entry)
+            .ok_or_else(|| io::Error::other("no journal copy"))?;
+        if let Some(tracked) = lock(&self.entries).get_mut(&entry) {
+            (tracked.writes, tracked.writing) = (tracked.writes + 1, tracked.writing + 1);
+        }
+        let result = change(&copy);
+        if let Some(tracked) = lock(&self.entries).get_mut(&entry) {
+            tracked.writing -= 1;
+        }
+        result
+    }
+
+    /// How many writes the entry's copy has had, or `None` while one is under way.
+    pub fn writes(&self, entry: EntryId) -> Option<u64> {
+        let entries = lock(&self.entries);
+        let tracked = entries.get(&entry)?;
+        (tracked.writing == 0).then_some(tracked.writes)
     }
 
     pub fn settled(&self) -> u64 {
@@ -165,8 +190,9 @@ impl Journal {
     }
 
     pub fn scratch(&self, entry: EntryId) -> io::Result<Scratch> {
-        let number = self.scratches.fetch_add(1, Relaxed);
-        let path = self.dir.join(format!("{}.{number}.tmp", entry.0));
+        let path = self
+            .dir
+            .join(format!("{}.{:x}.tmp", entry.0, rand::random::<u64>()));
         let file = File::create(&path)?;
         Ok(Scratch { path, file })
     }

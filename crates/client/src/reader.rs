@@ -1,47 +1,41 @@
 //! Reads of remote versions through the verified chunk cache. Every strategy reads through
 //! here, so all of them return the same bytes (C8).
 
-use std::{
-    collections::HashMap,
-    fs::File,
-    io::Write,
-    sync::{Arc, Mutex},
-    time::SystemTime,
-};
+use std::sync::{Arc, Mutex};
+use std::{collections::HashMap, fs::File, io::Write, time::SystemTime};
 
 use futures::{StreamExt, TryStreamExt, stream};
-use herdfs_core::{
-    ChunkId, SpacePath,
-    proto::{Version, VersionId},
-};
+use herdfs_core::proto::{Version, VersionId};
+use herdfs_core::{ChunkId, SpacePath};
 use tokio::sync::{Mutex as FetchLock, OwnedMutexGuard};
 
-use crate::{
-    cache::Cache,
-    chunk_map::ChunkMap,
-    error::Error,
-    lock,
-    remote::Remote,
-    stats::{Stats, bump},
-    unix_ms,
-};
+use crate::cache::{Cache, Lru};
+use crate::stats::{Stats, bump};
+use crate::{chunk_map::ChunkMap, error::Error, lock, remote::Remote, unix_ms};
 
 /// Concurrent downloads per request, which is also the prefetch batch size.
 const DOWNLOADS: usize = 8;
 /// A cached grant this close to expiry is renewed rather than reused.
 const GRANT_MARGIN_MS: i64 = 10_000;
+/// Verified chunks kept in memory, so the FUSE reads within one chunk do not each re-read
+/// and re-hash it from disk.
+const MEMORY_BYTES: u64 = 64 << 20;
 
-/// A version opened for reading, with the path its grants are asked under.
+/// Chunk bytes by id, as one read gathers them.
+type Found = HashMap<ChunkId, Arc<Vec<u8>>>;
+/// The bytes of fetched chunks, in the order asked.
+type Fetched = Result<Vec<Vec<u8>>, Error>;
+
+/// A version opened for reading.
 pub struct OpenVersion {
-    pub path: SpacePath,
     pub version: Version,
     map: ChunkMap,
 }
 
 impl OpenVersion {
-    pub fn new(path: SpacePath, version: Version) -> Self {
+    pub fn new(version: Version) -> Self {
         let map = ChunkMap::new(&version.chunks);
-        Self { path, version, map }
+        Self { version, map }
     }
 
     fn id(&self, index: usize) -> ChunkId {
@@ -53,6 +47,7 @@ pub struct Reader {
     remote: Arc<Remote>,
     cache: Arc<Cache>,
     stats: Arc<Stats>,
+    memory: Mutex<Lru<Arc<Vec<u8>>>>,
     /// Presigned URLs by version and chunk index, with their expiry, reused until then.
     grants: Mutex<HashMap<(VersionId, usize), (String, i64)>>,
     /// A lock per chunk being fetched, so concurrent reads download it once.
@@ -61,58 +56,66 @@ pub struct Reader {
 
 impl Reader {
     pub fn new(remote: Arc<Remote>, cache: Arc<Cache>, stats: Arc<Stats>) -> Self {
+        let (memory, grants, fetching) = (Mutex::default(), Mutex::default(), Mutex::default());
         Self {
             remote,
             cache,
             stats,
-            grants: Mutex::default(),
-            fetching: Mutex::default(),
+            memory,
+            grants,
+            fetching,
         }
     }
 
-    /// Bytes `[off, off + len)` of `file`, fetching only the chunks that overlap them (C9).
-    pub async fn read(&self, file: &OpenVersion, off: u64, len: u64) -> Result<Vec<u8>, Error> {
-        self.read_with(file, off, len, |missing| self.fetch(file, missing))
+    /// Bytes `[off, off + len)` of `file`, fetching only the chunks that overlap them (C9),
+    /// with grants asked under `path`.
+    pub async fn read(
+        &self,
+        file: &OpenVersion,
+        path: &SpacePath,
+        off: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, Error> {
+        self.read_with(file, off, len, |missing| self.fetch(file, path, missing))
             .await
     }
 
     /// Downloads every chunk not yet cached, for the Fetch and Pin strategies.
-    pub async fn prefetch(&self, file: &OpenVersion) -> Result<(), Error> {
-        let missing: Vec<usize> = (0..file.version.chunks.len())
+    pub async fn prefetch(&self, file: &OpenVersion, path: &SpacePath) -> Result<(), Error> {
+        let fetch = |missing| self.fetch(file, path, missing);
+        let chunks = 0..file.version.chunks.len();
+        let missing: Vec<usize> = chunks
             .filter(|&index| !self.cache.contains(&file.id(index)))
             .collect();
         for batch in missing.chunks(DOWNLOADS) {
-            self.load(file, batch, |missing| self.fetch(file, missing))
-                .await?;
+            self.load(file, batch, fetch).await?;
         }
         Ok(())
     }
 
     /// Writes all of `file` to `out`, to start a journal copy from it.
-    pub async fn materialize(&self, file: &OpenVersion, out: &mut File) -> Result<(), Error> {
+    pub async fn materialize(
+        &self,
+        file: &OpenVersion,
+        path: &SpacePath,
+        out: &mut File,
+    ) -> Result<(), Error> {
+        let fetch = |missing| self.fetch(file, path, missing);
         let indices: Vec<usize> = (0..file.version.chunks.len()).collect();
         for batch in indices.chunks(DOWNLOADS) {
-            for chunk in self
-                .load(file, batch, |missing| self.fetch(file, missing))
-                .await?
-            {
-                out.write_all(&chunk)?;
-            }
+            let chunks = self.load(file, batch, fetch).await?;
+            chunks.iter().try_for_each(|chunk| out.write_all(chunk))?;
         }
         Ok(())
     }
 
-    async fn read_with<F, Fut>(
+    async fn read_with(
         &self,
         file: &OpenVersion,
         off: u64,
         len: u64,
-        fetch: F,
-    ) -> Result<Vec<u8>, Error>
-    where
-        F: FnOnce(Vec<usize>) -> Fut,
-        Fut: Future<Output = Result<Vec<Vec<u8>>, Error>>,
-    {
+        fetch: impl AsyncFnOnce(Vec<usize>) -> Fetched,
+    ) -> Result<Vec<u8>, Error> {
         let indices: Vec<usize> = file.map.overlapping(off, len).collect();
         let chunks = self.load(file, &indices, fetch).await?;
         let mut bytes = Vec::new();
@@ -123,66 +126,78 @@ impl Reader {
         Ok(bytes)
     }
 
-    /// The chunks at `indices`, from the cache where it has them and from `fetch` otherwise.
-    async fn load<F, Fut>(
+    /// The chunks at `indices`, from memory or the disk cache where they are and from
+    /// `fetch` otherwise.
+    async fn load(
         &self,
         file: &OpenVersion,
         indices: &[usize],
-        fetch: F,
-    ) -> Result<Vec<Arc<Vec<u8>>>, Error>
-    where
-        F: FnOnce(Vec<usize>) -> Fut,
-        Fut: Future<Output = Result<Vec<Vec<u8>>, Error>>,
-    {
-        let mut found = HashMap::new();
-        let mut missing = Vec::new();
-        self.look_up(file, indices, &mut found, &mut missing);
+        fetch: impl AsyncFnOnce(Vec<usize>) -> Fetched,
+    ) -> Result<Vec<Arc<Vec<u8>>>, Error> {
+        let mut found = Found::new();
+        let missing = self.look_up(file, indices, &mut found);
         if !missing.is_empty() {
             let claims = self.claim(file, &missing).await;
-            let mut needed = Vec::new();
             // Another read may have fetched them while this one waited for its claims.
-            self.look_up(file, &missing, &mut found, &mut needed);
+            let needed = self.look_up(file, &missing, &mut found);
             let fetched = fetch(needed.clone()).await?;
             if fetched.len() != needed.len() {
                 return Err(Error::Protocol("fetched a different number of chunks".into()));
             }
             for (index, bytes) in needed.into_iter().zip(fetched) {
-                if let Err(err) = self.cache.put(&file.id(index), &bytes) {
+                let (id, bytes) = (file.id(index), Arc::new(bytes));
+                if let Err(err) = self.cache.put(&id, &bytes) {
                     tracing::warn!(%err, "could not cache a chunk");
                 }
-                found.insert(file.id(index), Arc::new(bytes));
+                self.keep(id, bytes.clone());
+                found.insert(id, bytes);
             }
             drop(claims);
             lock(&self.fetching).retain(|_, fetch| Arc::strong_count(fetch) > 1);
         }
-        let chunk = |index: &usize| found.get(&file.id(*index)).cloned();
-        indices
-            .iter()
-            .map(|index| chunk(index).ok_or(Error::Corrupt(file.id(*index))))
-            .collect()
+        let chunk = |index: &usize| {
+            found
+                .get(&file.id(*index))
+                .cloned()
+                .ok_or(Error::Corrupt(file.id(*index)))
+        };
+        indices.iter().map(chunk).collect()
     }
 
-    /// Sorts `indices` into chunks the cache has and chunks still `missing`, once per chunk id.
-    fn look_up(
-        &self,
-        file: &OpenVersion,
-        indices: &[usize],
-        found: &mut HashMap<ChunkId, Arc<Vec<u8>>>,
-        missing: &mut Vec<usize>,
-    ) {
+    /// Adds the chunks at `indices` that memory or the disk cache has to `found`, and returns
+    /// the others, once per chunk id.
+    fn look_up(&self, file: &OpenVersion, indices: &[usize], found: &mut Found) -> Vec<usize> {
+        let mut missing: Vec<usize> = Vec::new();
         for &index in indices {
             let id = file.id(index);
             if found.contains_key(&id) || missing.iter().any(|&other| file.id(other) == id) {
                 continue;
             }
-            match self.cache.get(&id) {
+            match self.cached(&id) {
                 Some(bytes) => {
                     bump(&self.stats.cache_hits, 1);
-                    found.insert(id, Arc::new(bytes));
+                    found.insert(id, bytes);
                 }
                 None => missing.push(index),
             }
         }
+        missing
+    }
+
+    /// A verified chunk from memory, or from the disk cache, which checks its hash (C11).
+    fn cached(&self, id: &ChunkId) -> Option<Arc<Vec<u8>>> {
+        if let Some(bytes) = lock(&self.memory).get(id) {
+            return Some(bytes);
+        }
+        let bytes = Arc::new(self.cache.get(id)?);
+        self.keep(*id, bytes.clone());
+        Some(bytes)
+    }
+
+    fn keep(&self, id: ChunkId, bytes: Arc<Vec<u8>>) {
+        let mut memory = lock(&self.memory);
+        memory.insert(id, bytes.len() as u64, bytes);
+        memory.evict(MEMORY_BYTES, |_| false);
     }
 
     /// Takes the fetch lock of each chunk, in id order so that claims cannot deadlock.
@@ -204,8 +219,8 @@ impl Reader {
     }
 
     /// Grants and downloads chunks of `file`, verifying each against its id.
-    async fn fetch(&self, file: &OpenVersion, indices: Vec<usize>) -> Result<Vec<Vec<u8>>, Error> {
-        let urls = self.urls(file, &indices).await?;
+    async fn fetch(&self, file: &OpenVersion, path: &SpacePath, indices: Vec<usize>) -> Fetched {
+        let urls = self.urls(file, path, &indices).await?;
         let downloads = indices.into_iter().zip(urls).map(|(index, url)| async move {
             let chunk = self.remote.download(&url, file.version.chunks[index]).await;
             if chunk.is_err() {
@@ -214,47 +229,46 @@ impl Reader {
             chunk
         });
         let chunks: Vec<Vec<u8>> = stream::iter(downloads).buffered(DOWNLOADS).try_collect().await?;
+        let bytes: usize = chunks.iter().map(Vec::len).sum();
         bump(&self.stats.chunks_fetched, chunks.len() as u64);
-        bump(
-            &self.stats.bytes_fetched,
-            chunks.iter().map(|chunk| chunk.len() as u64).sum(),
-        );
+        bump(&self.stats.bytes_fetched, bytes as u64);
         Ok(chunks)
     }
 
     /// URLs for chunks `indices`, reusing unexpired grants and asking for the rest in one call.
-    async fn urls(&self, file: &OpenVersion, indices: &[usize]) -> Result<Vec<String>, Error> {
-        let version = file.version.id;
-        let reusable_after = unix_ms(SystemTime::now()) + GRANT_MARGIN_MS;
-        let mut urls: HashMap<usize, String> = {
+    async fn urls(
+        &self,
+        file: &OpenVersion,
+        path: &SpacePath,
+        indices: &[usize],
+    ) -> Result<Vec<String>, Error> {
+        let (version, usable_after) = (file.version.id, unix_ms(SystemTime::now()) + GRANT_MARGIN_MS);
+        let usable = |index: &usize| {
             let grants = lock(&self.grants);
-            let reusable = |index: usize| {
-                let (url, expires_ms) = grants.get(&(version, index))?;
-                (*expires_ms > reusable_after).then(|| (index, url.clone()))
-            };
-            indices.iter().filter_map(|&index| reusable(index)).collect()
+            let (url, expires_ms) = grants.get(&(version, *index))?;
+            (*expires_ms > usable_after).then(|| url.clone())
         };
-        let wanted: Vec<usize> = indices
+        let wanted: Vec<u32> = indices
             .iter()
-            .copied()
-            .filter(|index| !urls.contains_key(index))
+            .filter(|index| usable(index).is_none())
+            .map(|&i| i as u32)
             .collect();
         if !wanted.is_empty() {
-            let chunks = wanted.iter().map(|&index| index as u32).collect();
-            let (granted, expires_ms) = self.remote.grant(&file.path, version, chunks).await?;
+            let (urls, expires_ms) = self.remote.grant(path.clone(), version, wanted.clone()).await?;
             bump(&self.stats.grants, 1);
             let mut grants = lock(&self.grants);
-            grants.retain(|_, (_, expires)| *expires > reusable_after);
-            for (index, url) in wanted.into_iter().zip(granted) {
-                grants.insert((version, index), (url.clone(), expires_ms));
-                urls.insert(index, url);
-            }
+            grants.retain(|_, (_, expires)| *expires > usable_after);
+            let granted = wanted
+                .into_iter()
+                .zip(urls)
+                .map(|(index, url)| (index as usize, url));
+            grants.extend(granted.map(|(index, url)| ((version, index), (url, expires_ms))));
         }
-        let url = |index| {
-            urls.remove(index)
-                .ok_or_else(|| Error::Protocol("grant lacks URLs".into()))
-        };
-        indices.iter().map(url).collect()
+        let missing = || Error::Protocol("grant lacks usable URLs".into());
+        indices
+            .iter()
+            .map(|index| usable(index).ok_or_else(missing))
+            .collect()
     }
 }
 
