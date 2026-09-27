@@ -14,7 +14,7 @@ pub(crate) const AUTHORITY: &str = "herdfs-authority";
 pub(crate) const CLIENT: &str = "herdfs";
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
-const POLL: Duration = Duration::from_millis(50);
+pub(crate) const POLL: Duration = Duration::from_millis(50);
 const LOG_TAIL_LINES: usize = 20;
 /// Below Linux's ephemeral range, so outgoing connections never hold a port the lab is about to use.
 const PORTS: Range<u16> = 20_000..32_768;

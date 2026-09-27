@@ -186,6 +186,11 @@ impl Lab {
         self.client(name).stats()
     }
 
+    /// Waits until client `name` has committed, or set aside, every write closed so far.
+    pub fn wait_committed(&self, name: &str) -> Result<()> {
+        self.client(name).wait_committed()
+    }
+
     /// Takes client `name`'s links down; connects to them are refused.
     pub fn cut(&self, name: &str, links: Links) -> Result<()> {
         self.toxiproxy.set_links(name, links, false)

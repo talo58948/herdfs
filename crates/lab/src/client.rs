@@ -4,6 +4,8 @@ use std::fs;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
@@ -15,6 +17,8 @@ use crate::{Profile, SPACE};
 
 const CACHE_BYTES: u64 = 1 << 30;
 const STATS_XATTR: &str = "user.herdfs.stats";
+/// Long enough for a few commit retries, which back off from 1 s.
+const COMMIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The access strategy a client's mount uses (`--strategy`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,6 +128,20 @@ impl Client {
         let json = xattr::get(&self.mount, STATS_XATTR)?
             .with_context(|| format!("{} has no {STATS_XATTR}", self.mount.display()))?;
         Ok(serde_json::from_slice(&json)?)
+    }
+
+    /// Waits until every write closed so far is committed or set aside.
+    pub(crate) fn wait_committed(&self) -> Result<()> {
+        let deadline = Instant::now() + COMMIT_TIMEOUT;
+        while self.stats()?["pending_commits"] != 0 {
+            ensure!(
+                Instant::now() < deadline,
+                "{} has pending commits after {COMMIT_TIMEOUT:?}",
+                self.spec.name
+            );
+            thread::sleep(process::POLL);
+        }
+        Ok(())
     }
 }
 
