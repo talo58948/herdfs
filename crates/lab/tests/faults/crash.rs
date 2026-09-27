@@ -122,7 +122,6 @@ fn f1_a_client_killed_mid_write_keeps_its_last_commit() -> Result<()> {
 
 // contract: C4a, C3
 #[test]
-#[ignore = "BUG: a rewrite truncates the journal copy that a closed write is still committing from"]
 fn f1_a_client_killed_mid_rewrite_still_commits_the_write_it_closed() -> Result<()> {
     let Some(mut lab) = two_clients()? else {
         return Ok(());
@@ -145,7 +144,6 @@ fn f1_a_client_killed_mid_rewrite_still_commits_the_write_it_closed() -> Result<
 /// The fault-free core of the test above, and its minimal repro.
 // contract: C3
 #[test]
-#[ignore = "BUG: a rewrite truncates the journal copy that a closed write is still committing from"]
 fn a_rewrite_while_a_closed_write_commits_publishes_only_whole_versions() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
