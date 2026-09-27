@@ -45,7 +45,7 @@ impl Authority {
             .args(["--s3-public-endpoint", &format!("http://{S3_HOST}:{store_port}")])
             .args(["--s3-bucket", store::BUCKET, "--s3-region", store::REGION])
             .args(["--oidc-issuer", issuer.url(), "--oidc-audience", issuer::AUDIENCE])
-            .envs(store::CREDENTIALS);
+            .envs(store::STORE_CREDENTIALS);
         let mut authority = Proc::spawn("authority", command, &dir.join("authority.log"))?;
         let health = format!("http://{listen}/v1/health");
         authority.wait_until("healthy", || {

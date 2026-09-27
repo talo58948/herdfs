@@ -16,8 +16,8 @@ pub struct Hit {
     pub canary: String,
 }
 
-/// Every file under `paths` that contains any of `canaries`, once per canary. Symlinks are
-/// not followed, and files that vanish during the sweep are skipped.
+/// Every file under `paths` that contains any of `canaries`, once per canary, and every entry
+/// whose name does. Symlinks are not followed, and files that vanish during the sweep are skipped.
 pub fn sweep(paths: &[&Path], canaries: &[String]) -> io::Result<Vec<Hit>> {
     let mut hits = Vec::new();
     for path in paths {
@@ -30,6 +30,8 @@ fn visit(path: &Path, canaries: &[String], hits: &mut Vec<Hit>) -> io::Result<()
     let Some(metadata) = unless_vanished(fs::symlink_metadata(path))? else {
         return Ok(());
     };
+    let name = path.file_name().unwrap_or_default().as_encoded_bytes();
+    record(path, name, canaries, hits);
     if metadata.is_dir() {
         let Some(entries) = unless_vanished(fs::read_dir(path))? else {
             return Ok(());
@@ -45,14 +47,19 @@ fn visit(path: &Path, canaries: &[String], hits: &mut Vec<Hit>) -> io::Result<()
     let Some(bytes) = unless_vanished(fs::read(path))? else {
         return Ok(());
     };
+    record(path, &bytes, canaries, hits);
+    Ok(())
+}
+
+/// A hit at `path` for each canary in `bytes`.
+fn record(path: &Path, bytes: &[u8], canaries: &[String], hits: &mut Vec<Hit>) {
     let found = canaries
         .iter()
-        .filter(|canary| contains(&bytes, canary.as_bytes()));
+        .filter(|canary| contains(bytes, canary.as_bytes()));
     hits.extend(found.map(|canary| Hit {
         path: path.to_owned(),
         canary: canary.clone(),
     }));
-    Ok(())
 }
 
 fn unless_vanished<T>(result: io::Result<T>) -> io::Result<Option<T>> {

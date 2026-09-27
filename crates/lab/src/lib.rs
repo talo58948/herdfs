@@ -26,13 +26,14 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 use crate::authority::Authority;
-use crate::client::{Client, ClientSpec};
+use crate::client::{CACHE_BYTES, Client, ClientSpec};
 use crate::issuer::Issuer;
 use crate::store::{S3_HOST, Store};
 use crate::toxiproxy::Toxiproxy;
 
 pub use crate::client::Strategy;
 pub use crate::issuer::BadToken;
+pub use crate::store::STORE_CREDENTIALS;
 pub use crate::sweep::{Hit, canary, sweep};
 pub use crate::toxiproxy::{Links, Profile};
 
@@ -68,7 +69,15 @@ impl LabConfig {
             groups,
             profile,
             strategy,
+            cache_bytes: CACHE_BYTES,
         });
+        self
+    }
+
+    /// Limits client `name`'s chunk cache to `bytes` instead of 1 GiB.
+    pub fn cache_bytes(mut self, name: &str, bytes: u64) -> Self {
+        let client = self.clients.iter_mut().find(|client| client.name == name);
+        client.unwrap_or_else(|| no_client(name)).cache_bytes = bytes;
         self
     }
 }
@@ -179,6 +188,16 @@ impl Lab {
     /// Client `name`'s cache, journal, token file and log: what an attacker on its host holds.
     pub fn client_dir(&self, name: &str) -> &Path {
         &self.client(name).dir
+    }
+
+    /// The pid of client `name`'s mount process, while it runs.
+    pub fn client_pid(&self, name: &str) -> Option<u32> {
+        self.client(name).pid()
+    }
+
+    /// The authority's base URL as client `name` reaches it, through its link.
+    pub fn authority_url(&self, name: &str) -> String {
+        self.client(name).authority_url(self.authority.port)
     }
 
     /// Client `name`'s counters, from the `user.herdfs.stats` xattr on its mount root.

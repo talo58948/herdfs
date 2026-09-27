@@ -41,6 +41,10 @@ impl Proc {
         })
     }
 
+    pub(crate) fn id(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Polls `ready` until it holds. Fails with the end of the log if the process exits first
     /// or does not get ready in time.
     pub(crate) fn wait_until(&mut self, what: &str, mut ready: impl FnMut() -> bool) -> Result<()> {
