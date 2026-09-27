@@ -223,14 +223,9 @@ impl Reader {
     }
 
     /// Grants chunks of `file`, then downloads them, verifying each against its id.
-    async fn fetch<'a>(
-        &'a self,
-        file: &'a OpenVersion,
-        path: &SpacePath,
-        indices: Vec<usize>,
-    ) -> Fetched<'a> {
-        let urls = self.urls(file, path, &indices).await?;
-        let downloads = indices.into_iter().zip(urls);
+    async fn fetch<'a>(&'a self, file: &'a OpenVersion, path: &SpacePath, wanted: Vec<usize>) -> Fetched<'a> {
+        let urls = self.urls(file, path, &wanted).await?;
+        let downloads = wanted.into_iter().zip(urls);
         let downloads = downloads.map(|(index, url)| self.download(file, index, url));
         Ok(stream::iter(downloads).buffered(DOWNLOADS).boxed())
     }

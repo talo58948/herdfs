@@ -127,7 +127,9 @@ pub fn measure_all() -> Result<Vec<Case>> {
 
 /// A writer, and on each link one client per strategy.
 fn start_lab() -> Result<Lab> {
-    let mut config = LabConfig::default().client("writer", "alice", &[], Profile::Lan, Mounted::Stream);
+    // On tmpfs: the files and caches of this lab outgrow the CI host's spare disk.
+    let config = LabConfig::default().on_tmpfs();
+    let mut config = config.client("writer", "alice", &[], Profile::Lan, Mounted::Stream);
     for (link, strategy) in LINKS
         .into_iter()
         .flat_map(|link| Strategy::ALL.map(|strategy| (link, strategy)))
@@ -168,7 +170,7 @@ fn write_files(lab: &Lab) -> Result<()> {
 /// Runs the case's workload on a cold mount of `client`: its wall time in seconds, and the
 /// bytes the client had fetched when it ended.
 fn measure(lab: &mut Lab, client: &str, case: &Case) -> Result<(f64, u64)> {
-    restart_cold(lab, client)?;
+    lab.restart_client(client)?;
     let script = case
         .workload
         .script(&lab.mount_path(client).join(file_name(case.mib)), case.mib);
@@ -179,25 +181,26 @@ fn measure(lab: &mut Lab, client: &str, case: &Case) -> Result<(f64, u64)> {
     let bytes = lab.stats(client)?["bytes_fetched"]
         .as_u64()
         .context("stats lack bytes_fetched")?;
-    // Stops a Fetch or Pin prefetch from competing with the next run.
-    lab.kill_client(client)?;
+    // Also stops a Fetch or Pin prefetch from competing with the next run.
+    stop_cold(lab, client)?;
     Ok((seconds, bytes))
 }
 
-/// Mounts `client` again with an empty cache.
-fn restart_cold(lab: &mut Lab, client: &str) -> Result<()> {
+/// Stops `client` and empties its cache, so that it holds no bytes until it mounts again cold.
+fn stop_cold(lab: &mut Lab, client: &str) -> Result<()> {
     lab.kill_client(client)?;
-    // The client makes its cache directory again when it starts.
-    fs::remove_dir_all(lab.client_dir(client).join("cache"))?;
-    lab.restart_client(client)
+    let cache = lab.client_dir(client).join("cache");
+    fs::remove_dir_all(&cache)?;
+    Ok(fs::create_dir(&cache)?)
 }
 
 /// The round trip, in seconds, that a fresh client of `link` has measured when it first opens
 /// the file of `mib` MiB, as its stats report it.
 fn round_trip(lab: &mut Lab, link: Profile, mib: u64) -> Result<f64> {
     let client = client(link, Strategy::Stream);
-    restart_cold(lab, &client)?;
+    lab.restart_client(&client)?;
     File::open(lab.mount_path(&client).join(file_name(mib)))?;
     let millis = lab.stats(&client)?["round_trip_ms"].as_f64();
+    stop_cold(lab, &client)?;
     Ok(millis.context("stats lack round_trip_ms")? / 1e3)
 }
