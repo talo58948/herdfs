@@ -35,7 +35,8 @@ use herdfs_core::{
 use tempfile::TempDir;
 
 const STEPS: usize = 150;
-const NAMES: [&str; 2] = ["a", "b"];
+/// Names no message contains by chance (`x` and `y` are not hex), so a leaked path shows.
+const NAMES: [&str; 2] = ["x7", "y8"];
 const SPACES: [&str; 5] = ["s", "t", "u", "Bad", ".x"];
 const GRANTEES: [&str; 4] = ["user:bob", "user:carol", "group:eng", "carol"];
 /// Index of the auditor in `Sim::actors`; the auditor only observes.
@@ -161,10 +162,11 @@ impl Sim {
         self.now_ms += 1 + self.rng.below(1_000) as i64;
         let principal = self.actors[who].clone();
         let want = self.model.outcome(&principal, request);
-        let got = self
-            .authority
-            .handle(&principal, request.clone(), self.now_ms)
-            .map_err(|error| error.code);
+        let got = self.authority.handle(&principal, request.clone(), self.now_ms);
+        if let (Request::Commit { .. }, Err(error)) = (request, &got) {
+            self.check_refusal(&principal, &error.message);
+        }
+        let got = got.map_err(|error| error.code);
         assert_eq!(
             got.as_ref().err(),
             want.as_ref().err(),

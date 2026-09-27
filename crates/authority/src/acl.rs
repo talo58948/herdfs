@@ -6,7 +6,7 @@ use herdfs_core::{
 };
 use rusqlite::params;
 
-use crate::{Call, Result, db::parse, refuse};
+use crate::{Call, Fail, Result, db::parse, refuse};
 
 fn perm_name(perm: Perm) -> &'static str {
     match perm {
@@ -16,25 +16,42 @@ fn perm_name(perm: Perm) -> &'static str {
     }
 }
 
+/// Names only the perm: the path of a request by id may be hidden from the caller.
+fn denied(need: Perm) -> Fail {
+    refuse(ErrorCode::Denied, format!("denied: needs {}", perm_name(need)))
+}
+
 impl Call<'_> {
     /// Fails with `NotFound` for a missing space and `Denied` below `need`,
     /// whether or not `path` exists.
     pub(crate) fn require(&self, space: &str, path: &SpacePath, need: Perm) -> Result<()> {
         self.require_space(space)?;
-        if self.perm(space, path)? >= Some(need) {
-            return Ok(());
+        let grants = self.grants(space)?.into_iter();
+        let best = grants
+            .filter(|(granted, _)| path.is_within(granted))
+            .map(|(_, perm)| perm)
+            .max();
+        if best < Some(need) {
+            return Err(denied(need));
         }
-        let message = format!("{} lacks {} on {path}", self.who.user, perm_name(need));
-        Err(refuse(ErrorCode::Denied, message))
+        Ok(())
     }
 
-    /// The highest perm granted to the caller, or one of its groups, on
-    /// `path` or any ancestor.
-    fn perm(&self, space: &str, path: &SpacePath) -> Result<Option<Perm>> {
+    /// Fails unless the caller holds `need` on some path of the space.
+    pub(crate) fn require_somewhere(&self, space: &str, need: Perm) -> Result<()> {
+        self.require_space(space)?;
+        if !self.grants(space)?.iter().any(|(_, perm)| *perm >= need) {
+            return Err(denied(need));
+        }
+        Ok(())
+    }
+
+    /// The caller's ACL rows in `space`, from its user and its groups.
+    fn grants(&self, space: &str) -> Result<Vec<(SpacePath, Perm)>> {
         let mut query = self
             .db
             .prepare_cached("SELECT path, perm FROM acl WHERE space = ?1 AND principal = ?2")?;
-        let mut best = None;
+        let mut grants = Vec::new();
         for principal in self.principals() {
             let rows = query.query_map(params![space, principal], |row| {
                 let granted = parse(row, 0, |text| SpacePath::try_from(text).ok())?;
@@ -43,30 +60,11 @@ impl Call<'_> {
                         .into_iter()
                         .find(|perm| perm_name(*perm) == text)
                 })?;
-                Ok(path.is_within(&granted).then_some(perm))
+                Ok((granted, perm))
             })?;
-            for perm in rows {
-                best = best.max(perm?);
-            }
+            grants.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
         }
-        Ok(best)
-    }
-
-    /// Uploads need write somewhere in the space: they are only useful to commit.
-    pub(crate) fn may_upload(&self, space: &str) -> Result<()> {
-        self.require_space(space)?;
-        let mut query = self.db.prepare_cached(
-            "SELECT EXISTS (SELECT 1 FROM acl WHERE space = ?1 AND principal = ?2 AND perm IN ('write', 'admin'))",
-        )?;
-        for principal in self.principals() {
-            if query.query_row(params![space, principal], |row| row.get(0))? {
-                return Ok(());
-            }
-        }
-        Err(refuse(
-            ErrorCode::Denied,
-            format!("{} cannot write in {space}", self.who.user),
-        ))
+        Ok(grants)
     }
 
     pub(crate) fn set_acl(

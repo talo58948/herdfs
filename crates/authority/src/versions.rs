@@ -48,7 +48,8 @@ impl Call<'_> {
         })
     }
 
-    /// Entry ids are not secret: an unknown id is `NotFound` before any permission check.
+    /// Entry ids are not secret: an unknown id is `NotFound` before any permission
+    /// check. Its path may be, so no refusal here names it.
     pub(crate) fn commit(
         &self,
         space: &str,
@@ -70,7 +71,7 @@ impl Call<'_> {
         if entry.kind != Kind::File {
             return Err(refuse(
                 ErrorCode::Invalid,
-                format!("{} is not a file", entry.path),
+                format!("entry {} is not a file", entry.id.0),
             ));
         }
         let base_chunks = match base {
@@ -94,7 +95,7 @@ impl Call<'_> {
         if guarded && entry.head != base {
             return Err(refuse(
                 ErrorCode::Conflict,
-                format!("{} has moved past its base", entry.path),
+                format!("entry {} has moved past its base", entry.id.0),
             ));
         }
         let version = self.add_version(&entry, chunks)?;
@@ -123,8 +124,9 @@ impl Call<'_> {
         })
     }
 
+    /// Uploads need write somewhere in the space: they are only useful to commit.
     pub(crate) fn record_upload(&self, space: &str, chunk: ChunkRef) -> Result<()> {
-        self.may_upload(space)?;
+        self.require_somewhere(space, Perm::Write)?;
         self.db
             .prepare_cached("INSERT OR REPLACE INTO uploads (principal, chunk, len) VALUES (?1, ?2, ?3)")?
             .execute(params![self.who.user, chunk.id.to_string(), chunk.len])?;
