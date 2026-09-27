@@ -141,7 +141,8 @@ impl Sim {
         );
     }
 
-    /// Resends an earlier commit, mostly an acknowledged one, as a client does after losing the reply.
+    /// Resends an earlier commit, mostly an acknowledged one, as a client does
+    /// after losing the reply; sometimes to another entry under the same id.
     pub fn retry(&mut self) {
         let any = self.rng.chance(20);
         let acked = |(who, request): &&(usize, Request)| match request {
@@ -152,8 +153,47 @@ impl Sim {
             _ => false,
         };
         let candidates: Vec<_> = self.sent.iter().filter(acked).cloned().collect();
-        if let Some((who, request)) = self.rng.pick(&candidates) {
-            self.send(who, &request);
+        let Some((who, mut request)) = self.rng.pick(&candidates) else {
+            return;
+        };
+        let Request::Commit {
+            space,
+            entry,
+            request_id,
+            ..
+        } = &mut request
+        else {
+            unreachable!()
+        };
+        let first = self
+            .model
+            .commits
+            .get(&(self.actors[who].user.clone(), request_id.clone()))
+            .copied();
+        // Sometimes a buggy client reuses the id for a commit to another file.
+        let others: Vec<_> = self
+            .model
+            .spaces
+            .get(space.as_str())
+            .map_or_else(Vec::new, |known| {
+                known
+                    .nodes
+                    .values()
+                    .map(|node| node.id)
+                    .filter(|id| id != entry)
+                    .collect()
+            });
+        let reused = match self.rng.pick(&others) {
+            Some(other) if self.rng.chance(30) => {
+                *entry = other;
+                true
+            }
+            _ => false,
+        };
+        let got = self.exec(who, &request);
+        if reused && first.is_some() {
+            // contract: C4a, C12 — an id reused on another entry commits nothing and returns no version.
+            assert_eq!(got.err(), Some(ErrorCode::Invalid), "{request:?}");
         }
     }
 

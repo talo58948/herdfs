@@ -252,8 +252,8 @@ impl Model {
     ) -> Outcome {
         self.space(space)?;
         let retry = (who.user.clone(), request_id.to_owned());
-        if self.commits.contains_key(&retry) {
-            return Ok(());
+        if let Some(first) = self.commits.get(&retry) {
+            return ensure(self.versions[first].entry == entry, ErrorCode::Invalid);
         }
         let (path, node) = self.node_by_id(space, entry).ok_or(ErrorCode::NotFound)?;
         self.require(who, space, path, Perm::Write)?;

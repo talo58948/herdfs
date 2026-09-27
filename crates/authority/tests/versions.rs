@@ -78,6 +78,22 @@ fn a_repeated_request_id_from_the_same_principal_returns_the_first_version() {
 }
 
 #[test]
+fn a_request_id_reused_on_another_entry_is_invalid() {
+    // contract: C4a, C12
+    let mut fx = Fixture::new();
+    let (_, version) = fx.file("f", b"one");
+    let other = fx.create(&alice(), "g").unwrap();
+    let reused = fx.commit(&alice(), other.id, "f", None, false, &[]);
+    assert_eq!(
+        reused,
+        Err(ErrorCode::Invalid),
+        "f's commit used request id \"f\""
+    );
+    assert_eq!(fx.history(&alice(), "g"), Ok(vec![]));
+    assert_eq!(fx.history(&alice(), "f"), Ok(vec![version]));
+}
+
+#[test]
 fn grants_cover_chunks_of_a_version_of_that_entry() {
     // contract: S2
     let mut fx = Fixture::new();
