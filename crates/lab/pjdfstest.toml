@@ -1,0 +1,11 @@
+# pjdfstest settings for ring R2. Run without root, pjdfstest skips the tests that switch
+# users, but it still needs two existing users named here to start.
+[features]
+utime_now = {}
+utimensat = {}
+
+[settings]
+naptime = 0.01
+
+[dummy_auth]
+entries = [["nobody", "nogroup"], ["daemon", "daemon"]]
