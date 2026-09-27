@@ -200,7 +200,8 @@ impl Reader {
     fn keep(&self, id: ChunkId, bytes: Arc<Vec<u8>>) {
         let mut memory = lock(&self.memory);
         memory.insert(id, bytes.len() as u64, bytes);
-        memory.evict(MEMORY_BYTES, |_| false);
+        // Never more than the disk cache may hold, so `--cache-bytes` bounds both.
+        memory.evict(MEMORY_BYTES.min(self.cache.capacity()), |_| false);
     }
 
     /// Takes the fetch lock of each chunk, in id order so that claims cannot deadlock.
