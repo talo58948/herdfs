@@ -104,6 +104,22 @@ fn probe(ips: &[Ipv4Addr], held: &mut Vec<TcpListener>) -> Option<u16> {
     Some(port)
 }
 
+/// Runs a tool to completion and returns its standard output; fails with its standard error if
+/// it fails.
+pub fn run(command: &mut Command) -> Result<String> {
+    let output = command
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("starting {:?}", command.get_program()))?;
+    ensure!(
+        output.status.success(),
+        "{command:?}: {}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8(output.stdout)?)
+}
+
 /// The path of a workspace binary, as built by `cargo build --bins`.
 pub(crate) fn binary(name: &str) -> Result<PathBuf> {
     let target = env::var_os("CARGO_TARGET_DIR").map_or_else(

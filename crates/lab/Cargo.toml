@@ -19,5 +19,8 @@ tempfile.workspace = true
 tokio.workspace = true
 xattr.workspace = true
 
+[dev-dependencies]
+libc.workspace = true
+
 [lints]
 workspace = true
