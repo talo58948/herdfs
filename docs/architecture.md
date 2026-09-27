@@ -62,10 +62,12 @@ herdfs mount --authority http://127.0.0.2:7000 --space NAME --token-file PATH
     [--strategy stream|fetch|pin|rule|chaos:SEED|jev] [--resolve s3.lab=127.0.0.2]
     MOUNTPOINT
 
-herdfs-agents --mount DIR --host NAME --command 'codex exec --full-auto' [--max-sessions 2]
+herdfs-agents --mount DIR --host NAME --command 'codex exec --full-auto' [--max-sessions 2] [--poll-ms 1000]
 ```
 
 `--resolve` works like curl's: requests for that host name connect to the given IP, keeping the URL's port and the signed `Host` header. The lab uses it to route each client through its own toxiproxy listener (127.0.0.N) without breaking presigned URL signatures.
+
+Agents sessions live in `/.agents/<host>/<session>/`. The session holds `prompt` (and an optional `cwd` relative to the mount); the runner writes `status` (`running`, `done`, `failed: <reason>`) and `output`. Other hosts see `output` when the session ends, because a file becomes visible to them on close.
 
 Client observability: `getfattr -n user.herdfs.stats MOUNT` returns JSON counters: `bytes_fetched`, `chunks_fetched`, `cache_hits`, `grants`, `commits`, `pending_commits`, `decisions` per strategy.
 
