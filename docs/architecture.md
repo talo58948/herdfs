@@ -47,6 +47,8 @@ All strategies read through the same verified chunk cache, so they return identi
 - The authority validates OIDC JWTs: signature via the issuer's JWKS (discovery document), `iss`, `aud`, `exp`. The principal is `user:<sub>`; the `groups` claim adds `group:<name>` principals.
 - ACL rows are `(space, path, principal, perm)`. A principal's permission on a path is the highest perm granted on that path or any ancestor. Perms: `read` < `write` < `admin`. The creator of a space gets `admin` on its root.
 - Read ops need `read` on the path. Mutations need `write` on the path; for create, mkdir and rename, on both source and destination. `SetAcl` and `Fork` need `admin`.
+- ACL rows attach to paths, not entries. They stay where they are when an entry is renamed or removed, so a moved subtree takes the grants of its new place, and a new entry at an old path inherits that path's grants.
+- Entry ids are not secret: a commit to an id that does not exist says so.
 - One mount is one principal. POSIX mode bits are stored and reported, not enforced. Every entry is shown as owned by the mounting user.
 
 ## Binaries (the lab depends on these flags)
