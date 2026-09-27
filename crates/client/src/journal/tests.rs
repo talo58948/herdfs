@@ -1,10 +1,9 @@
-use std::future::ready;
+use std::os::unix::fs::FileExt;
 
 use herdfs_core::ChunkRef;
 
-use super::commit::{Outcome, snapshot};
+use super::commit::Outcome;
 use super::*;
-use crate::{cache::Cache, error::Error};
 
 const ENTRY: EntryId = EntryId(7);
 
@@ -37,22 +36,59 @@ fn sealed(dir: &Path, bytes: &[u8]) -> (Arc<Journal>, mpsc::UnboundedReceiver<En
     (journal, woken)
 }
 
+/// What this client reads for `ENTRY`.
+fn read(journal: &Journal) -> Vec<u8> {
+    let copy = journal.copy(ENTRY).unwrap();
+    let mut bytes = vec![0; copy.metadata().unwrap().len() as usize];
+    copy.read_exact_at(&mut bytes, 0).unwrap();
+    bytes
+}
+
 // contract: C4a
 #[test]
-fn a_sealed_write_is_recovered_after_a_restart() {
+fn a_sealed_write_is_recovered_after_a_restart_and_an_unclosed_one_dropped() {
     let dir = tempfile::tempdir().unwrap();
-    let (journal, mut woken) = sealed(dir.path(), b"new bytes");
+    let (journal, mut woken) = sealed(dir.path(), b"closed");
     assert_eq!(woken.try_recv().unwrap(), ENTRY);
     let before = journal.next(ENTRY).unwrap().record;
-    assert_eq!(before.base, Some(VersionId(3)));
-    assert_eq!(before.base_chunks, [ChunkId::of(b"old")]);
+    assert_eq!(
+        (before.base, before.base_chunks.clone()),
+        (Some(VersionId(3)), vec![ChunkId::of(b"old")])
+    );
+    let _writer = journal.opened(ENTRY);
+    journal.attach(ENTRY, true).unwrap();
+    journal.write(ENTRY, 0, b"never closed").unwrap();
     drop(journal);
 
     let (journal, mut woken) = Journal::open(dir.path().into()).unwrap();
     assert_eq!(woken.try_recv().unwrap(), ENTRY);
     let job = journal.next(ENTRY).unwrap();
     assert_eq!(job.record, before);
-    assert_eq!(fs::read(job.copy).unwrap(), b"new bytes");
+    assert_eq!(fs::read(job.sealed).unwrap(), b"closed");
+    assert_eq!(read(&journal), b"closed");
+    assert!(!dir.path().join("7.work").exists());
+}
+
+// contract: C3
+#[test]
+fn a_sealed_copy_never_changes_under_the_committer() {
+    let dir = tempfile::tempdir().unwrap();
+    let (journal, _woken) = sealed(dir.path(), b"first");
+    let first = journal.next(ENTRY).unwrap();
+    let writer = journal.opened(ENTRY);
+    journal.write(ENTRY, 5, b" and more").unwrap();
+    assert_eq!(read(&journal), b"first and more");
+    journal.attach(ENTRY, true).unwrap();
+    journal.write(ENTRY, 0, b"second").unwrap();
+    journal.seal(ENTRY).unwrap();
+    drop(writer);
+    assert_eq!(fs::read(&first.sealed).unwrap(), b"first");
+
+    journal.finish(&first, Outcome::Committed(base()));
+    assert!(!first.sealed.exists(), "a newer seal replaced it");
+    let second = journal.next(ENTRY).unwrap();
+    assert_eq!(fs::read(&second.sealed).unwrap(), b"second");
+    assert_eq!(read(&journal), b"second");
 }
 
 // contract: C1, C4a
@@ -74,7 +110,11 @@ fn the_copy_shadows_reads_until_its_commit_settles() {
     assert!(journal.next(ENTRY).is_none());
     assert!(journal.copy(ENTRY).is_none());
     assert_eq!(journal.pending_count(), 0);
-    assert!(!dir.path().join("7.json").exists() && !dir.path().join("7.copy").exists());
+    assert_eq!(
+        fs::read_dir(dir.path()).unwrap().count(),
+        1,
+        "only rejected/ is left"
+    );
 }
 
 // contract: C12
@@ -105,42 +145,7 @@ fn an_open_handle_keeps_a_committed_copy() {
     let job = journal.next(ENTRY).unwrap();
     journal.finish(&job, Outcome::Committed(base()));
     assert!(journal.next(ENTRY).is_none());
-    assert!(journal.copy(ENTRY).is_some());
+    assert_eq!(read(&journal), b"x");
     drop(reader);
     assert!(journal.copy(ENTRY).is_none());
-}
-
-// contract: C3, S6
-#[tokio::test]
-async fn a_write_during_a_commit_attempt_voids_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let (journal, _woken) = sealed(dir.path(), b"first");
-    let cache = Cache::open(dir.path().join("cache"), 1 << 20).unwrap();
-    let job = journal.next(ENTRY).unwrap();
-    let write_while_uploading = |_, _| ready(journal.write(ENTRY, 0, b"second").map_err(Error::from));
-    assert_eq!(
-        snapshot(&journal, &cache, &job, write_while_uploading)
-            .await
-            .unwrap(),
-        None
-    );
-
-    let uploaded = std::sync::Mutex::new(Vec::new());
-    let upload = |id, _| {
-        uploaded.lock().unwrap().push(id);
-        ready(Ok(()))
-    };
-    let chunks = snapshot(&journal, &cache, &job, upload).await.unwrap().unwrap();
-    let second = ChunkId::of(b"second");
-    assert_eq!(chunks, [ChunkRef { id: second, len: 6 }]);
-    assert_eq!(*uploaded.lock().unwrap(), [second]);
-    assert!(cache.contains(&second));
-
-    // A chunk the base already has is referenced without an upload.
-    journal.set_len(ENTRY, 0).unwrap();
-    journal.write(ENTRY, 0, b"old").unwrap();
-    uploaded.lock().unwrap().clear();
-    let chunks = snapshot(&journal, &cache, &job, upload).await.unwrap().unwrap();
-    assert_eq!(chunks, base().chunks);
-    assert!(uploaded.lock().unwrap().is_empty());
 }

@@ -129,6 +129,10 @@ impl Cache {
         Ok(())
     }
 
+    pub fn capacity(&self) -> u64 {
+        self.capacity
+    }
+
     pub fn contains(&self, id: &ChunkId) -> bool {
         lock(&self.index).chunks.contains(id)
     }
