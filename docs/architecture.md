@@ -40,7 +40,7 @@ Chosen once per open by a `Decider`, never per read:
 | `Fetch` | prefetch every chunk in the background | LRU |
 | `Pin` | prefetch every chunk | never evicted while pinned |
 
-All strategies read through the same verified chunk cache, so they return identical bytes (C8). Deciders: fixed, size rule, chaos (seeded random, for tests), and Jev through Vercel AI Gateway with a 300 ms budget and a fixed default on timeout or low confidence.
+All strategies read through the same verified chunk cache, so they return identical bytes (C8). Deciders: fixed, size rule, chaos (seeded random, for tests), and Jev through Vercel AI Gateway. `open` never waits for Jev: it takes Jev's remembered answer for a similar open (the same process and extension, and the same phrases for size, cached share, recent opens, round trip and download time), or the size rule's choice while Jev is asked in the background. Errors, a 2 s timeout and low confidence leave the rule's choice (P2). A confident later answer upgrades a still-open Stream handle to Fetch or Pin.
 
 ## Identity and permissions
 
@@ -62,6 +62,7 @@ herdfs-authority --listen 127.0.0.1:7000 --db PATH
 herdfs mount --authority http://127.0.0.2:7000 --space NAME --token-file PATH
     --cache DIR --cache-bytes N --journal DIR
     [--strategy stream|fetch|pin|rule|chaos:SEED|jev] [--resolve s3.lab=127.0.0.2]
+    [--jev-key-file PATH] [--jev-url https://ai-gateway.vercel.sh/v1/evaluate]  # key file required with jev
     MOUNTPOINT
 
 herdfs-agents --mount DIR --host NAME --command 'codex exec --full-auto' [--max-sessions 2] [--poll-ms 1000]
@@ -71,7 +72,7 @@ herdfs-agents --mount DIR --host NAME --command 'codex exec --full-auto' [--max-
 
 Agents sessions live in `/.agents/<host>/<session>/`. The session holds `prompt` (and an optional `cwd` relative to the mount); the runner writes `status` (`running`, `done`, `failed: <reason>`) and `output`. Other hosts see `output` when the session ends, because a file becomes visible to them on close.
 
-Client observability: `getfattr -n user.herdfs.stats MOUNT` returns JSON counters: `bytes_fetched`, `chunks_fetched`, `cache_hits`, `grants`, `commits`, `pending_commits`, `decisions` per strategy.
+Client observability: `getfattr -n user.herdfs.stats MOUNT` returns JSON counters: `bytes_fetched`, `chunks_fetched`, `cache_hits`, `grants`, `commits`, `pending_commits`, `decisions` per strategy, `jev_answers`, `jev_unsure`, `jev_errors`, and `round_trip_ms` to the authority.
 
 ## Deliberately out of v0
 

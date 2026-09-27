@@ -1,9 +1,11 @@
-//! Faults: crashes (F1, F2), cut links (F3, F4), a bad link (F5) and a full cache (F7). Each
-//! test asserts the contract lines that must hold through its fault. The oracle for bytes is
-//! what the test wrote, and for versions the chunk lists `chunk::split` gives for those bytes.
+//! Faults: crashes (F1, F2), cut links (F3, F4), a bad link (F5), a full cache (F7) and Jev slow
+//! or down (F8). Each test asserts the contract lines that must hold through its fault. The oracle
+//! for bytes is what the test wrote, and for versions the chunk lists `chunk::split` gives for
+//! those bytes.
 //! Skips until the binaries are built.
 
 mod crash;
+mod jev;
 mod links;
 mod reads;
 

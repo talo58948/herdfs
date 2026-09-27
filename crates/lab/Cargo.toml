@@ -21,6 +21,7 @@ xattr.workspace = true
 
 [dev-dependencies]
 libc.workspace = true
+herdfs-client.workspace = true
 
 [lints]
 workspace = true

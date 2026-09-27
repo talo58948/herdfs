@@ -2,14 +2,14 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::{fs, sync::Mutex, time::Duration};
+use std::{fs, sync::Mutex, time::Duration, time::Instant};
 
 use bytes::Bytes;
 use herdfs_core::proto::{self, Entry, Request, Response, Version, VersionId};
 use herdfs_core::{ChunkId, ChunkRef, SpacePath};
 use reqwest::{RequestBuilder, StatusCode};
 
-use crate::{error::Error, journal::Record, lock};
+use crate::{Average, error::Error, journal::Record, lock};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a connection may stay silent before its request fails and can be retried.
@@ -21,6 +21,8 @@ pub struct Remote {
     space: String,
     token_file: PathBuf,
     token: Mutex<String>,
+    /// Seconds from sending an authority call to its answer, over recent calls.
+    pub round_trip: Average,
 }
 
 impl Remote {
@@ -46,6 +48,7 @@ impl Remote {
             space: space.to_owned(),
             token_file,
             token: Mutex::new(token),
+            round_trip: Average::default(),
         })
     }
 
@@ -173,7 +176,10 @@ impl Remote {
     async fn call(&self, request: impl FnOnce(String) -> Request) -> Result<Response, Error> {
         let (url, request) = (format!("{}/v1/rpc", self.authority), request(self.space.clone()));
         let rpc = |token: &str| self.http.post(&url).bearer_auth(token).json(&request);
-        Ok(self.send(rpc).await?.json().await?)
+        let started = Instant::now();
+        let response = self.send(rpc).await?;
+        self.round_trip.add(started.elapsed().as_secs_f64());
+        Ok(response.json().await?)
     }
 
     /// Sends with the current token. On 401 it re-reads the token file and tries once more,

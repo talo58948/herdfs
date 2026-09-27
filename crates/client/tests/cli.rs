@@ -39,10 +39,12 @@ fn mount_fails_clearly_when_the_authority_is_unreachable() {
 }
 
 #[test]
-fn mount_rejects_an_unknown_strategy() {
+fn mount_rejects_an_unknown_strategy_and_jev_without_its_key() {
     let dir = tempfile::tempdir().unwrap();
-    let output = mount(dir.path(), "jev").unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("unknown strategy"), "{stderr}");
+    for (strategy, error) in [("nope", "unknown strategy"), ("jev", "--jev-key-file")] {
+        let output = mount(dir.path(), strategy).unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains(error), "{stderr}");
+    }
 }

@@ -1,4 +1,7 @@
 use std::future::ready;
+use std::time::Duration;
+
+use futures::FutureExt;
 
 use herdfs_core::{ChunkRef, proto::EntryId};
 
@@ -36,7 +39,8 @@ async fn read(
     let mut fetched = Vec::new();
     let fetch = |missing: Vec<usize>| {
         fetched.extend(&missing);
-        ready(Ok(missing.iter().map(|&index| chunks[index].clone()).collect()))
+        let bytes: Vec<_> = missing.iter().map(|&index| Ok(chunks[index].clone())).collect();
+        ready(Ok(stream::iter(bytes).boxed()))
     };
     let bytes = reader.read_with(file, off, len, fetch).await.unwrap();
     (bytes, fetched)
@@ -107,10 +111,10 @@ async fn concurrent_reads_fetch_a_chunk_once() {
     let fetched = std::sync::Mutex::new(Vec::<usize>::new());
     let fetch = |missing: Vec<usize>| {
         fetched.lock().unwrap().extend(&missing);
-        let bytes: Vec<Vec<u8>> = missing.iter().map(|&index| chunks[index].clone()).collect();
+        let bytes: Vec<_> = missing.iter().map(|&index| Ok(chunks[index].clone())).collect();
         async move {
             tokio::task::yield_now().await;
-            Ok(bytes)
+            Ok(stream::iter(bytes).boxed())
         }
     };
     let (first, second) = tokio::join!(
@@ -120,4 +124,34 @@ async fn concurrent_reads_fetch_a_chunk_once() {
     assert_eq!(first.unwrap(), chunks[0][..50]);
     assert_eq!(second.unwrap(), chunks[0][20..70]);
     assert_eq!(*fetched.lock().unwrap(), [0]);
+}
+
+// contract: C9
+#[tokio::test]
+async fn a_read_waits_only_for_its_own_chunk_of_a_prefetch_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let (reader, file, chunks) = setup(dir.path());
+    let rest_sent = tokio::sync::Notify::new();
+    // A batch whose first chunk arrives at once, and the rest only after the read is done.
+    let batch = |missing: Vec<usize>| {
+        let mut bytes = missing.into_iter().map(|index| Ok(chunks[index].clone()));
+        let first = stream::iter(bytes.next());
+        let rest = rest_sent
+            .notified()
+            .map(|()| stream::iter(bytes.collect::<Vec<_>>()));
+        ready(Ok(first.chain(rest.flatten_stream()).boxed()))
+    };
+    let read_first = async {
+        // Lets the batch claim its chunks first, as a prefetch started at open does.
+        tokio::task::yield_now().await;
+        let read = read(&reader, &file, &chunks, (0, 50)).await;
+        rest_sent.notify_one();
+        read
+    };
+    let both = async { tokio::join!(read_first, reader.load(&file, &[0, 1, 2], batch)) };
+    let ((bytes, fetched), batch) = tokio::time::timeout(Duration::from_secs(5), both)
+        .await
+        .expect("the read waits for the whole batch");
+    assert_eq!((bytes, fetched), (chunks[0][..50].to_vec(), vec![]));
+    assert_eq!(batch.unwrap().len(), 3);
 }

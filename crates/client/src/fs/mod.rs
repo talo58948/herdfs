@@ -46,6 +46,8 @@ pub struct Space {
     recent: Mutex<HashMap<SpacePath, (Instant, u64, Entry)>>,
     /// The last head `Open` returned for each entry, for opens while offline (C12).
     heads: Mutex<HashMap<EntryId, Option<Version>>>,
+    /// Opens by entry and process name: how many in a row, and when the last was.
+    opens: Mutex<HashMap<(EntryId, String), (u32, Instant)>>,
     handles: Mutex<HashMap<u64, Arc<Handle>>>,
     /// Directory listings taken at opendir, by handle.
     listings: Mutex<HashMap<u64, Listing>>,
@@ -75,6 +77,7 @@ impl Space {
             paths: Mutex::new(HashMap::from([(INodeNo::ROOT, (SpacePath::root(), 1))])),
             recent: Mutex::default(),
             heads: Mutex::default(),
+            opens: Mutex::default(),
             handles: Mutex::default(),
             listings: Mutex::default(),
             next_handle: AtomicU64::new(1),
@@ -209,6 +212,7 @@ impl Space {
 
     /// The counters behind `user.herdfs.stats`.
     pub fn stats(&self) -> Vec<u8> {
-        self.stats.json(self.journal.pending_count())
+        self.stats
+            .json(self.journal.pending_count(), self.remote.round_trip.get())
     }
 }

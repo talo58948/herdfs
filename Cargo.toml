@@ -8,6 +8,7 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+herdfs-client = { path = "crates/client" }
 herdfs-core = { path = "crates/core" }
 anyhow = "1"
 axum = "0.8"
