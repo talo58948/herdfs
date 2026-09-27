@@ -33,7 +33,7 @@ Every test names the lines it checks with a `// contract: C9, S2` comment. Code 
 | S3 | Root on a client gets no bytes beyond what that client's principal was granted. |
 | S4 | Revocation stops new grants immediately; outstanding grants die within the TTL. |
 | S5 | Tokens are checked for signature, `iss`, `aud` and `exp`; `alg=none` and unknown keys are rejected. |
-| S6 | Whether bytes exist anywhere in the store is not observable: uploads always happen, and commits may reference only chunks from a readable base or uploaded by the committer. |
+| S6 | Whether bytes exist anywhere in the store is not observable through the protocol: uploads always happen and get identical answers, and commits may reference only chunks from a readable base or uploaded by the committer. Known residual: the store's write latency can differ for bytes it already holds (measured median +4 ms of 52 ms on MinIO), which the R4 timing test bounds. |
 
 ## Strategy and plugins
 
