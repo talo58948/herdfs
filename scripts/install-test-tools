@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Installs the filesystem torture tools for ring R2 into ~/bin on a Linux test machine, then runs
+# each against a plain temporary directory to prove it works:
+#   scripts/install-test-tools
+#
+# fsx 0.3.2, the Rust port by asomers (crates.io `fsx`, github.com/asomers/fsx-rs):
+#   fsx -N 10000 -S 1 -P ARTIFACT_DIR DIR/fsx.bin
+# pjdfstest 0.2.2, the Rust rewrite on the `rust` branch of github.com/pjd/pjdfstest:
+#   pjdfstest -c crates/lab/pjdfstest.toml -p DIR
+# On ext4 without root, pjdfstest passes 244 and skips 154 (root or an unlisted feature).
+set -euo pipefail
+
+config=$(cd "$(dirname "$0")/.." && pwd)/crates/lab/pjdfstest.toml
+root=$(mktemp -d)
+trap 'rm -rf "$root"' EXIT
+cargo install --locked --root "$root" fsx --version 0.3.2
+cargo install --locked --root "$root" pjdfstest \
+  --git https://github.com/pjd/pjdfstest --rev ce3ca5c10d1d29f25b2881c85c62be2c74c27bf8
+mkdir -p ~/bin
+install -m 755 "$root/bin/fsx" "$root/bin/pjdfstest" ~/bin/
+
+mkdir "$root/fs"
+~/bin/fsx -N 10000 -S 1 -P "$root" "$root/fs/fsx.bin"
+~/bin/pjdfstest -c "$config" -p "$root/fs" | tail -n 1

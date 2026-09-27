@@ -17,12 +17,13 @@ clap = { version = "4", features = ["derive", "env"] }
 fastcdc = "5"
 fuser = { version = "0.18", default-features = false }
 futures = "0.3"
-jsonwebtoken = "11"
+jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 libc = "0.2"
 object_store = { version = "0.14", features = ["aws"] }
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
+rusty-s3 = { version = "0.10", default-features = false, features = ["rustcrypto"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
@@ -30,6 +31,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+xattr = "1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
