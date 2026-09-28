@@ -6,6 +6,7 @@ mod appends;
 mod atomic_saves;
 mod build_mtimes;
 mod commit_manifest;
+mod crashed_saves;
 mod creates;
 mod crowded_writes;
 mod debounce;
