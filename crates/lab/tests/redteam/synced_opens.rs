@@ -53,7 +53,6 @@ fn fsync_after_a_commit_settles(revoke: bool) -> Result<Option<(io::Result<()>, 
 /// [`fsync_after_a_commit_that_lands`], where the commit succeeds and fsync returns 0.
 // contract: C2 (docs/architecture.md: fsync waits for that commit and returns EIO if it fails)
 #[test]
-#[ignore = "ROUND12: fsync returns 0 on a descriptor opened before a refusal of an earlier seal"]
 fn fsync_reports_a_commit_refused_while_the_descriptor_was_open() -> Result<()> {
     let Some((synced, head)) = fsync_after_a_commit_settles(true)? else {
         return Ok(());

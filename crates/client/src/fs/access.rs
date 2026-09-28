@@ -80,7 +80,7 @@ impl Space {
         // Pinning under the handles lock: release either comes later and unpins, or came first.
         if let Ok(strategy) = upgrade.await
             && let Some(handle) = lock(&self.handles).get(&fh)
-            && let Some(file) = self.inodes.followed(handle.entry)
+            && let Some(file) = self.inodes.with(handle.entry, |state| state.followed()).flatten()
         {
             self.begin(strategy, &file, handle);
         }

@@ -39,7 +39,7 @@ impl Space {
             Err(err) if !err.is_not_found() => return Err(err),
             _ => {
                 let asked = Instant::now();
-                let (entry, local) = self.view(self.relocate(ino).await?);
+                let (entry, local) = self.inodes.view(self.relocate(ino).await?);
                 (entry, asked, local)
             }
         };
@@ -82,7 +82,7 @@ impl Space {
             entry
         };
         // The inode as it stands now, with any journal copy the truncation made (C1).
-        let (entry, local) = self.view(entry);
+        let (entry, local) = self.inodes.view(entry);
         Ok(self.attr(&entry, local.as_deref()))
     }
 

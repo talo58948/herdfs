@@ -3,14 +3,15 @@
 //! the kernel's references to its inode. What is known of each entry is its `Inode`.
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use herdfs_core::SpacePath;
-use herdfs_core::proto::{Entry, EntryId, Version};
+use herdfs_core::proto::{Entry, EntryId};
 
 use super::inode::{Inode, State};
-use crate::{journal::Local, lock, lru::Lru, reader::Head};
+use crate::{journal::Local, lock, lru::Lru};
 
 /// How many entries that nothing holds are kept, for lookups within TTL and while offline (C12).
 const IDLE: u64 = 4096;
@@ -83,29 +84,11 @@ impl Inodes {
         Some(change(&mut inode.state()))
     }
 
-    /// The version the entry's open files read, if known, and whether this client may write it.
-    pub fn known(&self, id: EntryId) -> Option<(Head, bool)> {
-        self.with(id, |state| state.known()).flatten()
-    }
-
-    /// The version the entry's open files read, if known and committed.
-    pub fn followed(&self, id: EntryId) -> Head {
-        self.with(id, |state| state.followed()).flatten()
-    }
-
-    /// Whether the entry names a newer head than the version its open files read (C3).
-    pub fn behind(&self, id: EntryId) -> bool {
-        self.with(id, |state| state.behind()) == Some(true)
-    }
-
-    /// Takes an Open answer: see `State::switch`.
-    pub fn switch(&self, id: EntryId, answer: (Option<Version>, bool)) -> bool {
-        self.with(id, |state| state.switch(answer)) == Some(true)
-    }
-
-    /// Forgets the version the entry's open files read, which this client may no longer use.
-    pub fn unfollow(&self, id: EntryId) {
-        self.with(id, State::unfollow);
+    /// The entry as its inode now has it, with the journal copy of this client's changes, if
+    /// any: one snapshot for a reply (C1). An inode forgotten meanwhile had no local state.
+    pub fn view(&self, entry: Entry) -> (Entry, Option<Arc<File>>) {
+        let view = self.with(entry.id, |state| state.view()).flatten();
+        view.unwrap_or((entry, None))
     }
 
     /// As `with`, for the journal: with `make`, the entry first gets local state, and an inode if

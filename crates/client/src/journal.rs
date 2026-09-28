@@ -73,7 +73,9 @@ pub struct Local {
     reading: Option<u64>,
     /// The seal the last commit attempt covered, and whether it committed.
     attempts: watch::Sender<(u64, bool)>,
-    /// The latest seal whose commit the authority refused, or 0.
+    /// How many commits have settled, and at which of those the authority last refused one: an
+    /// fsync reports a refusal after the handle's open or last fsync (C2).
+    settles: u64,
     refused: u64,
 }
 
@@ -83,6 +85,10 @@ impl Local {
     pub fn copy(&self) -> Option<Arc<File>> {
         let sealed = self.pending.as_ref().map(|(_, sealed)| sealed);
         self.working.as_ref().or(sealed).cloned()
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.handles > 0
     }
 
     fn idle(&self) -> bool {
@@ -155,15 +161,10 @@ impl Journal {
         self.inodes.clone()
     }
 
-    /// The entry's latest seal, and the latest one whose commit the authority refused, or 0.
-    pub fn seals(&self, entry: EntryId) -> (u64, u64) {
-        let seals = self.local(entry, false, |local| (local.seals, local.refused));
-        seals.unwrap_or((0, 0))
-    }
-
-    /// Whether a handle has the entry open.
-    pub fn is_open(&self, entry: &EntryId) -> bool {
-        self.local(*entry, false, |local| local.handles > 0) == Some(true)
+    /// How many commits of the entry have settled, and at which the last refusal came, or 0.
+    pub fn settles(&self, entry: EntryId) -> (u64, u64) {
+        let settles = self.local(entry, false, |local| (local.settles, local.refused));
+        settles.unwrap_or((0, 0))
     }
 
     /// Counts a handle opened on the entry, which keeps its local state until `closed`.

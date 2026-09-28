@@ -194,11 +194,12 @@ impl Journal {
             let local = state.local.as_mut()?;
             local.reading = None;
             let settled = !matches!(outcome, Outcome::Retrying);
+            local.settles += u64::from(settled);
             let committed = match outcome {
                 Outcome::Committed(version) => Some(version),
                 Outcome::Rejected => {
                     self.reject(job);
-                    local.refused = seal;
+                    local.refused = local.settles;
                     None
                 }
                 Outcome::Dropped | Outcome::Retrying => None,

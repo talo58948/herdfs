@@ -22,7 +22,7 @@ pub struct Handle {
     dirty: AtomicBool,
     /// Truncated at open and not sealed since, which only the last close seals.
     truncated: AtomicBool,
-    /// The entry's latest seal at this handle's open or last successful fsync.
+    /// How many of the entry's commits had settled at this handle's open or last fsync.
     synced: AtomicU64,
     /// Chunks this handle pinned, which release unpins.
     pub pinned: Mutex<Vec<ChunkId>>,
@@ -38,7 +38,7 @@ impl Handle {
             writable,
             dirty: AtomicBool::new(false),
             truncated: AtomicBool::new(false),
-            synced: AtomicU64::new(journal.seals(entry).0),
+            synced: AtomicU64::new(journal.settles(entry).0),
             pinned: Mutex::default(),
             journal: journal.clone(),
         }
@@ -98,7 +98,7 @@ impl Space {
             created => created?,
         };
         let attr = self.added(&entry);
-        self.inodes.switch(entry.id, (None, true));
+        self.inodes.with(entry.id, |state| state.switch((None, true)));
         let fh = self.register(Handle::new(entry.id, true, &self.journal));
         Ok((attr, fh))
     }
@@ -155,8 +155,8 @@ impl Space {
         self.committed(handle.entry).await?;
         // A commit refused since this handle's last fsync or open may hold its writes, and a
         // local disk reports a failed writeback to every descriptor open then (C2).
-        let (sealed, refused) = self.journal.seals(handle.entry);
-        if refused > handle.synced.swap(sealed, Relaxed) {
+        let (settles, refused) = self.journal.settles(handle.entry);
+        if refused > handle.synced.swap(settles, Relaxed) {
             return Err(Errno::EIO.into());
         }
         Ok(())
@@ -201,7 +201,10 @@ impl Space {
         }
         // A truncating write needs no old bytes, only the base its commit names.
         let (scratch, base) = match truncate {
-            true => (self.journal.scratch(entry)?, self.inodes.followed(entry)),
+            true => {
+                let base = self.inodes.with(entry, |state| state.followed()).flatten();
+                (self.journal.scratch(entry)?, base)
+            }
             false => self.usable(entry, |base| self.copy_of(entry, base)).await?,
         };
         self.journal

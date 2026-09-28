@@ -2,28 +2,28 @@
 
 mod access;
 mod answer;
+mod ask;
 mod fuse;
 mod handles;
 mod inode;
 mod inodes;
 mod kernel;
 mod namespace;
-mod paths;
-mod versions;
 
 use std::sync::{Arc, Mutex, atomic::AtomicU64};
 use std::time::{Duration, Instant};
 use std::{collections::HashMap, fs::File, io, os::unix::fs::MetadataExt};
 
 pub use fuse::Fuse;
-use fuser::{FileAttr, FileType, INodeNo, Notifier};
+use fuser::{Errno, FileAttr, FileType, INodeNo, Notifier};
 use handles::Handle;
 pub use inodes::Inodes;
 pub use kernel::Kernel;
 use herdfs_core::proto::{Entry, EntryId, Kind};
 
 use crate::{
-    cache::Cache, journal::Journal, lru::Lru, reader::Reader, remote::Remote, stats::Stats, strategy::Decider,
+    Result, cache::Cache, journal::Journal, lru::Lru, reader::Reader, remote::Remote, stats::Stats,
+    strategy::Decider,
 };
 
 /// How long the kernel and this client may reuse an attribute or listing (T_vis, C2).
@@ -96,6 +96,35 @@ impl Space {
 
     pub fn mounted(&self, notifier: Notifier) {
         self.kernel.mounted(notifier);
+    }
+
+    /// ESTALE unless the authority answered for the inode's own entry: its path may name another
+    /// entry by now, which the kernel then looks up (C7).
+    fn expect(&self, ino: INodeNo, entry: &Entry) -> Result<()> {
+        if self.ino(entry.id) == ino {
+            Ok(())
+        } else {
+            Err(Errno::ESTALE.into())
+        }
+    }
+
+    /// Counts a reply that hands the kernel a reference to the entry's inode, and returns its
+    /// attributes for that reply.
+    fn looked_up(&self, entry: &Entry, asked: Instant, local: Option<&File>) -> FileAttr {
+        self.inodes.looked_up(entry, asked);
+        self.attr(entry, local)
+    }
+
+    /// Records an entry this client just made, whose reply hands the kernel its inode.
+    fn added(&self, entry: &Entry) -> FileAttr {
+        self.inodes.stale(&entry.path);
+        let (entry, local) = self.inodes.view(entry.clone());
+        self.looked_up(&entry, Instant::now(), local.as_deref())
+    }
+
+    /// Drops the kernel's `lookups` references to `ino`.
+    pub fn forget(&self, ino: INodeNo, lookups: u64) {
+        self.inodes.forget(self.entry_id(ino), lookups);
     }
 
     /// The entry's attributes, with size and mtime from its journal copy while it has one.
