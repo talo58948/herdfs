@@ -37,8 +37,8 @@ const PRUNE: &str = "DELETE FROM versions WHERE id IN (
     WHERE newest > ?1 AND created_ms < ?2 AND id IS NOT head)";
 
 impl Authority {
-    /// Prunes versions outside retention, drops chunk lists and uploads that
-    /// nothing needs, and returns the chunks still live, across every space.
+    /// Prunes versions outside retention, drops chunk lists, uploads and request
+    /// ids that nothing needs, and returns the chunks still live, across every space.
     pub fn collect(&mut self, now_ms: i64, policy: &Policy) -> anyhow::Result<Collected> {
         let tx = self.db.transaction()?;
         let pruned = tx.execute(PRUNE, params![policy.versions, now_ms - policy.max_age_ms])?;
@@ -47,6 +47,10 @@ impl Authority {
             [],
         )?;
         tx.execute("DELETE FROM uploads WHERE at_ms < ?1", [now_ms - policy.grace_ms])?;
+        let forgotten = now_ms
+            .saturating_sub(policy.max_age_ms)
+            .saturating_sub(policy.grace_ms);
+        tx.execute("DELETE FROM commits WHERE at_ms < ?1", [forgotten])?;
         let mut live = listed(&tx)?;
         live.extend(uploaded(&tx, i64::MIN)?);
         tx.commit()?;

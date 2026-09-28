@@ -123,7 +123,6 @@ fn replay_after_three_saves(collection: Option<Collection>) -> Result<Option<&'s
 /// [`a_replayed_commit_of_a_retained_version_changes_nothing`] is the control.
 // contract: C5, C4a
 #[test]
-#[ignore = "ROUND9: a commit replayed after its version was pruned commits again, over newer saves"]
 fn a_replayed_commit_of_a_pruned_version_changes_nothing() -> Result<()> {
     let Some(head) = replay_after_three_saves(Some(Collection::QUICK))? else {
         return Ok(());

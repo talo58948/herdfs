@@ -120,6 +120,8 @@ impl Model {
                     .flat_map(|node| node.history.clone())
                     .collect();
                 self.forget(&versions);
+                let entries: Vec<_> = deleted.nodes.values().map(|node| node.id).collect();
+                self.commits.retain(|_, (entry, ..)| !entries.contains(entry));
             }
             Request::Grant { .. } => panic!("Grant answered {reply:?}"),
             Request::Create { space, path, mode } => {
@@ -210,11 +212,11 @@ impl Model {
         let nodes = &mut self.spaces.get_mut(space).expect("space exists").nodes;
         let node = nodes.remove(path).expect("node exists");
         self.forget(&node.history);
+        self.commits.retain(|_, (entry, ..)| *entry != node.id);
     }
 
-    /// Versions are gone, and so are the request ids that made them.
+    /// Versions are gone; the request ids that made them stay with their entry.
     pub fn forget(&mut self, gone: &[VersionId]) {
-        self.commits.retain(|_, version| !gone.contains(version));
         self.acked.retain(|version, _| !gone.contains(version));
     }
 

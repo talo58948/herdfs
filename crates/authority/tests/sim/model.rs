@@ -18,8 +18,9 @@ pub struct Model {
     pub entry_ids: BTreeSet<EntryId>,
     /// Each chunk a user uploaded: its length, and when.
     pub uploads: BTreeMap<(String, ChunkId), (u32, i64)>,
-    /// `(user, request id)` of each commit whose entry still exists.
-    pub commits: BTreeMap<(String, String), VersionId>,
+    /// `(user, request id)` of each commit whose entry still exists: its entry,
+    /// version and time. It outlives the version, until collection drops it.
+    pub commits: BTreeMap<(String, String), (EntryId, VersionId, i64)>,
     /// Acknowledged commits, with their space and entry.
     pub acked: BTreeMap<VersionId, (String, EntryId)>,
     /// Successful guarded commits per `(entry, base)`.

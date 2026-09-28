@@ -66,7 +66,9 @@ impl Call<'_> {
     }
 
     /// Entry ids are not secret: an unknown id is `NotFound` before any permission
-    /// check. Its path may be, so no refusal here names it.
+    /// check. Its path may be, so no refusal here names it. Request ids are
+    /// kept for retain-days plus the grace, so a client offline longer than
+    /// that could commit the same write twice.
     #[expect(clippy::too_many_arguments, reason = "the fields of Request::Commit")]
     pub(crate) fn commit(
         &self,
@@ -79,10 +81,20 @@ impl Call<'_> {
         mtime_ms: Option<i64>,
     ) -> Result<Response> {
         self.require_space(space)?;
-        if let Some(version) = self.committed(request_id)? {
-            if version.entry != entry {
+        if let Some((first, version)) = self.committed(request_id)? {
+            if first != entry {
                 return Err(refuse(ErrorCode::Invalid, "request id reused for another entry"));
             }
+            // The commit took effect; once retention or a purge removed its version,
+            // the head answers, whatever newer commits made it, to a caller who may read it.
+            let version = match self.version(version)? {
+                Some(version) => version,
+                None => {
+                    let entry = self.entry_by_id(space, entry)?;
+                    self.require(space, &entry.path, Perm::Read)?;
+                    self.head(&entry)?
+                }
+            };
             return Ok(Response::Version { version });
         }
         let entry = self.entry_by_id(space, entry)?;
@@ -112,8 +124,10 @@ impl Call<'_> {
         }
         let version = self.add_version(&entry, chunks, mtime_ms.unwrap_or(self.now_ms))?;
         self.db
-            .prepare_cached("INSERT INTO commits (principal, request_id, version) VALUES (?1, ?2, ?3)")?
-            .execute(params![self.who.user, request_id, version.id.0])?;
+            .prepare_cached(
+                "INSERT INTO commits (principal, request_id, entry, version, at_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?
+            .execute(params![self.who.user, request_id, entry.id.0, version.id.0, self.now_ms])?;
         Ok(Response::Version { version })
     }
 
@@ -140,9 +154,12 @@ impl Call<'_> {
     pub(crate) fn restore(&self, space: &str, path: &SpacePath, version: VersionId) -> Result<Response> {
         self.require(space, path, Perm::Write)?;
         let entry = self.entry(space, path)?;
-        let old = self
-            .visible_version(space, &entry, version)?
-            .ok_or_else(|| refuse(ErrorCode::NotFound, format!("no version {} of {path}", version.0)))?;
+        let old = self.visible_version(space, &entry, version)?.ok_or_else(|| {
+            refuse(
+                ErrorCode::NotFound,
+                format!("no version {} of this entry", version.0),
+            )
+        })?;
         Ok(Response::Version {
             version: self.add_version(&entry, &old.chunks, self.now_ms)?,
         })
@@ -189,18 +206,29 @@ impl Call<'_> {
         Ok(self.version(id)?.filter(|version| version.entry == entry.id))
     }
 
-    /// The version an earlier commit with this request id made.
-    fn committed(&self, request_id: &str) -> Result<Option<Version>> {
+    /// The entry and version an earlier commit with this request id made.
+    fn committed(&self, request_id: &str) -> Result<Option<(EntryId, VersionId)>> {
         let mut query = self
             .db
-            .prepare_cached("SELECT version FROM commits WHERE principal = ?1 AND request_id = ?2")?;
-        let id = query
-            .query_row(params![self.who.user, request_id], |row| row.get(0))
-            .optional()?;
-        match id {
-            Some(id) => self.version(VersionId(id)),
-            None => Ok(None),
-        }
+            .prepare_cached("SELECT entry, version FROM commits WHERE principal = ?1 AND request_id = ?2")?;
+        let row = |row: &rusqlite::Row| Ok((EntryId(row.get(0)?), VersionId(row.get(1)?)));
+        Ok(query
+            .query_row(params![self.who.user, request_id], row)
+            .optional()?)
+    }
+
+    /// The head version of an entry that has been committed to.
+    fn head(&self, entry: &Entry) -> Result<Version> {
+        let head = match entry.head {
+            Some(head) => self.version(head)?,
+            None => None,
+        };
+        head.ok_or_else(|| {
+            refuse(
+                ErrorCode::NotFound,
+                format!("entry {} has no version", entry.id.0),
+            )
+        })
     }
 
     /// The length the caller uploaded chunk `id` with, if they did.

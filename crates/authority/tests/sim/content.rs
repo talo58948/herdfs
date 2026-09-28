@@ -193,7 +193,7 @@ impl Sim {
             *entry = other;
         }
         // The id is reused on another entry than the one its first commit made a version of.
-        let reused = first.is_some_and(|first| self.model.versions[&first].entry != *entry);
+        let reused = first.is_some_and(|(first, ..)| first != *entry);
         let got = self.exec(who, &request);
         if reused {
             // contract: C4a, C12 — an id reused on another entry commits nothing and returns no version.
