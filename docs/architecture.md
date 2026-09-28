@@ -50,6 +50,7 @@ Access to history follows S8: each ACL row records the highest committed version
 
 - Largest file: about 350 GiB (a commit's chunk list must fit the 32 MiB RPC body).
 - Largest single `Grant`: 4,096 chunks.
+- A client that lost a commit's answer and stays offline longer than the longer of 30 days and `--retain-days`, plus the grace, may commit that write again when it returns, over newer saves.
 
 ## Access strategies
 

@@ -11,6 +11,7 @@ mod crowded_writes;
 mod debounce;
 mod followed;
 mod followed_paths;
+mod forgotten_replays;
 mod journal;
 mod listed_heads;
 mod listed_renames;
@@ -46,6 +47,7 @@ mod slow_uploads;
 mod stalled_reads;
 mod synced_opens;
 mod times;
+mod unstored_uploads;
 mod unusable_versions;
 mod versions;
 

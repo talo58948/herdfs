@@ -67,8 +67,8 @@ impl Call<'_> {
 
     /// Entry ids are not secret: an unknown id is `NotFound` before any permission
     /// check. Its path may be, so no refusal here names it. Request ids are
-    /// kept for retain-days plus the grace, so a client offline longer than
-    /// that could commit the same write twice.
+    /// kept for the longer of retain-days and 30 days, plus the grace; a client
+    /// offline longer than that could commit the same write twice (Limits).
     #[expect(clippy::too_many_arguments, reason = "the fields of Request::Commit")]
     pub(crate) fn commit(
         &self,
