@@ -10,7 +10,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use crate::fs::{Fuse, Space};
 use crate::journal::{Committer, Journal};
 use crate::strategy::{Decider, Jev, StrategyArg};
-use crate::{cache::Cache, remote::Remote, stats::Stats};
+use crate::{cache::Cache, reader::Reader, remote::Remote, stats::Stats};
 
 /// Flags of `herdfs mount`.
 #[derive(clap::Args)]
@@ -88,9 +88,11 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
         .with_context(|| format!("opening journal {}", args.journal.display()))?;
     let (remote, cache, journal) = (Arc::new(remote), Arc::new(cache), Arc::new(journal));
     let stats = Arc::new(Stats::default());
+    let reader = Arc::new(Reader::new(remote.clone(), cache.clone(), stats.clone()));
     let committer = Committer {
         journal: journal.clone(),
         remote: remote.clone(),
+        reader: reader.clone(),
         cache: cache.clone(),
         stats: stats.clone(),
     };
@@ -106,7 +108,7 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
             Decider::Jev(Arc::new(jev), stats.clone())
         }
     };
-    let space = Space::new(remote, cache, journal, stats, decider, root.id)?;
+    let space = Space::new(remote, reader, cache, journal, stats, decider, root.id)?;
     Ok(Arc::new(space))
 }
 

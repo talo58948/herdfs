@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use herdfs_core::proto::{EntryId, Version, VersionId};
+use herdfs_core::proto::{EntryId, Version};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, mpsc, watch};
 
@@ -154,14 +154,6 @@ impl Journal {
             .working
             .clone()
             .or_else(|| Some(tracked.sealed.as_ref()?.1.clone()))
-    }
-
-    /// The version the entry's copies started from or last committed, if newer than `known`:
-    /// what reads see once this client's changes are committed (C1).
-    pub fn base_after(&self, entry: EntryId, known: Option<VersionId>) -> Option<Version> {
-        let entries = lock(&self.entries);
-        let base = entries.get(&entry)?.base.as_ref()?;
-        (Some(base.id) > known).then(|| base.clone())
     }
 
     pub fn settled(&self) -> u64 {

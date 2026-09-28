@@ -6,6 +6,7 @@ mod error;
 mod fs;
 mod journal;
 mod link;
+mod lru;
 mod mount;
 mod reader;
 mod remote;

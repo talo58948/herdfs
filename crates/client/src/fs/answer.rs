@@ -38,19 +38,8 @@ answer! { ReplyAttr, FileAttr, |reply, attr| reply.attr(&TTL, &attr) }
 answer! { ReplyData, Vec<u8>, |reply, bytes| reply.data(&bytes) }
 answer! { ReplyEmpty, (), |reply, ()| reply.ok() }
 answer! { ReplyOpen, u64, |reply, fh| reply.opened(FileHandle(fh), FopenFlags::empty()) }
-answer! { ReplyOpen, (u64, bool), |reply, (fh, direct)| reply.opened(FileHandle(fh), opened(direct)) }
 answer! { ReplyWrite, u32, |reply, written| reply.written(written) }
 answer! {
-    ReplyCreate, (FileAttr, u64, bool),
-    |reply, (attr, fh, direct)| reply.created(&TTL, &attr, GENERATION, FileHandle(fh), opened(direct))
-}
-
-/// Direct I/O keeps a handle off the kernel's page cache, which another handle on the same inode
-/// fills with a different version.
-fn opened(direct: bool) -> FopenFlags {
-    if direct {
-        FopenFlags::FOPEN_DIRECT_IO
-    } else {
-        FopenFlags::empty()
-    }
+    ReplyCreate, (FileAttr, u64),
+    |reply, (attr, fh)| reply.created(&TTL, &attr, GENERATION, FileHandle(fh), FopenFlags::empty())
 }

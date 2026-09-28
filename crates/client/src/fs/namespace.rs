@@ -5,7 +5,7 @@ use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 use fuser::{Errno, FileAttr, INodeNo, ReplyDirectory};
 
-use super::{PERMISSIONS, Space};
+use super::{PERMISSIONS, Space, TTL};
 use crate::{error::Error, lock};
 
 /// The parts of a setattr that herdfs stores.
@@ -24,16 +24,19 @@ impl Space {
         parent: INodeNo,
         name: OsString,
     ) -> Result<(FileAttr, Duration), Error> {
-        let (entry, ttl) = self.entry(&self.child(parent, &name)?).await?;
+        let (entry, ttl) = self.entry(&self.located_child(parent, &name).await?).await?;
         Ok((self.looked_up(&entry), ttl))
     }
 
+    /// The inode's attributes. If its path names another entry or none, the entry has moved,
+    /// or is gone and its name may now be another's, which ESTALE sends the kernel to look up
+    /// (C7).
     pub async fn getattr(self: Arc<Self>, ino: INodeNo) -> Result<(FileAttr, Duration), Error> {
-        let (entry, ttl) = self.entry(&self.path(ino)?).await?;
-        // The path may name a different entry by now.
-        if self.ino(entry.id) != ino {
-            return Err(Errno::ENOENT.into());
-        }
+        let (entry, ttl) = match self.entry(&self.path(ino)?).await {
+            Ok((entry, ttl)) if self.ino(entry.id) == ino => (entry, ttl),
+            Err(err) if !err.is_not_found() => return Err(err),
+            _ => (self.relocate(ino).await?, TTL),
+        };
         Ok((self.attr(&entry), ttl))
     }
 
@@ -45,7 +48,8 @@ impl Space {
         if let Some(size) = change.size {
             self.truncate(ino, size, change.fh).await?;
         }
-        let (path, mode) = (self.path(ino)?, change.mode.map(|mode| mode & PERMISSIONS));
+        let path = self.located(ino).await?;
+        let mode = change.mode.map(|mode| mode & PERMISSIONS);
         let entry_id = self.entry_id(ino);
         // The next commit keeps a journaled mtime, which it would otherwise stamp over (cp -p).
         let journaled = match change.mtime_ms {
@@ -67,7 +71,7 @@ impl Space {
     }
 
     pub async fn readlink(self: Arc<Self>, ino: INodeNo) -> Result<Vec<u8>, Error> {
-        let (entry, _) = self.entry(&self.path(ino)?).await?;
+        let (entry, _) = self.entry(&self.located(ino).await?).await?;
         Ok(entry.target.ok_or(Errno::EINVAL)?.into_bytes())
     }
 
@@ -77,7 +81,7 @@ impl Space {
         name: OsString,
         mode: u32,
     ) -> Result<FileAttr, Error> {
-        let path = self.child(parent, &name)?;
+        let path = self.located_child(parent, &name).await?;
         let entry = self.remote.mkdir(path, mode & PERMISSIONS).await?;
         Ok(self.added(&entry))
     }
@@ -89,16 +93,17 @@ impl Space {
         target: PathBuf,
     ) -> Result<FileAttr, Error> {
         let target = target.into_os_string().into_string().map_err(|_| Errno::EINVAL)?;
-        let entry = self.remote.symlink(self.child(parent, &name)?, target).await?;
+        let path = self.located_child(parent, &name).await?;
+        let entry = self.remote.symlink(path, target).await?;
         Ok(self.added(&entry))
     }
 
     /// Unlinks a file or symlink, or removes an empty directory.
     pub async fn remove(self: Arc<Self>, parent: INodeNo, name: OsString) -> Result<(), Error> {
-        let path = self.child(parent, &name)?;
+        let path = self.located_child(parent, &name).await?;
         self.remote.remove(path.clone()).await?;
         self.stale(&path);
-        lock(&self.paths).retain(|_, (known, _)| *known != path);
+        lock(&self.paths).retain(|_, (known, ..)| *known != path);
         Ok(())
     }
 
@@ -108,13 +113,14 @@ impl Space {
         from: (INodeNo, OsString),
         to: (INodeNo, OsString),
     ) -> Result<(), Error> {
-        let (from, to) = (self.child(from.0, &from.1)?, self.child(to.0, &to.1)?);
+        let from = self.located_child(from.0, &from.1).await?;
+        let to = self.located_child(to.0, &to.1).await?;
         self.remote.rename(from.clone(), to.clone()).await?;
         self.stale(&from);
         self.stale(&to);
         let mut paths = lock(&self.paths);
-        paths.retain(|_, (known, _)| *known != to);
-        for (known, _) in paths.values_mut() {
+        paths.retain(|_, (known, ..)| *known != to);
+        for (known, ..) in paths.values_mut() {
             if let Some(moved) = known.rebase(&from, &to) {
                 *known = moved;
             }
@@ -124,9 +130,9 @@ impl Space {
 
     /// Lists the directory once, for the readdir calls on this handle to page through.
     pub async fn opendir(self: Arc<Self>, ino: INodeNo) -> Result<u64, Error> {
-        let entries = self.remote.list(self.path(ino)?).await?;
+        let entries = self.remote.list(self.located(ino).await?).await?;
         let listed = |entry| {
-            self.remember(entry);
+            self.listed(entry);
             let attr = self.attr(entry);
             (attr.ino, attr.kind, entry.path.name().to_owned())
         };

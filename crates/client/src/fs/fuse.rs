@@ -56,8 +56,6 @@ impl Filesystem for Fuse {
         if let Err(missing) = config.add_capabilities(InitFlags::FUSE_ATOMIC_O_TRUNC) {
             tracing::warn!(?missing, "kernel lacks atomic O_TRUNC");
         }
-        // Handles that bypass the page cache can still be mapped where the kernel allows it.
-        let _ = config.add_capabilities(InitFlags::FUSE_DIRECT_IO_ALLOW_MMAP);
         Ok(())
     }
 

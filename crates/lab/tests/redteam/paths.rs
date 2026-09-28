@@ -16,7 +16,6 @@ use crate::{VISIBLE_AFTER, assert_bytes, save, two_clients};
 /// that entry, so the path still names the old file, and b reads its own copy of what is now `g`.
 // contract: C2
 #[test]
-#[ignore = "REDTEAM2: a pending local write pins its old path to the old entry"]
 fn a_pending_write_does_not_hide_a_new_file_at_its_old_path() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
@@ -44,7 +43,6 @@ fn a_pending_write_does_not_hide_a_new_file_at_its_old_path() -> Result<()> {
 /// existing.
 // contract: C7
 #[test]
-#[ignore = "REDTEAM2: a rename over a file makes it vanish for other clients for up to T_vis"]
 fn a_file_replaced_by_rename_never_vanishes_for_another_client() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
@@ -73,7 +71,6 @@ const ROUNDS: usize = 5;
 /// path it last saw for it, so `note` lands in the new `d` instead of beside `e`'s other files.
 // contract: C7
 #[test]
-#[ignore = "REDTEAM2: a directory another client renamed still resolves by its old path"]
 fn a_file_made_in_a_moved_directory_lands_in_that_directory() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
@@ -111,7 +108,6 @@ fn a_file_made_in_a_moved_directory_lands_in_that_directory() -> Result<()> {
 /// file's inode, so it lands on the new `f`, a file b never opened, and `g` keeps its mode.
 // contract: C7
 #[test]
-#[ignore = "REDTEAM2: fchmod after another client's rename changes the file now at the old path"]
 fn a_mode_change_through_an_open_file_follows_it_across_a_rename() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());

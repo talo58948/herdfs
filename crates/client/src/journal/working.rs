@@ -9,7 +9,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use herdfs_core::proto::{EntryId, Version};
 
-use super::{Journal, open_copy, write_record};
+use super::{Journal, Tracked, open_copy, write_record};
 use crate::lock;
 
 /// A file being filled to become a working copy; deleted unless installed.
@@ -78,17 +78,24 @@ impl Journal {
         empty: bool,
         change: impl FnOnce(&File) -> io::Result<()>,
     ) -> io::Result<()> {
-        let mut entries = lock(&self.entries);
-        let tracked = entries
-            .get_mut(&entry)
-            .ok_or_else(|| io::Error::other("no journal copy"))?;
-        if tracked.working.is_none() {
-            let sealed = tracked.sealed.as_ref().map(|(seal, _)| *seal);
-            tracked.working = Some(self.restart(entry, sealed, empty)?);
+        loop {
+            let mut entries = lock(&self.entries);
+            let tracked = entries
+                .get_mut(&entry)
+                .ok_or_else(|| io::Error::other("no journal copy"))?;
+            let Some(working) = &tracked.working else {
+                let seal = tracked.sealed.as_ref().map(|(seal, _)| *seal);
+                let seal = seal.ok_or_else(|| io::Error::other("no journal copy"))?;
+                // Opened under the lock, before a commit can delete it.
+                let sealed = (!empty).then(|| File::open(self.sealed_path(entry, seal)));
+                drop(entries);
+                self.restart(entry, seal, sealed.transpose()?)?;
+                continue;
+            };
+            // A change after a set modification time makes it the time of the change.
+            tracked.mtime = None;
+            return change(working);
         }
-        // A change after a set modification time makes it the time of the change.
-        tracked.mtime = None;
-        tracked.working.as_deref().map_or(Ok(()), change)
     }
 
     /// Records a modification time for the entry's next commit to keep, if a commit will
@@ -119,15 +126,22 @@ impl Journal {
         Ok(true)
     }
 
-    /// A new working copy after a seal: empty if `empty`, else a copy of the sealed one.
-    fn restart(&self, entry: EntryId, sealed: Option<u64>, empty: bool) -> io::Result<Arc<File>> {
-        let seal = sealed.ok_or_else(|| io::Error::other("no journal copy"))?;
-        let path = self.working_path(entry);
-        if empty {
-            File::create(&path)?;
-        } else {
-            fs::copy(self.sealed_path(entry, seal), &path)?;
+    /// Starts a working copy after seal `seal`: a copy of `sealed`, else empty. The copy is made
+    /// outside the lock, so writes to other entries need not wait for it, and is dropped if
+    /// another write started a copy or sealed a newer one meanwhile.
+    fn restart(&self, entry: EntryId, seal: u64, sealed: Option<File>) -> io::Result<()> {
+        let mut scratch = self.scratch(entry)?;
+        if let Some(mut sealed) = sealed {
+            io::copy(&mut sealed, &mut scratch.file)?;
         }
-        Ok(Arc::new(open_copy(&path)?))
+        let mut entries = lock(&self.entries);
+        let current = |tracked: &&mut Tracked| {
+            tracked.working.is_none() && tracked.sealed.as_ref().is_none_or(|(latest, _)| *latest == seal)
+        };
+        if let Some(tracked) = entries.get_mut(&entry).filter(current) {
+            scratch.rename_to(&self.working_path(entry))?;
+            tracked.working = Some(Arc::new(open_copy(&self.working_path(entry))?));
+        }
+        Ok(())
     }
 }

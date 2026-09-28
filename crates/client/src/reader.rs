@@ -7,12 +7,12 @@ use std::{collections::HashMap, fs::File, io::Write};
 
 use futures::stream::{self, BoxStream, StreamExt};
 use herdfs_core::ChunkId;
-use herdfs_core::proto::{Version, VersionId};
+use herdfs_core::proto::{EntryId, Version, VersionId};
 use tokio::sync::{Mutex as FetchLock, OwnedMutexGuard};
 
-use crate::cache::{Cache, Lru};
 use crate::stats::{Stats, bump};
 use crate::{Average, chunk_map::ChunkMap, error::Error, lock, remote::Remote};
+use crate::{cache::Cache, lru::Lru};
 
 /// Concurrent downloads per request, which is also the prefetch batch size.
 const DOWNLOADS: usize = 8;
@@ -21,6 +21,8 @@ const GRANT_MARGIN: Duration = Duration::from_secs(10);
 /// Verified chunks kept in memory, so the FUSE reads within one chunk do not each re-read
 /// and re-hash it from disk.
 const MEMORY_BYTES: u64 = 64 << 20;
+/// Entries whose current version the reader keeps.
+const HEADS: u64 = 4096;
 
 /// Chunk bytes by id, as one read gathers them.
 type Found = HashMap<ChunkId, Arc<Vec<u8>>>;
@@ -48,13 +50,16 @@ pub struct Reader {
     remote: Arc<Remote>,
     cache: Arc<Cache>,
     stats: Arc<Stats>,
-    memory: Mutex<Lru<Arc<Vec<u8>>>>,
+    memory: Mutex<Lru<ChunkId, Arc<Vec<u8>>>>,
     /// Presigned URLs by version and chunk index, with their expiry, reused until then.
     grants: Mutex<HashMap<(VersionId, usize), (String, Instant)>>,
     /// A lock per chunk being fetched, so concurrent reads download it once.
     fetching: Mutex<HashMap<ChunkId, Arc<FetchLock<()>>>>,
     /// Download throughput in bytes per second, over recent chunk downloads.
     pub throughput: Average,
+    /// The version each entry's open files read: the newest head seen, `None` inside for an
+    /// entry without one. Offline, opens start from it (C12).
+    heads: Mutex<Lru<EntryId, Option<Arc<OpenVersion>>>>,
 }
 
 impl Reader {
@@ -68,7 +73,26 @@ impl Reader {
             grants,
             fetching,
             throughput: Average::default(),
+            heads: Mutex::default(),
         }
+    }
+
+    /// The version the entry's open files read, if known.
+    pub fn current(&self, entry: EntryId) -> Option<Option<Arc<OpenVersion>>> {
+        lock(&self.heads).get(&entry)
+    }
+
+    /// Makes `head` the version the entry's open files read, unless a newer one is known.
+    /// True if that changed it.
+    pub fn follow(&self, entry: EntryId, head: Option<Version>) -> bool {
+        let mut heads = lock(&self.heads);
+        let known = heads.get(&entry).map(|file| file.map(|file| file.version.id));
+        if known.is_some_and(|known| known >= head.as_ref().map(|head| head.id)) {
+            return false;
+        }
+        heads.insert(entry, 1, head.map(|head| Arc::new(OpenVersion::new(head))));
+        heads.evict(HEADS, |_| false);
+        true
     }
 
     /// Bytes `[off, off + len)` of `file`, fetching only the chunks that overlap them (C9),
