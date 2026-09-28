@@ -30,7 +30,6 @@ fn sleep_until(deadline: Instant) {
 /// directory, and it lands in the new `d`.
 // contract: C7
 #[test]
-#[ignore = "REDTEAM3: past T_vis, a moved directory held open is still named by its old path"]
 fn operations_in_a_moved_directory_follow_it_after_t_vis() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
@@ -78,7 +77,6 @@ fn operations_in_a_moved_directory_follow_it_after_t_vis() -> Result<()> {
 /// its path, until something looks it up by its new name. Without b's rename the fstat finds it.
 // contract: C7
 #[test]
-#[ignore = "REDTEAM3: renaming onto the old name of a moved file held open makes its fstat fail with ENOENT"]
 fn a_file_held_open_is_followed_after_its_old_name_is_reused() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());

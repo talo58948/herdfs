@@ -1,6 +1,5 @@
-//! Red team: confirmed contract breaks, each reduced to one failing test. Rounds 1 and 2 are fixed
-//! and run; round 3's are ignored (`REDTEAM3`) so main stays green, and each runs once its bug is
-//! fixed. Skips until the binaries are built.
+//! Red team: confirmed contract breaks, each reduced to one failing test. Rounds 1 to 3 are fixed
+//! and run. Skips until the binaries are built.
 
 mod agents;
 mod creates;

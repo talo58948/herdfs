@@ -26,10 +26,10 @@ mod working;
 pub use commit::Committer;
 
 const REJECTED: &str = "rejected";
-/// How long a seal waits for a newer one before its commit starts. A rewrite through a dup'd
-/// descriptor (`>`, `dd`) seals the truncated, empty file when the original descriptor closes,
-/// just before the data arrives; the data's seal then replaces it, so no empty version commits (C3).
+/// How long a seal waits for a newer one before its commit starts, so a burst of closes commits
+/// once; but never longer than `LONGEST_QUIET` after the oldest seal not yet committing.
 const QUIET: Duration = Duration::from_millis(250);
+const LONGEST_QUIET: Duration = Duration::from_secs(1);
 
 /// A sealed write: what the committer needs, persisted next to the sealed file it names.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,8 +68,10 @@ struct Tracked {
     pending: Option<(Record, Arc<File>)>,
     seals: u64,
     committing: bool,
-    /// Until when the committer waits for a newer seal before committing the pending one.
+    /// Until when the committer waits for a newer seal before committing the pending one, and
+    /// when it commits at the latest.
     quiet_until: Option<Instant>,
+    due: Option<Instant>,
     /// The seal the committer is reading, whose file outlives newer seals until it is done.
     reading: Option<u64>,
     /// The seal the last commit attempt covered, and whether it committed.
@@ -110,16 +112,30 @@ impl Journal {
         Ok((journal, woken))
     }
 
-    /// Queues the write a record names, and returns the files to keep for it.
-    fn recover(&self, path: &Path) -> io::Result<[PathBuf; 2]> {
+    /// Queues the write a record names, and returns the files to keep for it. A record whose
+    /// sealed copy is gone was settled when a crash cut its removal short.
+    fn recover(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
         let record: Record = serde_json::from_slice(&fs::read(path)?)?;
         let sealed = self.sealed_path(record.entry, record.seal);
-        let file = Arc::new(File::open(&sealed)?);
+        let file = match File::open(&sealed) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                tracing::warn!(record = %path.display(), "dropping a settled commit's record");
+                return Ok(Vec::new());
+            }
+            file => Arc::new(file?),
+        };
         let mut entries = lock(&self.entries);
         let tracked = entries.entry(record.entry).or_default();
         (tracked.base, tracked.seals) = (record.base.clone(), record.seal);
         self.queue(tracked, record, file);
-        Ok([path.to_owned(), sealed])
+        Ok(vec![path.to_owned(), sealed])
+    }
+
+    /// Whether a handle has the entry open.
+    pub fn is_open(&self, entry: &EntryId) -> bool {
+        lock(&self.entries)
+            .get(entry)
+            .is_some_and(|tracked| tracked.handles > 0)
     }
 
     pub fn opened(self: &Arc<Self>, entry: EntryId) -> Registration {
@@ -170,7 +186,9 @@ impl Journal {
         working.sync_all()?;
         let older = tracked.pending.as_ref().map(|(record, _)| record.seal);
         (tracked.seals, tracked.working) = (seal, None);
-        tracked.quiet_until = Some(Instant::now() + QUIET);
+        let now = Instant::now();
+        let due = *tracked.due.get_or_insert(now + LONGEST_QUIET);
+        tracked.quiet_until = Some((now + QUIET).min(due));
         let record = Record {
             entry,
             seal,

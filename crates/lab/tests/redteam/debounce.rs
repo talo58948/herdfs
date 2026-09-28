@@ -46,7 +46,6 @@ fn append(path: &Path, line: &str) -> io::Result<()> {
 // contract: none (docs/architecture.md: on `close` a background committer commits the copy; a
 // file becomes visible to other hosts on close)
 #[test]
-#[ignore = "REDTEAM3: a file closed more often than every 250 ms never commits"]
 fn lines_appended_in_a_loop_reach_other_clients() -> Result<()> {
     let Some(lab) = two_clients_on_tmpfs()? else {
         return Ok(());

@@ -167,3 +167,32 @@ fn a_set_mtime_rides_the_next_commit_unless_one_is_under_way() {
         "under way: set after it lands"
     );
 }
+
+// contract: C4a
+#[test]
+fn a_record_whose_commit_settled_before_a_crash_is_dropped_at_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let (journal, _woken) = sealed(dir.path(), b"committed");
+    let job = journal.next(ENTRY).unwrap();
+    drop(journal);
+    fs::remove_file(&job.sealed).unwrap();
+    let (journal, _woken) = Journal::open(dir.path().into()).unwrap();
+    assert!(journal.next(ENTRY).is_none());
+    assert!(!dir.path().join("7.json").exists());
+}
+
+// contract: none (docs/architecture.md: a file becomes visible to other hosts on close)
+#[test]
+fn a_file_closed_again_and_again_commits_within_a_second_of_its_first_close() {
+    let dir = tempfile::tempdir().unwrap();
+    let (journal, _woken) = sealed(dir.path(), b"first");
+    let _writer = journal.opened(ENTRY);
+    std::thread::sleep(Duration::from_millis(900));
+    journal.write(ENTRY, 0, b"again").unwrap();
+    journal.seal(ENTRY).unwrap();
+    assert!(
+        journal
+            .quiet(ENTRY)
+            .is_none_or(|left| left <= Duration::from_millis(100))
+    );
+}

@@ -1,7 +1,8 @@
 //! Namespace operations: lookups, attributes, directories and renames.
 
 use std::sync::{Arc, atomic::Ordering::Relaxed};
-use std::{ffi::OsString, path::PathBuf, time::Duration};
+use std::time::{Duration, Instant};
+use std::{ffi::OsString, path::PathBuf};
 
 use fuser::{Errno, FileAttr, INodeNo, ReplyDirectory};
 
@@ -19,20 +20,23 @@ pub struct AttrChange {
 
 impl Space {
     pub async fn lookup(self: Arc<Self>, parent: INodeNo, name: OsString) -> Result<(FileAttr, Duration)> {
-        let (entry, ttl) = self.entry(&self.located_child(parent, &name).await?).await?;
-        Ok((self.looked_up(&entry), ttl))
+        let (entry, fetched) = self.entry(&self.located_child(parent, &name).await?).await?;
+        Ok((
+            self.looked_up(&entry, fetched),
+            TTL.saturating_sub(fetched.elapsed()),
+        ))
     }
 
     /// The inode's attributes. If its path names another entry or none, the entry has moved,
     /// or is gone and its name may now be another's, which ESTALE sends the kernel to look up
     /// (C7).
     pub async fn getattr(self: Arc<Self>, ino: INodeNo) -> Result<(FileAttr, Duration)> {
-        let (entry, ttl) = match self.entry(&self.path(ino)?).await {
-            Ok((entry, ttl)) if self.ino(entry.id) == ino => (entry, ttl),
+        let (entry, fetched) = match self.entry(&self.path(ino)?).await {
+            Ok((entry, fetched)) if self.ino(entry.id) == ino => (entry, fetched),
             Err(err) if !err.is_not_found() => return Err(err),
-            _ => (self.relocate(ino).await?, TTL),
+            _ => (self.relocate(ino).await?, Instant::now()),
         };
-        Ok((self.attr(&entry), ttl))
+        Ok((self.attr(&entry), TTL.saturating_sub(fetched.elapsed())))
     }
 
     pub async fn setattr(self: Arc<Self>, ino: INodeNo, change: AttrChange) -> Result<FileAttr> {
@@ -40,10 +44,13 @@ impl Space {
         if foreign(change.uid, self.owner.0) || foreign(change.gid, self.owner.1) {
             return Err(Errno::EPERM.into());
         }
+        let path = self.located(ino).await?;
+        // Answered from the entry held, which offline lets a truncation go on (C12), and found
+        // before anything is journaled, so a failure changes nothing.
+        let (entry, _) = self.entry(&path).await?;
         if let Some(size) = change.size {
             self.truncate(ino, size, change.fh).await?;
         }
-        let path = self.located(ino).await?;
         let mode = change.mode.map(|mode| mode & PERMISSIONS);
         let entry_id = self.entry_id(ino);
         // The next commit keeps a journaled mtime, which it would otherwise stamp over (cp -p).
@@ -56,11 +63,10 @@ impl Space {
             // A commit already under way would stamp its own time over this one.
             self.committed(entry_id).await?;
         }
-        let entry = if mode.is_some() || mtime_ms.is_some() {
-            self.remote.set_attr(path, mode, mtime_ms).await?
-        } else {
-            self.remote.stat(path).await?
-        };
+        if mode.is_none() && mtime_ms.is_none() {
+            return Ok(self.attr(&entry));
+        }
+        let entry = self.remote.set_attr(path, mode, mtime_ms).await?;
         self.remember(&entry);
         Ok(self.attr(&entry))
     }
@@ -104,10 +110,11 @@ impl Space {
         self.remote.rename(from.clone(), to.clone()).await?;
         self.stale(&from);
         self.stale(&to);
-        let mut paths = lock(&self.paths);
-        paths.retain(|_, (known, ..)| *known != to);
-        for (known, ..) in paths.values_mut() {
-            if let Some(moved) = known.rebase(&from, &to) {
+        for (known, _, confirmed) in lock(&self.paths).values_mut() {
+            // Replaced, unless another client had moved it away: `Locate` tells (C7).
+            if *known == to {
+                *confirmed = None;
+            } else if let Some(moved) = known.rebase(&from, &to) {
                 *known = moved;
             }
         }
@@ -116,9 +123,11 @@ impl Space {
 
     /// Lists the directory once, for the readdir calls on this handle to page through.
     pub async fn opendir(self: Arc<Self>, ino: INodeNo) -> Result<u64> {
-        let entries = self.remote.list(self.located(ino).await?).await?;
+        let path = self.located(ino).await?;
+        let asked = Instant::now();
+        let entries = self.remote.list(path).await?;
         let listed = |entry| {
-            self.listed(entry);
+            self.listed(entry, asked);
             let attr = self.attr(entry);
             (attr.ino, attr.kind, entry.path.name().to_owned())
         };
