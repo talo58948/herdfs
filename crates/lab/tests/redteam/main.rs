@@ -2,6 +2,7 @@
 //! and run. Skips until the binaries are built.
 
 mod agents;
+mod commit_manifest;
 mod creates;
 mod debounce;
 mod followed;
