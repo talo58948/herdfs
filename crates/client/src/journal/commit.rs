@@ -4,7 +4,8 @@
 
 use std::fs::{self, File};
 use std::sync::{Arc, atomic::Ordering::Relaxed};
-use std::{collections::HashSet, io, path::PathBuf, time::Duration};
+use std::time::{Duration, Instant};
+use std::{collections::HashSet, io, path::PathBuf};
 
 use bytes::Bytes;
 use herdfs_core::proto::{EntryId, Version};
@@ -50,7 +51,7 @@ impl Committer {
     /// off from 1 s to 30 s and retry forever; a refusal sets the write aside.
     async fn commit(self: Arc<Self>, entry: EntryId) {
         let mut delay = FIRST_RETRY;
-        while let Some(job) = self.journal.next(entry) {
+        while let Some(job) = self.next(entry).await {
             let outcome = match self.attempt(&job).await {
                 Ok(version) => {
                     bump(&self.stats.commits, 1);
@@ -68,9 +69,28 @@ impl Committer {
             };
             let retry = matches!(outcome, Outcome::Retrying);
             self.journal.finish(&job, outcome);
-            if retry {
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(LAST_RETRY);
+            // An unreachable authority is tried again when its offline window ends.
+            match self.remote.link.remaining().filter(|_| retry) {
+                Some(window) => tokio::time::sleep(window).await,
+                None if retry => {
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(LAST_RETRY);
+                }
+                None => {}
+            }
+        }
+    }
+
+    /// The entry's next job, once its latest seal has been quiet a while or an fsync asks.
+    async fn next(&self, entry: EntryId) -> Option<Job> {
+        loop {
+            let urged = self.journal.urged.notified();
+            let Some(quiet) = self.journal.quiet(entry) else {
+                return self.journal.next(entry);
+            };
+            tokio::select! {
+                () = tokio::time::sleep(quiet) => {}
+                () = urged => {}
             }
         }
     }
@@ -173,6 +193,20 @@ impl Journal {
         if let Err(err) = result {
             tracing::warn!(%err, "could not keep a rejected write");
         }
+    }
+
+    /// How much longer the committer waits for a newer seal of the entry, if at all.
+    pub fn quiet(&self, entry: EntryId) -> Option<Duration> {
+        let until = lock(&self.entries).get(&entry)?.quiet_until?;
+        Some(until.saturating_duration_since(Instant::now())).filter(|left| !left.is_zero())
+    }
+
+    /// Ends the entry's quiet period: an fsync waits for its commit.
+    pub fn urge(&self, entry: EntryId) {
+        if let Some(tracked) = lock(&self.entries).get_mut(&entry) {
+            tracked.quiet_until = None;
+        }
+        self.urged.notify_waiters();
     }
 
     /// The latest pending seal and a feed of commit attempts, for fsync to wait on.

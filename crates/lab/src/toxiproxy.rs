@@ -126,6 +126,26 @@ impl Toxiproxy {
         }
         Ok(())
     }
+
+    /// Makes `client`'s links swallow everything, as a real outage does: connects succeed and
+    /// nothing comes back. A timeout toxic of 0 holds data until it is removed.
+    pub(crate) fn silence(&self, client: &str, links: Links, silent: bool) -> Result<()> {
+        let streams = links
+            .names()
+            .iter()
+            .flat_map(|link| STREAMS.map(|stream| (link, stream)));
+        for (link, stream) in streams {
+            let toxics = format!("{}/proxies/{client}-{link}/toxics", self.api);
+            if silent {
+                let blackhole = toxic("timeout", stream, &json!({"timeout": 0}));
+                send(self.http.post(&toxics).json(&blackhole))?;
+            } else {
+                // Absent unless the link was silenced; a 404 then is fine.
+                self.http.delete(format!("{toxics}/timeout-{stream}")).send()?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn send(request: RequestBuilder) -> Result<()> {

@@ -121,3 +121,44 @@ fn f4_files_written_during_an_authority_outage_commit_on_reconnect() -> Result<(
     }
     Ok(())
 }
+
+/// F4 through a silent outage, as a real network drops packets rather than refusing them: once
+/// one call has timed out, the client answers from what it holds at once instead of waiting out
+/// a timeout on every call, and the writes still commit on reconnect.
+// contract: C12
+#[test]
+fn f4_a_silent_outage_answers_cached_opens_at_once_and_commits_on_reconnect() -> Result<()> {
+    let Some(lab) = two_clients()? else {
+        return Ok(());
+    };
+    let (names, before) = committed_files(&lab)?;
+    for (name, bytes) in names.iter().zip(&before) {
+        assert_reads(&lab, "a", name, bytes)?;
+    }
+    lab.silence("a", Links::Authority)?;
+    // The first call that needs the authority times out, and tells the client it is gone.
+    assert!(
+        fs::read_dir(lab.mount_path("a")).is_err(),
+        "listing needs the authority"
+    );
+    let started = Instant::now();
+    assert_reads(&lab, "a", &names[0], &before[0])?;
+    let took = started.elapsed();
+    assert!(
+        took < Duration::from_secs(1),
+        "a cached open and read took {took:?}"
+    );
+    let offline: Vec<Vec<u8>> = names.iter().map(|_| random_bytes(256 << 10)).collect();
+    for (name, bytes) in names.iter().zip(&offline) {
+        fs::write(lab.mount_path("a").join(name), bytes)?;
+    }
+    thread::sleep(OUTAGE);
+    lab.restore("a", Links::Authority)?;
+    wait_committed(&lab, "a")?;
+    thread::sleep(VISIBLE_AFTER);
+    for ((name, before), offline) in names.iter().zip(&before).zip(&offline) {
+        assert_history(&lab, name, &[before, offline])?;
+        assert_reads(&lab, "b", name, offline)?;
+    }
+    Ok(())
+}

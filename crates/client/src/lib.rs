@@ -5,6 +5,7 @@ mod chunk_map;
 mod error;
 mod fs;
 mod journal;
+mod link;
 mod mount;
 mod reader;
 mod remote;

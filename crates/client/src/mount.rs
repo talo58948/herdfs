@@ -95,6 +95,7 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
         stats: stats.clone(),
     };
     tokio::spawn(Arc::new(committer).run(woken));
+    tokio::spawn(remote.clone().probe());
     let decider = match &args.strategy {
         StrategyArg::Decider(decider) => decider.clone(),
         StrategyArg::Jev => {
