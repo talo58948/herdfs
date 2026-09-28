@@ -139,7 +139,13 @@ impl Model {
                 );
             }
             Request::Remove { space, path } => {
-                assert_eq!(*reply, Response::Done);
+                // The answer is the entry as it was, so a client drops exactly its state.
+                assert_eq!(
+                    *reply,
+                    Response::Entry {
+                        entry: self.entry(space, path)
+                    }
+                );
                 self.remove(space, path);
                 self.touch_parent(space, path, now_ms);
             }

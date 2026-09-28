@@ -20,12 +20,13 @@ fn creation_needs_a_directory_parent_and_a_free_name() {
 }
 
 #[test]
-fn remove_refuses_a_non_empty_directory_and_the_root() {
+fn remove_refuses_a_non_empty_directory_and_the_root_and_answers_with_what_it_removed() {
     let mut fx = Fixture::new();
     fx.mkdir(&alice(), "a").unwrap();
-    fx.create(&alice(), "a/f").unwrap();
+    let file = fx.create(&alice(), "a/f").unwrap();
     assert_eq!(fx.remove(&alice(), "a"), Err(ErrorCode::NotEmpty));
     assert_eq!(fx.remove(&alice(), ""), Err(ErrorCode::Invalid));
+    assert_eq!(fx.remove(&alice(), "a/f"), Ok(Response::Entry { entry: file }));
 }
 
 #[test]
