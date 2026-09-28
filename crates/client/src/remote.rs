@@ -15,7 +15,9 @@ use crate::{Average, Error, Result, journal::Record, lock};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a connection may stay silent before its request fails and can be retried.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long an authority call may take in all, so a silent outage shows up fast.
+/// How long an authority call may wait for its answer to start, so a silent outage shows up
+/// fast. The answer's body, such as a long chunk list on a slow link, may take longer as long
+/// as it keeps coming (`READ_TIMEOUT`), and opens no offline window.
 const RPC_TIMEOUT: Duration = Duration::from_secs(3);
 /// How often the probe looks whether an offline window has ended.
 const PROBE_EVERY: Duration = Duration::from_secs(1);
@@ -53,11 +55,11 @@ impl Link {
     /// Opens or lengthens the window after a call timed out, and closes it after any answer.
     pub fn record<T>(&self, result: &Result<T>) {
         let mut state = lock(&self.0);
+        let window = state.map_or(FIRST_WINDOW, |(_, window)| (window * 2).min(LAST_WINDOW));
+        let grown = Some((Instant::now() + window, window));
         *state = match result {
-            Err(Error::Network(error)) if error.is_timeout() => {
-                let window = state.map_or(FIRST_WINDOW, |(_, window)| (window * 2).min(LAST_WINDOW));
-                Some((Instant::now() + window, window))
-            }
+            Err(Error::TimedOut) => grown,
+            Err(Error::Network(error)) if error.is_timeout() => grown,
             Err(Error::Network(_)) => return,
             _ => None,
         };
@@ -196,7 +198,8 @@ impl Remote {
     pub async fn put_chunk(&self, id: ChunkId, bytes: Bytes) -> Result<()> {
         let url = format!("{}/v1/spaces/{}/chunks/{id}", self.authority, self.space);
         let upload = |token: &str| self.http.put(&url).bearer_auth(token).body(bytes.clone());
-        self.send(upload).await.map(drop)
+        // Its answer starts only once the whole chunk is up.
+        self.send(upload, Duration::MAX).await.map(drop)
     }
 
     /// Fetches a chunk from a presigned URL and checks that it is the chunk expected.
@@ -219,34 +222,35 @@ impl Remote {
     /// Sends the request that `request` builds for this client's space.
     async fn call(&self, request: impl FnOnce(String) -> Request) -> Result<Response> {
         let (url, request) = (format!("{}/v1/rpc", self.authority), request(self.space.clone()));
-        let rpc = |token: &str| {
-            self.http
-                .post(&url)
-                .bearer_auth(token)
-                .json(&request)
-                .timeout(RPC_TIMEOUT)
-        };
+        let rpc = |token: &str| self.http.post(&url).bearer_auth(token).json(&request);
         let started = Instant::now();
-        let response = self.send(rpc).await?;
+        let response = self.send(rpc, RPC_TIMEOUT).await?;
         self.round_trip.add(started.elapsed().as_secs_f64());
         Ok(response.json().await?)
     }
 
-    /// Stats the root when an offline window ends, so the client finds out the authority
-    /// answers again even while nothing else asks it.
+    /// Stats the root when an offline window ends, and at most every `PROBE_EVERY` after, so the
+    /// client finds out the authority answers again even while nothing else asks it.
     pub async fn probe(self: Arc<Self>) {
         loop {
-            tokio::time::sleep(self.link.remaining().unwrap_or(PROBE_EVERY)).await;
+            let left = self.link.remaining().unwrap_or_default();
+            tokio::time::sleep(left.max(PROBE_EVERY)).await;
             if self.link.remaining() == Some(Duration::ZERO) {
                 let _ = self.stat(SpacePath::root()).await;
             }
         }
     }
 
-    /// Sends unless the authority counts as unreachable, and records whether it answered.
-    async fn send(&self, request: impl Fn(&str) -> RequestBuilder) -> Result<reqwest::Response> {
+    /// Sends unless the authority counts as unreachable, and records whether it answered by
+    /// `deadline`.
+    async fn send(
+        &self,
+        request: impl Fn(&str) -> RequestBuilder,
+        deadline: Duration,
+    ) -> Result<reqwest::Response> {
         self.link.check()?;
-        let response = self.exchange(request).await;
+        let response = tokio::time::timeout(deadline, self.exchange(request)).await;
+        let response = response.unwrap_or(Err(Error::TimedOut));
         self.link.record(&response);
         response
     }

@@ -30,7 +30,6 @@ fn records(journal: &Path) -> Result<Vec<PathBuf>> {
 /// write never commits.
 // contract: C4a
 #[test]
-#[ignore = "REDTEAM3: a crash between the two removes that settle a commit keeps the client from mounting"]
 fn a_client_killed_while_settling_a_commit_restarts_and_commits_its_other_writes() -> Result<()> {
     let Some(mut lab) = two_clients()? else {
         return Ok(());

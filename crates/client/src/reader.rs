@@ -44,8 +44,9 @@ pub struct Reader {
     fetching: Mutex<HashMap<ChunkId, Arc<FetchLock<()>>>>,
     /// Download throughput in bytes per second, over recent chunk downloads.
     pub throughput: Average,
-    /// Each entry's newest head seen, which its open files read. Offline, opens start from it (C12).
-    heads: Mutex<Lru<EntryId, Head>>,
+    /// Each entry's newest head seen, which its open files read, and whether this client may
+    /// write it. Offline, opens start from it (C12).
+    heads: Mutex<Lru<EntryId, (Head, bool)>>,
 }
 
 impl Reader {
@@ -63,22 +64,36 @@ impl Reader {
         }
     }
 
-    /// The version the entry's open files read, if known.
-    pub fn current(&self, entry: EntryId) -> Option<Head> {
+    /// The version the entry's open files read, and whether this client may write it, if known.
+    pub fn known(&self, entry: EntryId) -> Option<(Head, bool)> {
         lock(&self.heads).get(&entry)
     }
 
-    /// Makes `head` the version the entry's open files read, unless a newer one is known.
-    /// True if that changed it.
-    pub fn follow(&self, entry: EntryId, head: Option<Version>) -> bool {
+    pub fn current(&self, entry: EntryId) -> Option<Head> {
+        self.known(entry).map(|(file, _)| file)
+    }
+
+    /// Makes `head` the version the entry's open files read, unless a newer one is known, and
+    /// records whether this client may write it. Keeps the entries `open` names whatever the
+    /// bound. True if that replaced a version known before, whose pages the kernel may hold.
+    pub fn follow(
+        &self,
+        entry: EntryId,
+        (head, writable): (Option<Version>, bool),
+        open: impl Fn(&EntryId) -> bool,
+    ) -> bool {
         let mut heads = lock(&self.heads);
-        let known = heads.get(&entry).map(|file| file.map(|file| file.version.id));
-        if known.is_some_and(|known| known >= head.as_ref().map(|head| head.id)) {
-            return false;
-        }
-        heads.insert(entry, 1, head.map(|head| Arc::new(OpenVersion::new(head))));
-        heads.evict(HEADS, |_| false);
-        true
+        let known = heads.get(&entry).map(|(file, _)| file);
+        let older =
+            |file: &Head| file.as_ref().map(|file| file.version.id) < head.as_ref().map(|head| head.id);
+        let switched = known.as_ref().is_some_and(older);
+        let file = match known {
+            Some(file) if !older(&file) => file,
+            _ => head.map(|head| Arc::new(OpenVersion::new(head))),
+        };
+        heads.insert(entry, 1, (file, writable));
+        heads.evict(HEADS, open);
+        switched
     }
 
     /// Bytes `[off, off + len)` of `file`, fetching only the chunks that overlap them (C9).

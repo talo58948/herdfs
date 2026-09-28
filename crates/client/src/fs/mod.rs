@@ -32,6 +32,9 @@ const RECENT: u64 = 4096;
 
 /// A directory's entries as readdir reports them.
 type Listing = Vec<(INodeNo, FileType, String)>;
+/// An inode's path, its lookup count, which `forget` lowers, and when the authority last
+/// confirmed the path: `None` once in doubt.
+type Known = (SpacePath, u64, Option<Instant>);
 
 pub struct Space {
     remote: Arc<Remote>,
@@ -43,9 +46,8 @@ pub struct Space {
     root: EntryId,
     /// The mounting user and group, shown as the owner of every entry.
     owner: (u32, u32),
-    /// The path of each inode the kernel holds, with its lookup count, which `forget` lowers,
-    /// and when the authority last confirmed the path.
-    paths: Mutex<HashMap<INodeNo, (SpacePath, u64, Instant)>>,
+    /// Each inode the kernel holds.
+    paths: Mutex<HashMap<INodeNo, Known>>,
     /// Entries fetched from the authority, by path, with when and in which journal
     /// generation (count of settled commits) they were fetched.
     recent: Mutex<Lru<SpacePath, (Instant, u64, Entry)>>,
@@ -71,7 +73,7 @@ impl Space {
     ) -> io::Result<Self> {
         // /proc/self belongs to this process's user and group.
         let process = std::fs::metadata("/proc/self")?;
-        let root_path = (INodeNo::ROOT, (SpacePath::root(), 1, Instant::now()));
+        let root_path = (INodeNo::ROOT, (SpacePath::root(), 1, None));
         Ok(Self {
             remote,
             reader,
@@ -109,12 +111,23 @@ impl Space {
         let _ = self.notifier.set(notifier);
     }
 
+    /// Drops the kernel's pages of the entry, which a newer version replaced, before the reply
+    /// that switched it, so no later read sees the old one (C3). The kernel waits for the pages
+    /// a read in progress holds, which other tasks answer; reads and writes, which hold pages
+    /// themselves, never switch a version known before.
+    async fn invalidate(&self, entry: EntryId) {
+        if let Some(notifier) = self.notifier.get().cloned() {
+            let ino = self.ino(entry);
+            let _ = tokio::task::spawn_blocking(move || notifier.inval_inode(ino, 0, 0)).await;
+        }
+    }
+
     /// The inode's path, which another client may have moved: once older than TTL, asked of
     /// the authority by entry id (C7). Offline, the path held.
     async fn located(&self, ino: INodeNo) -> Result<SpacePath> {
         let known = lock(&self.paths).get(&ino).cloned();
         let (path, _, confirmed) = known.ok_or(Errno::ENOENT)?;
-        if ino == INodeNo::ROOT || confirmed.elapsed() < TTL {
+        if ino == INodeNo::ROOT || confirmed.is_some_and(|confirmed| confirmed.elapsed() < TTL) {
             return Ok(path);
         }
         match self.relocate(ino).await {
@@ -142,30 +155,30 @@ impl Space {
         Ok(parent.join(name).map_err(|_| Errno::EINVAL)?)
     }
 
-    /// The entry at `path` and how long the kernel may keep it: for TTL after the fetch, so
-    /// opens see commits (C2), else from the authority. Its local changes show through `attr`
-    /// (C1). Offline, the last entry seen keeps cached reads and writes working (C12).
-    async fn entry(&self, path: &SpacePath) -> Result<(Entry, Duration)> {
+    /// The entry at `path` and when it was fetched: from the cache for TTL after that, so opens
+    /// see commits (C2), else from the authority. Its local changes show through `attr` (C1).
+    /// Offline, the last entry seen keeps cached reads and writes working (C12).
+    async fn entry(&self, path: &SpacePath) -> Result<(Entry, Instant)> {
         let cached = lock(&self.recent).get(path);
         // A local commit since the fetch has made the entry stale (C1).
         if let Some((fetched, settled, entry)) = &cached
             && *settled == self.journal.settled()
-            && let Some(ttl) = TTL.checked_sub(fetched.elapsed())
+            && fetched.elapsed() < TTL
         {
-            return Ok((entry.clone(), ttl));
+            return Ok((entry.clone(), *fetched));
         }
         let entry = match self.remote.stat(path.clone()).await {
-            Err(err) if err.is_offline() => return cached.map(|(.., entry)| (entry, TTL)).ok_or(err),
+            Err(err) if err.is_offline() => return cached.map(|(at, _, entry)| (entry, at)).ok_or(err),
             stat => stat?,
         };
         self.follow(&entry).await;
-        Ok((entry, TTL))
+        Ok((entry, Instant::now()))
     }
 
     /// Caches the entry, and the path of its inode if the kernel holds it.
     fn remember(&self, entry: &Entry) {
         if let Some(known) = lock(&self.paths).get_mut(&self.ino(entry.id)) {
-            (known.0, known.2) = (entry.path.clone(), Instant::now());
+            (known.0, known.2) = (entry.path.clone(), Some(Instant::now()));
         }
         let mut recent = lock(&self.recent);
         let cached = (Instant::now(), self.journal.settled(), entry.clone());
@@ -173,11 +186,11 @@ impl Space {
         recent.evict(RECENT, |_| false);
     }
 
-    /// Caches an entry a listing fetched as the next to go unless a lookup uses it, so a big
-    /// listing does not push out the entries in use (C12).
-    fn listed(&self, entry: &Entry) {
+    /// Caches an entry a listing asked for at `asked` as the next to go unless a lookup uses it,
+    /// so a big listing does not push out the entries in use (C12).
+    fn listed(&self, entry: &Entry, asked: Instant) {
         let mut recent = lock(&self.recent);
-        let cached = (Instant::now(), self.journal.settled(), entry.clone());
+        let cached = (asked, self.journal.settled(), entry.clone());
         recent.insert_cold(entry.path.clone(), 1, cached);
         recent.evict(RECENT, |_| false);
     }
@@ -192,13 +205,18 @@ impl Space {
         Errno::ESTALE.into()
     }
 
-    /// Counts a reply that hands the kernel a reference to the entry's inode, and returns
-    /// its attributes for that reply.
-    fn looked_up(&self, entry: &Entry) -> FileAttr {
+    /// Counts a reply that hands the kernel a reference to the entry's inode, and returns its
+    /// attributes for that reply. The entry, fetched at `fetched`, gives the inode its path
+    /// unless the authority confirmed another since (C7).
+    fn looked_up(&self, entry: &Entry, fetched: Instant) -> FileAttr {
         let mut paths = lock(&self.paths);
-        let known = paths.entry(self.ino(entry.id));
-        let known = known.or_insert_with(|| (entry.path.clone(), 0, Instant::now()));
-        (known.0, known.1) = (entry.path.clone(), known.1 + 1);
+        let known = paths
+            .entry(self.ino(entry.id))
+            .or_insert((entry.path.clone(), 0, None));
+        if known.2.is_none_or(|confirmed| confirmed < fetched) {
+            (known.0, known.2) = (entry.path.clone(), Some(fetched));
+        }
+        known.1 += 1;
         drop(paths);
         self.attr(entry)
     }
@@ -207,7 +225,7 @@ impl Space {
     fn added(&self, entry: &Entry) -> FileAttr {
         self.stale(&entry.path);
         self.remember(entry);
-        self.looked_up(entry)
+        self.looked_up(entry, Instant::now())
     }
 
     /// Drops the kernel's `lookups` references to `ino`, and its path with the last one.

@@ -49,7 +49,8 @@ impl Committer {
     }
 
     /// Commits the entry's latest sealed write until none is left. Network failures back
-    /// off from 1 s to 30 s and retry forever; a refusal sets the write aside.
+    /// off from 1 s to 30 s, or to the end of an offline window if later, and retry forever;
+    /// a refusal sets the write aside.
     async fn commit(self: Arc<Self>, entry: EntryId) {
         let mut delay = FIRST_RETRY;
         while let Some(job) = self.next(entry).await {
@@ -58,7 +59,8 @@ impl Committer {
                     bump(&self.stats.commits, 1);
                     // Reads go on to the committed version once the journal drops the copy, as
                     // do offline opens and appends (C1, C12).
-                    self.reader.follow(entry, Some(version.clone()));
+                    let open = |entry: &EntryId| self.journal.is_open(entry);
+                    self.reader.follow(entry, (Some(version.clone()), true), open);
                     delay = FIRST_RETRY;
                     Outcome::Committed(version)
                 }
@@ -73,14 +75,10 @@ impl Committer {
             };
             let retry = matches!(outcome, Outcome::Retrying);
             self.journal.finish(&job, outcome);
-            // An unreachable authority is tried again when its offline window ends.
-            match self.remote.link.remaining().filter(|_| retry) {
-                Some(window) => tokio::time::sleep(window).await,
-                None if retry => {
-                    tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(LAST_RETRY);
-                }
-                None => {}
+            if retry {
+                let window = self.remote.link.remaining().unwrap_or_default();
+                tokio::time::sleep(window.max(delay)).await;
+                delay = (delay * 2).min(LAST_RETRY);
             }
         }
     }
@@ -133,7 +131,7 @@ impl Journal {
         let mut entries = lock(&self.entries);
         let tracked = entries.get_mut(&entry)?;
         if let Some((record, _)) = &tracked.pending {
-            tracked.reading = Some(record.seal);
+            (tracked.reading, tracked.due) = (Some(record.seal), None);
             let (record, sealed) = (record.clone(), self.sealed_path(entry, record.seal));
             return Some(Job { record, sealed });
         }
@@ -160,13 +158,14 @@ impl Journal {
             Outcome::Retrying => {}
         }
         let latest = tracked.pending.as_ref().map(|(record, _)| record.seal) == Some(seal);
-        // Settled, or replaced by a newer seal: nothing reads this sealed copy any more.
-        if settled || !latest {
-            let _ = fs::remove_file(&job.sealed);
-        }
         if settled && latest {
             tracked.pending = None;
             let _ = fs::remove_file(self.record_path(entry));
+        }
+        // Settled, or replaced by a newer seal: nothing reads this sealed copy any more. It goes
+        // after the record, which recovery would otherwise find naming no copy (C4a).
+        if settled || !latest {
+            let _ = fs::remove_file(&job.sealed);
         }
         if settled {
             self.settled.fetch_add(1, Relaxed);

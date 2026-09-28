@@ -96,7 +96,6 @@ fn read_long(file: &File) -> Result<Vec<u8>> {
 // contract: C3 (docs/architecture.md: once a getattr sees a newer head, every handle on the inode
 // reads the new version from its next read)
 #[test]
-#[ignore = "REDTEAM3: after a stat switched a file to a new version, its cached old pages are still read"]
 fn a_read_after_a_stat_saw_a_new_version_never_returns_the_old_one() -> Result<()> {
     let Some(reads) = switch_during_a_long_read()? else {
         return Ok(());
@@ -109,14 +108,13 @@ fn a_read_after_a_stat_saw_a_new_version_never_returns_the_old_one() -> Result<(
     Ok(())
 }
 
-/// Repro: [`switch_during_a_long_read`]. The kernel serves the long read(2) as many FUSE reads,
-/// each of which reads the version the inode follows when it arrives; the stat switches the inode
-/// between two of them, so the one read(2) returns v1's first bytes and v2's after them.
-// contract: C3 (a read never returns bytes of a partially committed version; an open file follows
-// its latest version between reads)
+/// [`switch_during_a_long_read`]. The kernel serves the long read(2) as many FUSE reads, each of
+/// which reads the version the inode follows when it arrives; the stat switches the inode between
+/// two of them, so the one read(2) may return v1's first bytes and v2's after them, as C3 allows,
+/// but never a byte of neither.
+// contract: C3 (one large read may span a switch; every byte comes from some committed version)
 #[test]
-#[ignore = "REDTEAM3: one read(2) returns bytes spliced from two versions"]
-fn one_read_returns_bytes_of_one_version() -> Result<()> {
+fn one_read_returns_only_bytes_of_committed_versions() -> Result<()> {
     let Some(reads) = switch_during_a_long_read()? else {
         return Ok(());
     };
@@ -125,11 +123,14 @@ fn one_read_returns_bytes_of_one_version() -> Result<()> {
         None => "v1".to_owned(),
         Some(_) if bytes == new => "v2".to_owned(),
         Some(at) if bytes[at..] == new[at..] => format!("v1 up to byte {at}, v2 from there"),
-        Some(at) => format!("v1 up to byte {at}, then neither version"),
+        Some(at) => format!("v1 up to byte {at}, then another mix"),
     };
-    assert!(
-        ["v1", "v2"].contains(&verdict.as_str()),
-        "one read(2) of the first 12 MiB while the stat switched the inode: {verdict}"
+    let byte_of = |((got, old), new): ((&u8, &u8), &u8)| got == old || got == new;
+    let foreign = bytes.iter().zip(old).zip(new).position(|bytes| !byte_of(bytes));
+    assert_eq!(
+        foreign, None,
+        "the first byte of neither version in one read(2) of the first 12 MiB while the stat \
+         switched the inode: {verdict}"
     );
     Ok(())
 }

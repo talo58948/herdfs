@@ -28,7 +28,6 @@ const WINDOW: Duration = Duration::from_secs(3);
 /// and opens the offline window. a, on LAN, opens it at once.
 // contract: C2 (docs/architecture.md Limits: largest file about 350 GiB)
 #[test]
-#[ignore = "REDTEAM3: over the Bad link a file of 8,000 chunks never opens: its chunk list outlasts the 3 s RPC deadline"]
 fn a_file_of_many_chunks_opens_over_a_slow_link() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");

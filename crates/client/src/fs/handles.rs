@@ -17,6 +17,8 @@ pub struct Handle {
     writable: bool,
     /// Written since the journal copy was last sealed.
     dirty: AtomicBool,
+    /// Truncated at open and not sealed since, which only the last close seals.
+    truncated: AtomicBool,
     /// Chunks this handle pinned, which release unpins.
     pub pinned: Mutex<Vec<ChunkId>>,
     _registration: Registration,
@@ -28,6 +30,7 @@ impl Handle {
             entry,
             writable,
             dirty: AtomicBool::new(false),
+            truncated: AtomicBool::new(false),
             pinned: Mutex::default(),
             _registration: registration,
         }
@@ -51,7 +54,7 @@ impl Space {
         }
         if truncate {
             self.prepare(entry, true).await?;
-            handle.dirty.store(true, Relaxed);
+            handle.truncated.store(true, Relaxed);
         }
         let fh = self.register(handle);
         if let Some(upgrade) = upgrade {
@@ -79,7 +82,8 @@ impl Space {
             }
             created => created?,
         };
-        self.reader.follow(entry.id, None);
+        self.reader
+            .follow(entry.id, (None, true), |entry| self.journal.is_open(entry));
         let fh = self.register(Handle::new(entry.id, true, self.journal.opened(entry.id)));
         Ok((self.added(&entry), fh))
     }
@@ -111,7 +115,7 @@ impl Space {
     /// Seals the handle's writes. Runs on flush, which close(2) waits for, so a write
     /// survives a crash once close returns (C4a).
     pub async fn flush(self: Arc<Self>, fh: u64) -> Result<()> {
-        self.seal(&*self.handle(fh)?)
+        self.seal(&*self.handle(fh)?, false)
     }
 
     pub async fn release(self: Arc<Self>, fh: u64) -> Result<()> {
@@ -119,14 +123,14 @@ impl Space {
             return Ok(());
         };
         self.cache.unpin(&lock(&handle.pinned));
-        self.seal(&handle)
+        self.seal(&handle, true)
     }
 
     /// Waits for the commit of everything sealed so far. EIO if that attempt fails; the
     /// committer keeps retrying in the background.
     pub async fn fsync(self: Arc<Self>, fh: u64) -> Result<()> {
         let handle = self.handle(fh)?;
-        self.seal(&handle)?;
+        self.seal(&handle, true)?;
         self.journal.urge(handle.entry);
         self.committed(handle.entry).await
     }
@@ -196,22 +200,28 @@ impl Space {
     /// a newer head it names, so every handle reads it from its next read (C3).
     pub(super) async fn follow(&self, entry: &Entry) {
         self.remember(entry);
-        let open = lock(&self.handles).values().any(|h| h.entry == entry.id);
         let current = self.reader.current(entry.id);
         let current = current.map(|file| file.map(|file| file.version.id));
-        if open && current != Some(entry.head) && self.journal.changes(entry.id).is_none() {
+        let (open, changed) = (self.journal.is_open(&entry.id), current != Some(entry.head));
+        if open && changed && self.journal.changes(entry.id).is_none() {
             let _ = self.head(entry.id, &entry.path, false, false).await;
         }
     }
 
     /// The entry's current head, which its open files then follow. Every open asks, for
     /// close-to-open consistency (C2), and one for writing needs write access. Offline, the
-    /// version followed lets writes and cached reads go on, and a truncating write needs none,
-    /// since its unguarded commit is right on an unknown base too (C5, C12).
+    /// head followed, with the access it came with, lets writes and cached reads go on, and a
+    /// truncating write needs none, since its unguarded commit is right on an unknown base too
+    /// (C5, C12).
     async fn head(&self, entry: EntryId, path: &SpacePath, write: bool, truncate: bool) -> Result<Head> {
         let (found, head, writable) = match self.remote.open(path.clone()).await {
             Err(err) if err.is_offline() => {
-                return self.reader.current(entry).or(truncate.then_some(None)).ok_or(err);
+                return match self.reader.known(entry) {
+                    Some((_, false)) if write => Err(Errno::EACCES.into()),
+                    Some((file, _)) => Ok(file),
+                    None if truncate => Ok(None),
+                    None => Err(err),
+                };
             }
             opened => opened.map_err(|err| self.gone(path, err))?,
         };
@@ -220,23 +230,22 @@ impl Space {
         if found.id != entry {
             return Err(Errno::ESTALE.into());
         }
+        let open = |entry: &EntryId| self.journal.is_open(entry);
+        if self.reader.follow(entry, (head, writable), open) {
+            self.invalidate(entry).await;
+        }
         if write && !writable {
             return Err(Errno::EACCES.into());
-        }
-        if self.reader.follow(entry, head)
-            && let Some(notifier) = self.notifier.get().cloned()
-        {
-            // The kernel drops the old version's pages; off this task, since it waits for the
-            // pages a read in progress holds.
-            let ino = self.ino(entry);
-            tokio::task::spawn_blocking(move || notifier.inval_inode(ino, 0, 0));
         }
         Ok(self.reader.current(entry).flatten())
     }
 
-    /// Persists the handle's writes, if any since the last seal, for the committer.
-    fn seal(&self, handle: &Handle) -> Result<()> {
-        if !handle.dirty.swap(false, Relaxed) {
+    /// Persists the handle's writes, if any since the last seal, for the committer. A truncation
+    /// at open alone waits for the last close: a shell's `>` closes its first descriptor before
+    /// the command writes through the dup'd one, whose close then seals the data (C3).
+    fn seal(&self, handle: &Handle, last: bool) -> Result<()> {
+        let truncated = last && handle.truncated.swap(false, Relaxed);
+        if !handle.dirty.swap(false, Relaxed) && !truncated {
             return Ok(());
         }
         // Sealing fsyncs the copy, which may take a while for a large file.

@@ -23,7 +23,6 @@ const MANY: usize = 4_200;
 /// opening 100 files instead, the same append commits.
 // contract: C12
 #[test]
-#[ignore = "REDTEAM3: the bounded LRU drops the version an open descriptor follows; offline appends fail"]
 fn an_offline_append_through_a_descriptor_held_open_is_committed() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
@@ -66,7 +65,6 @@ fn an_offline_append_through_a_descriptor_held_open_is_committed() -> Result<()>
 /// old bytes again. Round 1 fixed the same write online.
 // contract: C1, C4a, C12
 #[test]
-#[ignore = "REDTEAM3: offline, a principal known to be read-only overwrites a file and the write vanishes"]
 fn an_offline_write_without_write_access_fails_instead_of_vanishing() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
@@ -102,7 +100,6 @@ fn an_offline_write_without_write_access_fails_instead_of_vanishing() -> Result<
 /// file as untouched and closes the descriptor, and on reconnect `f` commits empty.
 // contract: C12
 #[test]
-#[ignore = "REDTEAM3: an offline ftruncate returns EIO but its truncation commits on reconnect"]
 fn an_offline_truncate_that_fails_leaves_the_file_as_it_was() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
