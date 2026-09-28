@@ -5,20 +5,21 @@ mod answer;
 mod fuse;
 mod handles;
 mod inodes;
+mod kernel;
 mod namespace;
 mod paths;
 mod versions;
 
-use std::sync::{Arc, Mutex, OnceLock, atomic::AtomicU64};
+use std::sync::{Arc, Mutex, atomic::AtomicU64};
 use std::time::{Duration, Instant};
 use std::{collections::HashMap, fs::File, io, os::unix::fs::MetadataExt};
 
 pub use fuse::Fuse;
 use fuser::{FileAttr, FileType, INodeNo, Notifier};
 use handles::Handle;
-use inodes::Inodes;
+pub use inodes::Inodes;
+pub use kernel::Kernel;
 use herdfs_core::proto::{Entry, EntryId, Kind};
-use tokio::task::JoinHandle;
 
 use crate::{
     cache::Cache, journal::Journal, lru::Lru, reader::Reader, remote::Remote, stats::Stats, strategy::Decider,
@@ -44,18 +45,16 @@ pub struct Space {
     journal: Arc<Journal>,
     stats: Arc<Stats>,
     decider: Mutex<Decider>,
-    root: EntryId,
+    kernel: Arc<Kernel>,
     /// The mounting user and group, shown as the owner of every entry.
     owner: (u32, u32),
-    inodes: Inodes,
+    inodes: Arc<Inodes>,
     /// Opens by entry and process name: how many in a row, and when the last was.
     opens: Mutex<Lru<(EntryId, String), (u32, Instant)>>,
     handles: Mutex<HashMap<u64, Arc<Handle>>>,
     /// Directory listings taken at opendir, by handle.
     listings: Mutex<HashMap<u64, Listing>>,
     next_handle: AtomicU64,
-    /// Tells the kernel to drop what it cached for an inode; set once mounted.
-    notifier: OnceLock<Notifier>,
 }
 
 impl Space {
@@ -66,7 +65,7 @@ impl Space {
         journal: Arc<Journal>,
         stats: Arc<Stats>,
         decider: Decider,
-        root: EntryId,
+        kernel: Arc<Kernel>,
     ) -> io::Result<Self> {
         // /proc/self belongs to this process's user and group.
         let process = std::fs::metadata("/proc/self")?;
@@ -77,54 +76,41 @@ impl Space {
             journal,
             stats,
             decider: Mutex::new(decider),
-            root,
+            kernel,
             owner: (process.uid(), process.gid()),
-            inodes: Inodes::default(),
+            inodes: Arc::default(),
             opens: Mutex::default(),
             handles: Mutex::default(),
             listings: Mutex::default(),
             next_handle: AtomicU64::new(1),
-            notifier: OnceLock::new(),
         })
     }
 
     /// Inode numbers are entry ids plus one, except that the root is always inode 1.
     fn ino(&self, entry: EntryId) -> INodeNo {
-        INodeNo(if entry == self.root { 1 } else { entry.0 + 1 })
+        self.kernel.ino(entry)
     }
 
     fn entry_id(&self, ino: INodeNo) -> EntryId {
-        EntryId(if ino.0 == 1 { self.root.0 } else { ino.0 - 1 })
+        self.kernel.entry(ino)
     }
 
-    pub fn set_notifier(&self, notifier: Notifier) {
-        let _ = self.notifier.set(notifier);
+    pub fn mounted(&self, notifier: Notifier) {
+        self.kernel.mounted(notifier);
     }
 
-    /// Drops the kernel's pages and attributes of the entry, whose bytes a settled commit may
-    /// have made other than those its journal copy served (C3), without waiting for it.
-    pub fn forget_pages(&self, entry: EntryId) {
-        let _ = self.invalidate(entry);
+    /// What this client knows of each entry, which the committer updates too.
+    pub fn inodes(&self) -> Arc<Inodes> {
+        self.inodes.clone()
     }
 
-    /// Starts dropping the kernel's pages of the entry, which a newer version replaced. A reply
-    /// that switched the version waits for it, so no later read sees the old one (C3): the kernel
-    /// waits for the pages a read in progress holds, which other tasks answer. A read or write,
-    /// which holds pages itself, lets it run.
-    fn invalidate(&self, entry: EntryId) -> Option<JoinHandle<io::Result<()>>> {
-        let (notifier, ino) = (self.notifier.get().cloned()?, self.ino(entry));
-        Some(tokio::task::spawn_blocking(move || {
-            notifier.inval_inode(ino, 0, 0)
-        }))
-    }
-
-    /// The entry's attributes, with size and mtime from its journal copy while it has one.
     /// When a call that a reply depends on is sent: before it, so that a commit settling during
     /// the call makes its answer stale (C1).
     fn asked(&self) -> Asked {
         (Instant::now(), self.journal.settled())
     }
 
+    /// The entry's attributes, with size and mtime from its journal copy while it has one.
     fn attr(&self, entry: &Entry, local: Option<&File>) -> FileAttr {
         let local = local.and_then(|copy| copy.metadata().ok());
         let size = match (&local, entry.kind) {

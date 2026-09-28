@@ -23,10 +23,10 @@ impl Space {
         match with(self.current(entry).await?).await {
             Err(err) if err.is_not_found() => {
                 // Forgotten first, so that following the head does not wait for those pages.
-                self.reader.forget(entry);
+                self.inodes.unfollow(entry);
                 let path = self.located(self.ino(entry)).await?;
                 let head = self.head(entry, &path, false, false).await?;
-                let _ = self.invalidate(entry);
+                self.kernel.apply(entry, false).await;
                 let used = with(head).await;
                 used.map_err(|err| {
                     if err.is_not_found() {
@@ -42,7 +42,7 @@ impl Space {
 
     /// The version the entry's handles read: the one this client follows, else its head now.
     pub(super) async fn current(&self, entry: EntryId) -> Result<Head> {
-        if let Some(file) = self.reader.current(entry) {
+        if let Some((file, _)) = self.inodes.known(entry) {
             return Ok(file);
         }
         let path = self.located(self.ino(entry)).await?;
@@ -59,10 +59,8 @@ impl Space {
     /// Switches an inode that open files read to a newer head `entry` names, fetched or cached,
     /// so every handle reads it from its next read (C3).
     pub(super) async fn move_on(&self, entry: &Entry) {
-        let current = self.reader.current(entry.id);
-        let current = current.map(|file| file.map(|file| file.version.id));
-        let (open, newer) = (self.journal.is_open(&entry.id), current < Some(entry.head));
-        if open && newer && self.journal.changes(entry.id).is_none() {
+        let (open, behind) = (self.journal.is_open(&entry.id), self.inodes.behind(entry.id));
+        if open && behind && self.journal.changes(entry.id).is_none() {
             let _ = self.head(entry.id, &entry.path, false, false).await;
         }
     }
@@ -82,7 +80,7 @@ impl Space {
         let asked = self.asked();
         let (found, head, writable) = match self.remote.open(path.clone()).await {
             Err(err) if err.is_offline() => {
-                return match self.reader.known(entry) {
+                return match self.inodes.known(entry) {
                     Some((_, false)) if write => Err(Errno::EACCES.into()),
                     Some((file, _)) => Ok(file),
                     None if truncate || self.journal.changes(entry).is_some() => Ok(None),
@@ -96,15 +94,12 @@ impl Space {
         if found.id != entry {
             return Err(Errno::ESTALE.into());
         }
-        let open = |entry: &EntryId| self.journal.is_open(entry);
-        if self.reader.follow(entry, (head, writable), open)
-            && let Some(dropping) = self.invalidate(entry)
-        {
-            let _ = dropping.await;
+        if self.inodes.switch(entry, (head, writable)) {
+            self.kernel.apply(entry, true).await;
         }
         if write && !writable {
             return Err(Errno::EACCES.into());
         }
-        Ok(self.reader.current(entry).flatten())
+        Ok(self.inodes.followed(entry))
     }
 }

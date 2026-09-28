@@ -7,7 +7,7 @@ use fuser::{Config, MountOption, Session};
 use herdfs_core::SpacePath;
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::fs::{Fuse, Space};
+use crate::fs::{Fuse, Kernel, Space};
 use crate::journal::{Committer, Journal};
 use crate::strategy::{Decider, Jev, StrategyArg};
 use crate::{cache::Cache, reader::Reader, remote::Remote, stats::Stats};
@@ -60,7 +60,7 @@ pub fn mount(args: &MountArgs) -> anyhow::Result<()> {
     let fuse = Fuse::new(space.clone(), runtime.handle().clone());
     let mut session = Session::new(fuse, &args.mountpoint, &config)
         .with_context(|| format!("mounting at {}", args.mountpoint.display()))?;
-    space.set_notifier(session.notifier());
+    space.mounted(session.notifier());
     let mut unmounter = session.unmount_callable();
     runtime.spawn(async move {
         tokio::select! {
@@ -99,24 +99,24 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
             Decider::Jev(Arc::new(jev), stats.clone())
         }
     };
+    let kernel = Arc::new(Kernel::new(root.id));
     let space = Space::new(
         remote.clone(),
-        reader.clone(),
+        reader,
         cache.clone(),
         journal.clone(),
         stats.clone(),
         decider,
-        root.id,
+        kernel.clone(),
     )?;
     let space = Arc::new(space);
-    let pages = space.clone();
     let committer = Committer {
         journal,
         remote: remote.clone(),
-        reader,
         cache,
         stats,
-        forget_pages: Box::new(move |entry| pages.forget_pages(entry)),
+        inodes: space.inodes(),
+        kernel,
     };
     tokio::spawn(Arc::new(committer).run(woken));
     tokio::spawn(remote.probe());

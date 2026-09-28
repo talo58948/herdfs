@@ -14,8 +14,9 @@ use herdfs_core::{ChunkId, chunk};
 use tokio::sync::{mpsc, watch};
 
 use super::{Journal, REJECTED, Record, write_record};
+use crate::fs::{Inodes, Kernel};
 use crate::stats::{Stats, bump};
-use crate::{Error, Result, cache::Cache, lock, reader::Reader, remote::Remote};
+use crate::{Error, Result, cache::Cache, lock, remote::Remote};
 
 const FIRST_RETRY: Duration = Duration::from_secs(1);
 const LAST_RETRY: Duration = Duration::from_secs(30);
@@ -40,11 +41,10 @@ pub enum Outcome {
 pub struct Committer {
     pub journal: Arc<Journal>,
     pub remote: Arc<Remote>,
-    pub reader: Arc<Reader>,
     pub cache: Arc<Cache>,
     pub stats: Arc<Stats>,
-    /// Drops the kernel's pages and attributes of an entry, without waiting for the kernel.
-    pub forget_pages: Box<dyn Fn(EntryId) + Send + Sync>,
+    pub inodes: Arc<Inodes>,
+    pub kernel: Arc<Kernel>,
 }
 
 impl Committer {
@@ -69,8 +69,7 @@ impl Committer {
                     bump(&self.stats.commits, 1);
                     // Reads go on to the committed version once the journal drops the copy, as
                     // do offline opens and appends (C1, C12).
-                    let open = |entry: &EntryId| self.journal.is_open(entry);
-                    self.reader.follow(entry, (Some(version.clone()), true), open);
+                    self.inodes.switch(entry, (Some(version.clone()), true));
                     delay = FIRST_RETRY;
                     // A retry may be answered with the head another client committed since.
                     (Outcome::Committed(version), !sealed)
@@ -89,7 +88,7 @@ impl Committer {
             self.journal.finish(&job, outcome);
             // The kernel may hold pages the copy served, which no open file reads any more (C3).
             if differs {
-                (self.forget_pages)(entry);
+                self.kernel.apply(entry, false).await;
             }
             if retry {
                 let window = self.remote.link.remaining().unwrap_or_default();

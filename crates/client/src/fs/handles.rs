@@ -89,10 +89,10 @@ impl Space {
             }
             created => created?,
         };
-        self.reader
-            .follow(entry.id, (None, true), |entry| self.journal.is_open(entry));
+        let attr = self.added(&entry);
+        self.inodes.switch(entry.id, (None, true));
         let fh = self.register(Handle::new(entry.id, true, &self.journal));
-        Ok((self.added(&entry), fh))
+        Ok((attr, fh))
     }
 
     pub async fn read(self: Arc<Self>, fh: u64, off: u64, len: u32) -> Result<Vec<u8>> {
@@ -192,7 +192,7 @@ impl Space {
         }
         // A truncating write needs no old bytes, only the base its commit names.
         let (scratch, base) = match truncate {
-            true => (self.journal.scratch(entry)?, self.reader.current(entry).flatten()),
+            true => (self.journal.scratch(entry)?, self.inodes.followed(entry)),
             false => self.usable(entry, |base| self.copy_of(entry, base)).await?,
         };
         self.journal

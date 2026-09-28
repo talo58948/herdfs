@@ -7,10 +7,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use herdfs_core::SpacePath;
-use herdfs_core::proto::{Entry, EntryId};
+use herdfs_core::proto::{Entry, EntryId, Version};
 
 use super::Asked;
-use crate::{lock, lru::Lru};
+use crate::{lock, lru::Lru, reader::Head, version::OpenVersion};
 
 /// How many entries that nothing holds are kept, for lookups within TTL and while offline (C12).
 const IDLE: u64 = 4096;
@@ -43,6 +43,9 @@ struct State {
     asked: Asked,
     /// Whether it may answer for its path within TTL: a change this client made says not.
     current: bool,
+    /// The version its open files read, if known, and whether this client may write it.
+    version: Option<Head>,
+    writable: bool,
 }
 
 impl Inodes {
@@ -84,6 +87,58 @@ impl Inodes {
         let _ = table.idle.get(&id);
         let state = lock(&table.nodes.get(&id)?.inode.0);
         Some((state.entry.clone(), state.asked, state.current))
+    }
+
+    /// The version the entry's open files read, if known, and whether this client may write it.
+    pub fn known(&self, id: EntryId) -> Option<(Head, bool)> {
+        let table = lock(&self.0);
+        let state = lock(&table.nodes.get(&id)?.inode.0);
+        Some((state.version.clone()?, state.writable))
+    }
+
+    /// The version the entry's open files read, if known and committed.
+    pub fn followed(&self, id: EntryId) -> Head {
+        self.known(id).and_then(|(file, _)| file)
+    }
+
+    /// Whether the entry names a newer head than the version its open files read (C3).
+    pub fn behind(&self, id: EntryId) -> bool {
+        let table = lock(&self.0);
+        let Some(node) = table.nodes.get(&id) else {
+            return false;
+        };
+        let state = lock(&node.inode.0);
+        let followed = state
+            .version
+            .as_ref()
+            .map(|file| file.as_ref().map(|file| file.version.id));
+        followed < Some(state.entry.head)
+    }
+
+    /// Makes `head` the version the entry's open files read, from an open or a commit, unless a
+    /// newer one is known, and records whether this client may write it. True if that replaced a
+    /// version known before, whose pages the kernel may hold.
+    pub fn switch(&self, id: EntryId, (head, writable): (Option<Version>, bool)) -> bool {
+        let table = lock(&self.0);
+        let Some(node) = table.nodes.get(&id) else {
+            return false;
+        };
+        let mut state = lock(&node.inode.0);
+        let older =
+            |file: &Head| file.as_ref().map(|file| file.version.id) < head.as_ref().map(|head| head.id);
+        let switched = state.version.as_ref().is_some_and(older);
+        if state.version.as_ref().is_none_or(older) {
+            state.version = Some(head.map(|head| Arc::new(OpenVersion::new(head))));
+        }
+        state.writable = writable;
+        switched
+    }
+
+    /// Forgets the version the entry's open files read, which this client may no longer use.
+    pub fn unfollow(&self, id: EntryId) {
+        if let Some(node) = lock(&self.0).nodes.get(&id) {
+            lock(&node.inode.0).version = None;
+        }
     }
 
     /// Whether the entry is known, and its path with when it was confirmed, if it has one.
@@ -153,19 +208,24 @@ impl Inodes {
 
 impl Table {
     fn observe(&mut self, entry: &Entry, asked: Asked, cold: bool) {
-        let state = || State {
-            entry: entry.clone(),
-            asked,
-            current: true,
-        };
-        let node = self.nodes.entry(entry.id).or_insert_with(|| Node {
-            bound: None,
-            lookups: 0,
-            inode: Arc::new(Inode(Mutex::new(state()))),
+        let node = self.nodes.entry(entry.id).or_insert_with(|| {
+            let state = State {
+                entry: entry.clone(),
+                asked,
+                current: true,
+                version: None,
+                writable: true,
+            };
+            let inode = Arc::new(Inode(Mutex::new(state)));
+            Node {
+                bound: None,
+                lookups: 0,
+                inode,
+            }
         });
         let (idle, bound, mut known) = (node.lookups == 0, node.bound.is_some(), lock(&node.inode.0));
         if asked.0 >= known.asked.0 {
-            *known = state();
+            (known.entry, known.asked, known.current) = (entry.clone(), asked, true);
         }
         drop(known);
         // A listing names entries in bulk: it binds new ones, but confirms no binding (C7).
