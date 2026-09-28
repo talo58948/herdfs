@@ -1,6 +1,7 @@
 //! Attacks on the store and on grants: requests without a grant, store keys on bob's host,
 //! edited and outlived grant URLs, revocation, and a tampered cache.
 
+use std::borrow::Cow;
 use std::fs;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -9,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use herdfs_core::ChunkId;
 use herdfs_core::proto::{Request, Response};
 use herdfs_lab::{SPACE, STORE_CREDENTIALS, sweep};
-use reqwest::StatusCode;
+use reqwest::{StatusCode, Url};
 use serde_json::json;
 
 use crate::{ALICE, BOB, EACCES, Reply, Scene, assert_same, contains, errno, set_acl};
@@ -81,6 +82,22 @@ fn bob_holds_no_store_credentials() -> Result<()> {
     Ok(())
 }
 
+/// `url` with its signed lifetime changed to a week, whatever it was.
+fn valid_for_a_week(url: &str) -> Result<String> {
+    let mut url = Url::parse(url)?;
+    let week = |(name, value): (Cow<str>, Cow<str>)| {
+        let value = if name == "X-Amz-Expires" {
+            "604800".into()
+        } else {
+            value
+        };
+        (name.into_owned(), value.into_owned())
+    };
+    let query: Vec<(String, String)> = url.query_pairs().map(week).collect();
+    url.query_pairs_mut().clear().extend_pairs(query);
+    Ok(url.into())
+}
+
 // contract: S2
 #[test]
 fn an_edited_grant_url_is_refused() -> Result<()> {
@@ -96,7 +113,7 @@ fn an_edited_grant_url_is_refused() -> Result<()> {
     let edits = [
         urls[0].replace(&own, &scene.secret.version.chunks[0].id.to_string()),
         urls[0].replace(&own, &plan.version.chunks[1].id.to_string()),
-        urls[0].replace("X-Amz-Expires=300", "X-Amz-Expires=604800"),
+        valid_for_a_week(&urls[0])?,
     ];
     for edited in &edits {
         assert_ne!(edited, &urls[0], "the edit applies");

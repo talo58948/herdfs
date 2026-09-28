@@ -12,7 +12,7 @@ jsonwebtoken.workspace = true
 herdfs-core.workspace = true
 rand.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
-rusty-s3.workspace = true
+rusty-s3 = { workspace = true, features = ["xml"] }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

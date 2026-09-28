@@ -3,6 +3,7 @@
 use std::fmt::Display;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::Result;
 use herdfs_core::proto::{self, ErrorCode, Request, Response};
@@ -12,19 +13,63 @@ use crate::issuer::{self, Issuer};
 use crate::process::{self, Proc};
 use crate::store::{self, S3_HOST};
 
+/// Retention and collection settings for the authority, in place of its production defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Collection {
+    /// How long a presigned chunk URL stays valid.
+    pub grant_ttl: Duration,
+    /// How often the collector runs.
+    pub every: Duration,
+    /// How old an unreferenced chunk object must be before the collector deletes it.
+    pub grace: Duration,
+    /// The newest versions of each entry kept, its head included.
+    pub retain_versions: u32,
+    /// Versions of each entry kept by age.
+    pub retain_days: u32,
+}
+
+impl Collection {
+    /// Short enough that a test sees a collection within seconds, with the grace at least twice
+    /// the grant TTL, as the authority requires.
+    pub const QUICK: Self = Self {
+        grant_ttl: Duration::from_secs(2),
+        every: Duration::from_secs(1),
+        grace: Duration::from_secs(5),
+        retain_versions: 3,
+        retain_days: 0,
+    };
+
+    fn args(self) -> Vec<String> {
+        let seconds = |duration: Duration| duration.as_secs().to_string();
+        [
+            ("--grant-ttl", seconds(self.grant_ttl)),
+            ("--gc-every", seconds(self.every)),
+            ("--gc-grace", seconds(self.grace)),
+            ("--retain-versions", self.retain_versions.to_string()),
+            ("--retain-days", self.retain_days.to_string()),
+        ]
+        .into_iter()
+        .flat_map(|(flag, value)| [flag.to_owned(), value])
+        .collect()
+    }
+}
+
 pub(crate) struct Authority {
     process: Option<Proc>,
     pub(crate) port: u16,
     http: Http,
+    /// Production defaults when `None`.
+    collection: Option<Collection>,
 }
 
 impl Authority {
     /// An authority that is not running yet, to listen on 127.0.0.1:`port`.
-    pub(crate) fn new(port: u16, http: Http) -> Self {
+    pub(crate) fn new(port: u16, http: Http, collection: Option<Collection>) -> Self {
         Self {
             process: None,
             port,
             http,
+            collection,
         }
     }
 
@@ -49,6 +94,7 @@ impl Authority {
             .args(["--s3-public-endpoint", &format!("http://{S3_HOST}:{store_port}")])
             .args(["--s3-bucket", store::BUCKET, "--s3-region", store::REGION])
             .args(["--oidc-issuer", issuer.url(), "--oidc-audience", issuer::AUDIENCE])
+            .args(self.collection.map(Collection::args).unwrap_or_default())
             .envs(store::STORE_CREDENTIALS);
         let mut authority = Proc::spawn("authority", command, &dir.join("authority.log"))?;
         let health = format!("http://{listen}/v1/health");

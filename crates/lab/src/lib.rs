@@ -29,6 +29,7 @@ use crate::process::Proc;
 use crate::store::Store;
 use crate::toxiproxy::Toxiproxy;
 
+pub use crate::authority::Collection;
 pub use crate::chunks::overlapping_chunk_bytes;
 pub use crate::client::Strategy;
 pub use crate::issuer::{AUDIENCE, BadToken, Issuer};
