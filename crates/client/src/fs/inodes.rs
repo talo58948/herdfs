@@ -3,14 +3,15 @@
 //! the kernel's references to its inode. What is known of each entry is its `Inode`.
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use herdfs_core::SpacePath;
-use herdfs_core::proto::{Entry, EntryId, Version};
+use herdfs_core::proto::{Entry, EntryId};
 
 use super::inode::{Inode, State};
-use crate::{journal::Local, lock, lru::Lru, reader::Head};
+use crate::{journal::Local, lock, lru::Lru};
 
 /// How many entries that nothing holds are kept, for lookups within TTL and while offline (C12).
 const IDLE: u64 = 4096;
@@ -80,37 +81,23 @@ impl Inodes {
     /// Reads or changes what is known of the entry, under its inode's lock alone.
     pub fn with<T>(&self, id: EntryId, change: impl FnOnce(&mut State) -> T) -> Option<T> {
         let inode = lock(&self.0).nodes.get(&id)?.inode.clone();
-        Some(change(&mut inode.state()))
+        let mut state = inode.state();
+        let changed = change(&mut state);
+        state.tidy();
+        Some(changed)
     }
 
-    /// The version the entry's open files read, if known, and whether this client may write it.
-    pub fn known(&self, id: EntryId) -> Option<(Head, bool)> {
-        self.with(id, |state| state.known()).flatten()
+    /// The entry as its inode now has it, with the journal copy of this client's changes, if
+    /// any: one snapshot for a reply (C1). An inode forgotten meanwhile had no local state.
+    pub fn view(&self, entry: Entry) -> (Entry, Option<Arc<File>>) {
+        let view = self.with(entry.id, |state| state.view()).flatten();
+        view.unwrap_or((entry, None))
     }
 
-    /// The version the entry's open files read, if known and committed.
-    pub fn followed(&self, id: EntryId) -> Head {
-        self.with(id, |state| state.followed()).flatten()
-    }
-
-    /// Whether the entry names a newer head than the version its open files read (C3).
-    pub fn behind(&self, id: EntryId) -> bool {
-        self.with(id, |state| state.behind()) == Some(true)
-    }
-
-    /// Takes an Open answer: see `State::switch`.
-    pub fn switch(&self, id: EntryId, answer: (Option<Version>, bool)) -> bool {
-        self.with(id, |state| state.switch(answer)) == Some(true)
-    }
-
-    /// Forgets the version the entry's open files read, which this client may no longer use.
-    pub fn unfollow(&self, id: EntryId) {
-        self.with(id, State::unfollow);
-    }
-
-    /// As `with`, for the journal: with `make`, the entry first gets local state, and an inode if
-    /// unknown, since a write recovered from the journal names only its entry.
-    pub fn local<T>(&self, id: EntryId, make: bool, change: impl FnOnce(&mut State) -> T) -> Option<T> {
+    /// Runs `change` on the entry's local changes (journal/local.rs), under its inode's lock
+    /// alone, and forgets them once nothing holds them. With `make`, they are made first, and an
+    /// inode if unknown, since a write recovered from the journal names only its entry.
+    pub fn local<T>(&self, id: EntryId, make: bool, change: impl FnOnce(&mut Local) -> T) -> Option<T> {
         let inode = {
             let mut table = lock(&self.0);
             let inode = match table.nodes.get(&id) {
@@ -123,7 +110,10 @@ impl Inodes {
             }
             inode
         };
-        Some(change(&mut inode.state()))
+        let mut state = inode.state();
+        let changed = change(state.local.as_mut()?);
+        state.tidy();
+        Some(changed)
     }
 
     /// How many entries have local state for which `counts` holds.

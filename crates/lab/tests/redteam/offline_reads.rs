@@ -42,7 +42,6 @@ fn read_back_offline(stat: bool) -> Result<Option<(u64, Vec<u8>)>> {
 /// where a stat after the commit fetched the entry and the offline read returns every byte.
 // contract: C1, C12
 #[test]
-#[ignore = "ROUND12: offline, a client reads its own committed file as the empty one it created"]
 fn an_offline_read_returns_the_bytes_this_client_saved() -> Result<()> {
     let Some((len, read)) = read_back_offline(false)? else {
         return Ok(());
@@ -73,7 +72,6 @@ fn an_offline_read_after_a_stat_returns_the_saved_bytes() -> Result<()> {
 /// offline_renames.rs, which stats the file after T_vis first; both commit "first\nsecond\n".
 // contract: C1, C12
 #[test]
-#[ignore = "ROUND12: offline, an append to a file this client saved overwrites its start"]
 fn an_offline_append_after_t_vis_follows_the_saved_bytes() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());

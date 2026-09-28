@@ -6,6 +6,7 @@ use std::fs::File;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
+use fuser::Errno;
 use herdfs_core::proto::{Entry, Version};
 
 use crate::journal::Local;
@@ -81,8 +82,13 @@ impl State {
         self.version.clone().flatten()
     }
 
-    /// Whether the entry names a newer head than the version its open files read (C3).
+    /// Whether open files of the entry read an older version than its head, and no local changes,
+    /// which every read would see instead (C1, C3).
     pub fn behind(&self) -> bool {
+        let local = self.local.as_ref();
+        if !local.is_some_and(Local::is_open) || local.and_then(Local::copy).is_some() {
+            return false;
+        }
         let followed = self
             .version
             .as_ref()
@@ -104,6 +110,26 @@ impl State {
         }
         self.writable = writable;
         switched
+    }
+
+    /// The version open files read while the authority is unreachable: the head last followed,
+    /// with the access it came with. A truncating write needs none, since its unguarded commit is
+    /// right on an unknown base too, nor does one over pending changes, which hold the bytes (C5,
+    /// C12). `None` if nothing is known to go on.
+    pub fn offline(&self, write: bool, truncate: bool) -> Option<Result<Head, Errno>> {
+        match self.known() {
+            Some((_, false)) if write => Some(Err(Errno::EACCES)),
+            Some((file, _)) => Some(Ok(file)),
+            None if truncate || self.local.as_ref().and_then(Local::copy).is_some() => Some(Ok(None)),
+            None => None,
+        }
+    }
+
+    /// Forgets the local changes once nothing holds them.
+    pub fn tidy(&mut self) {
+        if self.local.as_ref().is_some_and(Local::idle) {
+            self.local = None;
+        }
     }
 
     /// Forgets the version the entry's open files read, which this client may no longer use.

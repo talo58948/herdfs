@@ -7,10 +7,10 @@ use fuser::{Config, MountOption, Session};
 use herdfs_core::SpacePath;
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::fs::{Fuse, Kernel, Space};
+use crate::fs::{Fuse, Inodes, Kernel, Space};
 use crate::journal::{Committer, Journal};
 use crate::strategy::{Decider, Jev, StrategyArg};
-use crate::{cache::Cache, reader::Reader, remote::Remote, stats::Stats};
+use crate::{cache::Cache, remote::Remote, stats::Stats};
 
 /// Flags of `herdfs mount`.
 #[derive(clap::Args)]
@@ -84,11 +84,11 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
     let root = root.with_context(|| format!("cannot reach space {space:?} at the authority {authority}"))?;
     let cache = Cache::open(args.cache.clone(), args.cache_bytes)
         .with_context(|| format!("opening cache {}", args.cache.display()))?;
-    let (journal, woken) = Journal::open(args.journal.clone(), Arc::default())
+    let inodes = Arc::new(Inodes::default());
+    let (journal, woken) = Journal::open(args.journal.clone(), &inodes)
         .with_context(|| format!("opening journal {}", args.journal.display()))?;
     let (remote, cache, journal) = (Arc::new(remote), Arc::new(cache), Arc::new(journal));
     let stats = Arc::new(Stats::default());
-    let reader = Arc::new(Reader::new(remote.clone(), cache.clone(), stats.clone()));
     let decider = match &args.strategy {
         StrategyArg::Decider(decider) => decider.clone(),
         StrategyArg::Jev => {
@@ -102,16 +102,17 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
     let kernel = Arc::new(Kernel::new(root.id));
     let space = Space::new(
         remote.clone(),
-        reader,
         cache.clone(),
         journal.clone(),
         stats.clone(),
         decider,
         kernel.clone(),
+        inodes.clone(),
     )?;
     let space = Arc::new(space);
     let committer = Committer {
         journal,
+        inodes,
         remote: remote.clone(),
         cache,
         stats,

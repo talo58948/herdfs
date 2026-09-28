@@ -5,16 +5,16 @@
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 use std::{collections::HashSet, io};
 
 use bytes::Bytes;
 use herdfs_core::proto::{EntryId, ErrorCode, Version};
 use herdfs_core::{ChunkId, chunk};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 
 use super::{Journal, REJECTED, Record, write_record};
-use crate::fs::Kernel;
+use crate::fs::{Inodes, Kernel};
 use crate::stats::{Stats, bump};
 use crate::{Error, Result, cache::Cache, remote::Remote};
 
@@ -40,6 +40,7 @@ pub enum Outcome {
 /// What the commit tasks share.
 pub struct Committer {
     pub journal: Arc<Journal>,
+    pub inodes: Arc<Inodes>,
     pub remote: Arc<Remote>,
     pub cache: Arc<Cache>,
     pub stats: Arc<Stats>,
@@ -83,7 +84,7 @@ impl Committer {
                 }
             };
             let retry = matches!(outcome, Outcome::Retrying);
-            self.journal.finish(&job, outcome);
+            self.finish(&job, outcome);
             // The kernel may hold pages the copy served, which no open file reads any more (C3).
             if differs {
                 self.kernel.apply(entry, false).await;
@@ -100,8 +101,8 @@ impl Committer {
     async fn next(&self, entry: EntryId) -> Option<Job> {
         loop {
             let urged = self.journal.urged.notified();
-            let Some(quiet) = self.journal.quiet(entry) else {
-                return self.journal.next(entry);
+            let Some(quiet) = self.inodes.local(entry, false, |local| local.quiet()).flatten() else {
+                return self.take(entry);
             };
             let _ = tokio::time::timeout(quiet, urged).await;
         }
@@ -166,17 +167,17 @@ where
     }
 }
 
-impl Journal {
+impl Committer {
     /// The entry's latest sealed write still to commit. `None` ends its committer.
-    pub fn next(&self, entry: EntryId) -> Option<Job> {
-        let job = self.local(entry, false, |local| {
+    pub(super) fn take(&self, entry: EntryId) -> Option<Job> {
+        let job = self.inodes.local(entry, false, |local| {
             let Some((record, _)) = &local.pending else {
                 local.committing = false;
                 return None;
             };
             let job = Job {
                 record: record.clone(),
-                sealed: self.sealed_path(entry, record.seal),
+                sealed: self.journal.sealed_path(entry, record.seal),
             };
             (local.reading, local.due) = (Some(job.record.seal), None);
             Some(job)
@@ -188,17 +189,18 @@ impl Journal {
     /// set aside, and a sealed file that a newer seal replaced goes. A settle drops the copy and
     /// gives the inode the result in one critical section, so no reply pairs the copy's absence
     /// with attributes from before the commit (C1).
-    pub fn finish(&self, job: &Job, outcome: Outcome) {
+    pub(super) fn finish(&self, job: &Job, outcome: Outcome) {
         let (entry, seal) = (job.record.entry, job.record.seal);
-        let settled = self.inodes.local(entry, false, |state| {
+        let settled = self.inodes.with(entry, |state| {
             let local = state.local.as_mut()?;
             local.reading = None;
             let settled = !matches!(outcome, Outcome::Retrying);
+            local.settles += u64::from(settled);
             let committed = match outcome {
                 Outcome::Committed(version) => Some(version),
                 Outcome::Rejected => {
-                    self.reject(job);
-                    local.refused = seal;
+                    self.journal.reject(job);
+                    local.refused = local.settles;
                     None
                 }
                 Outcome::Dropped | Outcome::Retrying => None,
@@ -210,16 +212,12 @@ impl Journal {
             let latest = local.pending.as_ref().map(|(record, _)| record.seal) == Some(seal);
             if settled && latest {
                 local.pending = None;
-                let _ = fs::remove_file(self.record_path(entry));
+                let _ = fs::remove_file(self.journal.record_path(entry));
             }
             // Settled, or replaced by a newer seal: nothing reads this sealed copy any more. It goes
             // after the record, which recovery would otherwise find naming no copy (C4a).
             if settled || !latest {
                 let _ = fs::remove_file(&job.sealed);
-            }
-            if local.idle() {
-                let _ = fs::remove_file(self.working_path(entry));
-                state.local = None;
             }
             if settled {
                 state.settle(committed.as_ref(), job.record.mtime_ms);
@@ -231,7 +229,9 @@ impl Journal {
             let _ = fs::remove_file(&job.sealed);
         }
     }
+}
 
+impl Journal {
     /// Moves the record to `rejected/`, with a hard link that keeps its bytes.
     fn reject(&self, job: &Job) {
         let record = &job.record;
@@ -265,28 +265,5 @@ impl Journal {
             total = total.saturating_sub(len);
         }
         Ok(())
-    }
-
-    /// How much longer the committer waits for a newer seal of the entry, if at all.
-    pub fn quiet(&self, entry: EntryId) -> Option<Duration> {
-        let until = self.local(entry, false, |local| local.quiet_until).flatten()?;
-        Some(until.saturating_duration_since(Instant::now())).filter(|left| !left.is_zero())
-    }
-
-    /// Ends the entry's quiet period: an fsync waits for its commit.
-    pub fn urge(&self, entry: EntryId) {
-        self.local(entry, false, |local| local.quiet_until = None);
-        self.urged.notify_waiters();
-    }
-
-    /// The latest pending seal and a feed of commit attempts, for fsync to wait on.
-    pub fn pending(&self, entry: EntryId) -> Option<(u64, watch::Receiver<(u64, bool)>)> {
-        let pending =
-            |local: &mut super::Local| Some((local.pending.as_ref()?.0.seal, local.attempts.subscribe()));
-        self.local(entry, false, pending).flatten()
-    }
-
-    pub fn pending_count(&self) -> usize {
-        self.inodes.count(|local| local.pending.is_some())
     }
 }

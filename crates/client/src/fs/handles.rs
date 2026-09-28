@@ -9,10 +9,10 @@ use fuser::{Errno, FileAttr, INodeNo, OpenAccMode, OpenFlags};
 use herdfs_core::ChunkId;
 use herdfs_core::proto::{EntryId, ErrorCode};
 
-use super::{PERMISSIONS, Space};
 use tempfile::NamedTempFile;
 
-use crate::journal::Journal;
+use super::{Inodes, PERMISSIONS, Space};
+use crate::journal::Local;
 use crate::{Error, Result, lock, reader::Head};
 
 pub struct Handle {
@@ -22,32 +22,35 @@ pub struct Handle {
     dirty: AtomicBool,
     /// Truncated at open and not sealed since, which only the last close seals.
     truncated: AtomicBool,
-    /// The entry's latest seal at this handle's open or last successful fsync.
+    /// How many of the entry's commits had settled at this handle's open or last fsync.
     synced: AtomicU64,
     /// Chunks this handle pinned, which release unpins.
     pub pinned: Mutex<Vec<ChunkId>>,
-    /// Keeps the entry's local state while the handle is open.
-    journal: Arc<Journal>,
+    /// Keeps the entry's local changes while the handle is open.
+    inodes: Arc<Inodes>,
 }
 
 impl Handle {
-    fn new(entry: EntryId, writable: bool, journal: &Arc<Journal>) -> Self {
-        journal.opened(entry);
+    fn new(entry: EntryId, writable: bool, inodes: &Arc<Inodes>) -> Self {
+        let settles = inodes.local(entry, true, |local| {
+            local.opened();
+            local.settles().0
+        });
         Self {
             entry,
             writable,
             dirty: AtomicBool::new(false),
             truncated: AtomicBool::new(false),
-            synced: AtomicU64::new(journal.seals(entry).0),
+            synced: AtomicU64::new(settles.unwrap_or(0)),
             pinned: Mutex::default(),
-            journal: journal.clone(),
+            inodes: inodes.clone(),
         }
     }
 }
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        self.journal.closed(self.entry);
+        self.inodes.local(self.entry, false, Local::closed);
     }
 }
 
@@ -57,11 +60,11 @@ impl Space {
         let path = self.located(ino).await?;
         let writable = flags.acc_mode() != OpenAccMode::O_RDONLY;
         let truncate = writable && flags.0 & libc::O_TRUNC != 0;
-        let handle = Handle::new(entry, writable, &self.journal);
+        let handle = Handle::new(entry, writable, &self.inodes);
         let mut upgrade = None;
         // Every open for writing asks for write access, over pending changes too (C1, C4a); one
         // for reading needs no head while this client holds changes, which every handle reads.
-        if (writable || self.journal.changes(entry).is_none())
+        if (writable || self.changes(entry).is_none())
             && let Some(file) = self.head(entry, &path, writable, truncate).await?
             && !writable
         {
@@ -98,15 +101,15 @@ impl Space {
             created => created?,
         };
         let attr = self.added(&entry);
-        self.inodes.switch(entry.id, (None, true));
-        let fh = self.register(Handle::new(entry.id, true, &self.journal));
+        self.inodes.with(entry.id, |state| state.switch((None, true)));
+        let fh = self.register(Handle::new(entry.id, true, &self.inodes));
         Ok((attr, fh))
     }
 
     pub async fn read(self: Arc<Self>, fh: u64, off: u64, len: u32) -> Result<Vec<u8>> {
         let handle = self.handle(fh)?;
         // Changes pending on this client show through every handle (C1).
-        if let Some(copy) = self.journal.changes(handle.entry) {
+        if let Some(copy) = self.changes(handle.entry) {
             return Ok(read_copy(&copy, off, len)?);
         }
         self.usable(handle.entry, |file| self.read_version(file, off, len))
@@ -127,7 +130,9 @@ impl Space {
             return Err(Errno::EBADF.into());
         }
         self.prepare(handle.entry, false).await?;
-        self.journal.write(handle.entry, off, &data)?;
+        self.local(handle.entry, |local| {
+            local.write(&self.journal, handle.entry, off, &data)
+        })?;
         handle.dirty.store(true, Relaxed);
         Ok(data.len() as u32)
     }
@@ -151,12 +156,13 @@ impl Space {
     pub async fn fsync(self: Arc<Self>, fh: u64) -> Result<()> {
         let handle = self.handle(fh)?;
         self.seal(&handle, true)?;
-        self.journal.urge(handle.entry);
+        self.urge(handle.entry);
         self.committed(handle.entry).await?;
         // A commit refused since this handle's last fsync or open may hold its writes, and a
         // local disk reports a failed writeback to every descriptor open then (C2).
-        let (sealed, refused) = self.journal.seals(handle.entry);
-        if refused > handle.synced.swap(sealed, Relaxed) {
+        let settles = self.inodes.local(handle.entry, false, |local| local.settles());
+        let (settles, refused) = settles.unwrap_or((0, 0));
+        if refused > handle.synced.swap(settles, Relaxed) {
             return Err(Errno::EIO.into());
         }
         Ok(())
@@ -164,7 +170,8 @@ impl Space {
 
     /// Waits for the commit of the entry's pending write, if any. EIO if that attempt fails.
     pub(super) async fn committed(&self, entry: EntryId) -> Result<()> {
-        let Some((sealed, mut attempts)) = self.journal.pending(entry) else {
+        let pending = self.inodes.local(entry, false, |local| local.pending()).flatten();
+        let Some((sealed, mut attempts)) = pending else {
             return Ok(());
         };
         let attempt = attempts.wait_for(|(covered, _)| *covered >= sealed).await;
@@ -179,16 +186,16 @@ impl Space {
         let handle = handle.filter(|handle| handle.writable);
         let entry = self.entry_id(ino);
         // A short open, which keeps the journal copy while it changes.
-        let _short = Handle::new(entry, true, &self.journal);
+        let _short = Handle::new(entry, true, &self.inodes);
         if handle.is_none() {
             self.head(entry, &self.located(ino).await?, true, size == 0)
                 .await?;
         }
         self.prepare(entry, size == 0).await?;
-        self.journal.set_len(entry, size)?;
+        self.local(entry, |local| local.set_len(&self.journal, entry, size))?;
         match handle {
             Some(handle) => handle.dirty.store(true, Relaxed),
-            None => tokio::task::block_in_place(|| self.journal.seal(entry))?,
+            None => tokio::task::block_in_place(|| self.seal_entry(entry))?,
         }
         Ok(())
     }
@@ -196,19 +203,55 @@ impl Space {
     /// Gives the entry a journal copy to change, emptied if `truncate`: the one holding its
     /// changes, else its current version materialized (C1).
     async fn prepare(&self, entry: EntryId, truncate: bool) -> Result<()> {
-        if self.journal.attach(entry, truncate)? {
+        if self.attach(entry, truncate)? {
             return Ok(());
         }
         // A truncating write needs no old bytes, only the base its commit names.
         let (scratch, base) = match truncate {
-            true => (self.journal.scratch(entry)?, self.inodes.followed(entry)),
+            true => {
+                let base = self.inodes.with(entry, |state| state.followed()).flatten();
+                (self.journal.scratch(entry)?, base)
+            }
             false => self.usable(entry, |base| self.copy_of(entry, base)).await?,
         };
-        self.journal
-            .install(entry, scratch, base.as_ref().map(|base| &base.version))?;
+        let base = base.as_ref().map(|base| &base.version);
+        let install = |local: &mut Local| local.install(&self.journal, entry, scratch, base);
+        self.inodes.local(entry, true, install).unwrap_or(Ok(()))?;
         // Another open may have installed its copy first; truncate that one instead.
-        self.journal.attach(entry, truncate)?;
+        self.attach(entry, truncate)?;
         Ok(())
+    }
+
+    /// Joins the entry's journal copy for writing, emptying it if asked. False if it has none.
+    fn attach(&self, entry: EntryId, truncate: bool) -> io::Result<bool> {
+        let attached = self.changes(entry).is_some();
+        if attached && truncate {
+            self.local(entry, |local| local.set_len(&self.journal, entry, 0))?;
+        }
+        Ok(attached)
+    }
+
+    /// The entry's journal copy while it holds changes, which every read sees (C1).
+    fn changes(&self, entry: EntryId) -> Option<Arc<File>> {
+        self.inodes.local(entry, false, |local| local.copy()).flatten()
+    }
+
+    /// Runs `change` on the entry's local changes, which a handle keeps while it is open.
+    fn local<T>(&self, entry: EntryId, change: impl FnOnce(&mut Local) -> io::Result<T>) -> io::Result<T> {
+        let changed = self.inodes.local(entry, false, change);
+        changed.unwrap_or_else(|| Err(io::Error::other("no journal copy")))
+    }
+
+    /// Seals the entry's working copy, if it has one (C3, C4a).
+    pub(super) fn seal_entry(&self, entry: EntryId) -> io::Result<()> {
+        let seal = |local: &mut Local| local.seal(&self.journal, entry);
+        self.inodes.local(entry, false, seal).unwrap_or(Ok(()))
+    }
+
+    /// Ends the entry's quiet period, for an fsync that waits for its commit.
+    pub(super) fn urge(&self, entry: EntryId) {
+        self.inodes.local(entry, false, Local::urge);
+        self.journal.urged.notify_waiters();
     }
 
     /// A scratch copy of `base`, to become the entry's working copy.
@@ -229,7 +272,7 @@ impl Space {
             return Ok(());
         }
         // Sealing fsyncs the copy, which may take a while for a large file.
-        let sealed = tokio::task::block_in_place(|| self.journal.seal(handle.entry));
+        let sealed = tokio::task::block_in_place(|| self.seal_entry(handle.entry));
         Ok(sealed.inspect_err(|_| handle.dirty.store(true, Relaxed))?)
     }
 

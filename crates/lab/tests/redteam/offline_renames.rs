@@ -47,7 +47,6 @@ fn append_offline_after(rename: bool) -> Result<Option<(io::Result<()>, Vec<u8>)
 /// is committed on reconnect.
 // contract: C12
 #[test]
-#[ignore = "ROUND12: offline, an append to a file this client saved and renamed fails with EIO"]
 fn an_offline_append_to_a_file_this_client_renamed_lands() -> Result<()> {
     let Some((appended, read)) = append_offline_after(true)? else {
         return Ok(());
