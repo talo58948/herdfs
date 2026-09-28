@@ -116,7 +116,8 @@ pub enum Request {
         path: SpacePath,
         target: String,
     },
-    /// Removes a file, a symlink or an empty directory.
+    /// Removes a file, a symlink or an empty directory. Answers with the
+    /// removed entry, so a client knows exactly which entry went.
     Remove {
         space: String,
         path: SpacePath,
