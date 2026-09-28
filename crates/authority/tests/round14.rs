@@ -45,7 +45,6 @@ fn a_grant_hides_history_from_an_earlier_millisecond() {
 /// commits. S8 says only versions created after access are visible, but history includes v1.
 // contract: S8
 #[test]
-#[ignore = "ROUND14: a same-millisecond pre-grant version is exposed in history"]
 fn a_grant_hides_history_created_earlier_in_the_same_millisecond() {
     let (first, history) = history(0);
     assert!(!history.contains(&first), "the pre-grant version is hidden");
@@ -68,7 +67,6 @@ fn unguarded(entry: EntryId, request_id: &str) -> Request {
 /// without checking current permission, confirming a version bob can no longer see.
 // contract: S8
 #[test]
-#[ignore = "ROUND14: replaying a retained commit bypasses current read permission"]
 fn a_revoked_writer_cannot_confirm_a_version_by_replaying_its_commit() {
     let mut fixture = Fixture::new();
     let (file, _) = fixture.file("f", b"initial");

@@ -192,6 +192,7 @@ impl Sim {
             space: space.into(),
             path: path.clone(),
         };
+        self.now_ms += 1;
         match self.authority.handle(&self.actors[AUDITOR], request, self.now_ms) {
             Ok(Outcome::Reply(Response::Entry { entry })) => Ok(entry),
             Ok(other) => panic!("Stat answered {other:?}"),
@@ -211,6 +212,7 @@ impl Sim {
 
     /// A read by the auditor, who may read everything.
     fn audit(&mut self, request: &Request) -> Response {
+        self.now_ms += 1;
         match self
             .authority
             .handle(&self.actors[AUDITOR], request.clone(), self.now_ms)
