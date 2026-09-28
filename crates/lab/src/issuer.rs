@@ -13,7 +13,7 @@ use tokio::net::TcpListener;
 use tokio::runtime::{self, Runtime};
 
 /// The audience the authority accepts.
-pub(crate) const AUDIENCE: &str = "herdfs";
+pub const AUDIENCE: &str = "herdfs";
 const KEY_ID: &str = "lab";
 // Test-only Ed25519 keys, made with `openssl genpkey -algorithm ed25519`.
 const KEY: &str = "-----BEGIN PRIVATE KEY-----
@@ -52,7 +52,8 @@ struct Claims<'a> {
     exp: u64,
 }
 
-pub(crate) struct Issuer {
+/// Serves discovery and a JWKS on 127.0.0.1 and mints tokens, until dropped.
+pub struct Issuer {
     url: String,
     key: EncodingKey,
     rogue: EncodingKey,
@@ -61,7 +62,7 @@ pub(crate) struct Issuer {
 }
 
 impl Issuer {
-    pub(crate) fn start() -> Result<Self> {
+    pub fn start() -> Result<Self> {
         let runtime = runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
@@ -81,11 +82,11 @@ impl Issuer {
         })
     }
 
-    pub(crate) fn url(&self) -> &str {
+    pub fn url(&self) -> &str {
         &self.url
     }
 
-    pub(crate) fn token(&self, sub: &str, groups: &[impl AsRef<str>]) -> String {
+    pub fn token(&self, sub: &str, groups: &[impl AsRef<str>]) -> String {
         sign(&self.claims(sub, groups), &self.key)
     }
 

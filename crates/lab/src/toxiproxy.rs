@@ -19,6 +19,11 @@ pub enum Profile {
     Wan,
     /// About 300 ms round trip with jitter, and 1 Mbit/s.
     Bad,
+    /// A measured link, such as a real WAN path that R6 compares the lab with.
+    Custom {
+        round_trip_ms: u32,
+        kilobytes_per_sec: u32,
+    },
 }
 
 /// Which of a client's links to cut or restore.
@@ -47,6 +52,10 @@ impl Profile {
             Self::Lan => (1, 0, None),
             Self::Wan => (90, 5, Some(12_500)),
             Self::Bad => (300, 50, Some(128)),
+            Self::Custom {
+                round_trip_ms,
+                kilobytes_per_sec,
+            } => (round_trip_ms, 0, Some(kilobytes_per_sec)),
         };
         let one_way = [round_trip_ms / 2, round_trip_ms - round_trip_ms / 2];
         let latency = STREAMS
