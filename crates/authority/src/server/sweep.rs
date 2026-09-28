@@ -81,11 +81,16 @@ impl Server {
             .filter(|id| !collected.retained.contains(id))
             .collect();
         let ttl_ms = i64::try_from(self.grant_ttl.as_millis()).unwrap_or(i64::MAX);
-        let since_ms = collected.previous_ms.max(started - policy.grace_ms + ttl_ms);
+        let floor = started - policy.grace_ms + ttl_ms;
+        let since_ms = if collected.previous_ms > started {
+            floor
+        } else {
+            collected.previous_ms.max(floor)
+        };
         let since = self
             .run(move |authority, _| {
                 authority
-                    .unreferenced(&unreferenced, since_ms)
+                    .unreferenced(&unreferenced, started, since_ms)
                     .map_err(unavailable)
             })
             .await?;

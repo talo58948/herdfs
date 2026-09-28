@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -17,6 +17,7 @@ use axum::{
     body::Bytes,
     extract::{Path, Query},
     http::StatusCode,
+    response::IntoResponse,
     routing::{get, put},
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
@@ -48,6 +49,7 @@ pub struct Lab {
     pub objects: Store,
     /// One permit is required for a fake bucket write.
     pub store_writes: Arc<tokio::sync::Semaphore>,
+    pub store_lists_fail: Arc<AtomicBool>,
     pub http: reqwest::Client,
     db: PathBuf,
     s3: String,
@@ -65,7 +67,7 @@ pub struct Stored {
 pub type Store = Arc<Mutex<BTreeMap<String, Stored>>>;
 
 /// A bucket that takes PUT and DELETE, and lists with ListObjectsV2 two keys a page.
-fn fake_s3(objects: Store, writes: Arc<tokio::sync::Semaphore>) -> Router {
+fn fake_s3(objects: Store, writes: Arc<tokio::sync::Semaphore>, lists_fail: Arc<AtomicBool>) -> Router {
     let (puts, deletes) = (Arc::clone(&objects), Arc::clone(&objects));
     let put_object = move |Path(key): Path<String>, body: Bytes| async move {
         let _writing = writes.acquire().await.unwrap();
@@ -83,6 +85,9 @@ fn fake_s3(objects: Store, writes: Arc<tokio::sync::Semaphore>) -> Router {
         deletes.lock().unwrap().remove(&key);
     };
     let list = move |Path(bucket): Path<String>, Query(query): Query<BTreeMap<String, String>>| async move {
+        if lists_fail.load(Ordering::SeqCst) {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
         let bucket = bucket.trim_end_matches('/');
         let prefix = format!("{bucket}/{}", query.get("prefix").map_or("", String::as_str));
         let skip: usize = query
@@ -105,6 +110,7 @@ fn fake_s3(objects: Store, writes: Arc<tokio::sync::Semaphore>) -> Router {
         format!(
             r#"<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">{contents}{next}</ListBucketResult>"#
         )
+        .into_response()
     };
     Router::new().route("/{*key}", put(put_object).delete(delete_object).get(list))
 }
@@ -151,7 +157,15 @@ impl Lab {
         .await;
         let objects = Store::default();
         let store_writes = Arc::new(tokio::sync::Semaphore::new(1));
-        let s3 = serve(|_| fake_s3(Arc::clone(&objects), Arc::clone(&store_writes))).await;
+        let store_lists_fail = Arc::new(AtomicBool::new(false));
+        let s3 = serve(|_| {
+            fake_s3(
+                Arc::clone(&objects),
+                Arc::clone(&store_writes),
+                Arc::clone(&store_lists_fail),
+            )
+        })
+        .await;
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("authority.db");
         let authority = Authority::open(&db).unwrap();
@@ -177,6 +191,7 @@ impl Lab {
             jwks_fetches,
             objects,
             store_writes,
+            store_lists_fail,
             http: reqwest::Client::new(),
             db,
             s3,
