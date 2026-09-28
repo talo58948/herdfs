@@ -33,6 +33,7 @@ mod refused_fsync;
 mod rejected_writes;
 mod replayed_commits;
 mod replayed_heads;
+mod revoked_replays;
 mod rewound_reads;
 mod saved_mtime;
 mod scratch_files;
