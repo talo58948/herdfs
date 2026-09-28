@@ -61,6 +61,15 @@ impl Model {
                     entry: self.entry(space, path)
                 }
             ),
+            Request::Locate { space, entry } => {
+                let path = self.node_by_id(space, *entry).expect("located").0;
+                assert_eq!(
+                    *reply,
+                    Response::Entry {
+                        entry: self.entry(space, path)
+                    }
+                );
+            }
             Request::List { space, path } => self.check_list(space, path, reply),
             Request::Open { space, path } => {
                 let entry = self.entry(space, path);

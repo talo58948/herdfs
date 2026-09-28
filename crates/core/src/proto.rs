@@ -76,6 +76,12 @@ pub enum Request {
         space: String,
         path: SpacePath,
     },
+    /// The entry with this id, at its current path, so a client can follow
+    /// renames made elsewhere. Needs read on that path.
+    Locate {
+        space: String,
+        entry: EntryId,
+    },
     List {
         space: String,
         path: SpacePath,

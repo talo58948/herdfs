@@ -44,7 +44,12 @@ impl Authority {
     /// Opens the database at `db`, creating the schema if it is missing.
     pub fn open(db: &Path) -> anyhow::Result<Self> {
         let db = Connection::open(db)?;
+        let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version < db::SCHEMA_VERSION {
+            db.execute_batch(db::DROP_ALL)?;
+        }
         db.execute_batch(db::SCHEMA)?;
+        db.pragma_update(None, "user_version", db::SCHEMA_VERSION)?;
         db.set_prepared_statement_cache_capacity(64);
         Ok(Self { db })
     }
@@ -101,6 +106,7 @@ impl Call<'_> {
             Request::CreateSpace { space } => self.create_space(&space)?,
             Request::Fork { space, name } => self.fork(&space, &name)?,
             Request::Stat { space, path } => self.stat(&space, &path)?,
+            Request::Locate { space, entry } => self.locate(&space, entry)?,
             Request::List { space, path } => self.list(&space, &path)?,
             Request::Open { space, path } => self.open(&space, &path)?,
             Request::Grant {

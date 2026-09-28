@@ -30,6 +30,15 @@ Plugins are separate programs that use a mount like any other program (the agent
 
 **Forks** copy the namespace rows, ACLs and each file's head version row into a new space. No chunk bytes are copied. Time is proportional to the number of entries. A fork's history starts at the fork.
 
+**Open files follow the latest version** (NFS-style close-to-open). An `open` asks for the current head; when a later `getattr` or `open` on this client sees a newer head, the client switches the inode to it and drops the kernel's cached pages and attributes, so every handle on the inode reads the new version from its next read. Per-handle snapshots were tried first and fought the kernel's per-inode page cache and `mmap`.
+
+**Paths follow renames.** Operations name entries by path, but the client knows every inode's entry id. A cached inode path older than T_vis is refreshed with `Locate` (by entry id) before use.
+
+## Limits
+
+- Largest file: about 350 GiB (a commit's chunk list must fit the 32 MiB RPC body).
+- Largest single `Grant`: 4,096 chunks.
+
 ## Access strategies
 
 Chosen once per open by a `Decider`, never per read:

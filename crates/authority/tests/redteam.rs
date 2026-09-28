@@ -178,7 +178,6 @@ const CHUNKS_PER_FILE: usize = 350_000;
 /// data the files hold: the second fork takes hundreds of times the first.
 // contract: C13
 #[test]
-#[ignore = "REDTEAM2: a fork's time grows with the length of every head's chunk list"]
 fn a_forks_time_does_not_grow_with_the_size_of_its_files() {
     let mut fx = Fixture::new();
     let chunk = fx.upload(&alice(), &vec![7; 1 << 20]).unwrap();

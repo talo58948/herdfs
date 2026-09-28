@@ -165,7 +165,11 @@ impl Sim {
         let principal = self.actors[who].clone();
         let want = self.model.outcome(&principal, request);
         let got = self.authority.handle(&principal, request.clone(), self.now_ms);
-        if let (Request::Commit { .. } | Request::Grant { .. }, Err(error)) = (request, &got) {
+        let by_id = matches!(
+            request,
+            Request::Commit { .. } | Request::Grant { .. } | Request::Locate { .. }
+        );
+        if let (true, Err(error)) = (by_id, &got) {
             self.check_refusal(&principal, &error.message);
         }
         let got = got.map_err(|error| error.code);

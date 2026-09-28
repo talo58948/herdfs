@@ -102,13 +102,10 @@ impl Call<'_> {
             }
             None => HashSet::new(),
         };
-        for chunk in chunks {
-            let in_base = base_chunks.contains(&(chunk.id, chunk.len));
-            if !in_base && self.uploaded_len(chunk.id)? != Some(chunk.len) {
-                let message = format!(
-                    "chunk {} of {} bytes is neither in the base nor uploaded by you",
-                    chunk.id, chunk.len
-                );
+        let distinct: HashSet<_> = chunks.iter().map(|chunk| (chunk.id, chunk.len)).collect();
+        for (id, len) in distinct.difference(&base_chunks) {
+            if self.uploaded_len(*id)? != Some(*len) {
+                let message = format!("chunk {id} of {len} bytes is neither in the base nor uploaded by you");
                 return Err(refuse(ErrorCode::Invalid, message));
             }
         }

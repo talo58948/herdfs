@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use herdfs_authority::Principal;
 use herdfs_core::{
-    ChunkId, ChunkRef, SpacePath,
+    ChunkId, SpacePath,
     proto::{Entry, EntryId, ErrorCode, Kind, Perm, Request, Version, VersionId},
 };
 
@@ -43,9 +43,9 @@ pub struct Node {
     pub history: Vec<VersionId>,
 }
 
-type Outcome = Result<(), ErrorCode>;
+pub type Outcome = Result<(), ErrorCode>;
 
-fn ensure(holds: bool, code: ErrorCode) -> Outcome {
+pub fn ensure(holds: bool, code: ErrorCode) -> Outcome {
     if holds { Ok(()) } else { Err(code) }
 }
 
@@ -70,7 +70,7 @@ impl Model {
             .max()
     }
 
-    fn require(&self, who: &Principal, space: &str, path: &SpacePath, need: Perm) -> Outcome {
+    pub fn require(&self, who: &Principal, space: &str, path: &SpacePath, need: Perm) -> Outcome {
         self.space(space)?;
         ensure(self.perm(space, path, who) >= Some(need), ErrorCode::Denied)
     }
@@ -122,6 +122,10 @@ impl Model {
             Request::Fork { space, name } => {
                 self.require(who, space, &SpacePath::root(), Perm::Admin)?;
                 self.new_space(name)
+            }
+            Request::Locate { space, entry } => {
+                let (path, _) = self.node_by_id(space, *entry).ok_or(NotFound)?;
+                self.require(who, space, path, Perm::Read)
             }
             Request::Stat { space, path } if path.is_root() => {
                 self.require_somewhere(who, space, Perm::Read)?;
@@ -256,39 +260,5 @@ impl Model {
             (true, true) if self.has_children(space, to) => Err(ErrorCode::NotEmpty),
             _ => Ok(()),
         }
-    }
-
-    #[allow(clippy::too_many_arguments, reason = "mirrors the fields of Request::Commit")]
-    fn commit_outcome(
-        &self,
-        who: &Principal,
-        space: &str,
-        entry: EntryId,
-        request_id: &str,
-        base: Option<VersionId>,
-        guarded: bool,
-        chunks: &[ChunkRef],
-    ) -> Outcome {
-        self.space(space)?;
-        let retry = (who.user.clone(), request_id.to_owned());
-        if let Some(first) = self.commits.get(&retry) {
-            return ensure(self.versions[first].entry == entry, ErrorCode::Invalid);
-        }
-        let (path, node) = self.node_by_id(space, entry).ok_or(ErrorCode::NotFound)?;
-        self.require(who, space, path, Perm::Write)?;
-        ensure(node.kind == Kind::File, ErrorCode::Invalid)?;
-        let base_chunks = match base {
-            Some(base) if node.history.contains(&base) => self.versions[&base].chunks.as_slice(),
-            Some(_) => return Err(ErrorCode::Invalid),
-            None => &[],
-        };
-        let known = |chunk: &ChunkRef| {
-            base_chunks.contains(chunk) || self.uploads.get(&(who.user.clone(), chunk.id)) == Some(&chunk.len)
-        };
-        ensure(chunks.iter().all(known), ErrorCode::Invalid)?;
-        ensure(
-            !guarded || node.history.last().copied() == base,
-            ErrorCode::Conflict,
-        )
     }
 }

@@ -114,6 +114,10 @@ fn grants_cover_chunks_of_a_version_of_that_entry_wherever_it_moved() {
         fx.grant(&alice(), file.id, other.id, &[0]),
         Err(ErrorCode::NotFound)
     );
+    // Removing a file open elsewhere is out of v0; its readers get NotFound, which is ENOENT.
+    fx.remove(&alice(), "moved").unwrap();
+    let removed = fx.grant(&alice(), file.id, version.id, &[0]);
+    assert_eq!(removed, Err(ErrorCode::NotFound));
 }
 
 #[test]

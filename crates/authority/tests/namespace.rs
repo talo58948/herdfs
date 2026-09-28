@@ -7,8 +7,8 @@
 
 mod support;
 
-use herdfs_core::proto::ErrorCode;
-use support::{Fixture, alice};
+use herdfs_core::proto::{EntryId, ErrorCode, Request, Response};
+use support::{Fixture, SPACE, alice, bob};
 
 #[test]
 fn creation_needs_a_directory_parent_and_a_free_name() {
@@ -81,4 +81,25 @@ fn adding_or_taking_an_entry_moves_its_directory_mtime() {
     assert_eq!(new_parent.mtime_ms, old_parent.mtime_ms);
     fx.remove(&alice(), "g").unwrap();
     assert!(fx.stat(&alice(), "").unwrap().mtime_ms > new_parent.mtime_ms);
+}
+
+#[test]
+fn locate_finds_an_entry_at_its_current_path() {
+    // contract: C7
+    let mut fx = Fixture::new();
+    let file = fx.create(&alice(), "f").unwrap();
+    fx.rename(&alice(), "f", "g").unwrap();
+    let locate = |entry| Request::Locate {
+        space: SPACE.into(),
+        entry,
+    };
+    let Ok(Response::Entry { entry: found }) = fx.call(&alice(), locate(file.id)) else {
+        panic!("alice may read /g")
+    };
+    assert_eq!((found.id, found.path.as_str()), (file.id, "g"));
+    assert_eq!(fx.call(&bob(), locate(file.id)), Err(ErrorCode::Denied));
+    assert_eq!(
+        fx.call(&alice(), locate(EntryId(9_999))),
+        Err(ErrorCode::NotFound)
+    );
 }

@@ -14,8 +14,8 @@ const ROOT_MODE: u32 = 0o755;
 const FORK: [&str; 4] = [
     "INSERT INTO entries (space, path, kind, mode, mtime_ms, target)
      SELECT ?2, path, kind, mode, mtime_ms, target FROM entries WHERE space = ?1",
-    "INSERT INTO versions (entry, size, author, created_ms, chunks)
-     SELECT copy.id, head.size, head.author, head.created_ms, head.chunks
+    "INSERT INTO versions (entry, size, author, created_ms, manifest)
+     SELECT copy.id, head.size, head.author, head.created_ms, head.manifest
      FROM entries source JOIN versions head ON head.id = source.head
      JOIN entries copy ON copy.space = ?2 AND copy.path = source.path
      WHERE source.space = ?1",

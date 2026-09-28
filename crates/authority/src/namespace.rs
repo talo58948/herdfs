@@ -2,7 +2,7 @@
 
 use herdfs_core::{
     SpacePath,
-    proto::{Entry, ErrorCode, Kind, Perm, Response},
+    proto::{Entry, EntryId, ErrorCode, Kind, Perm, Response},
 };
 use rusqlite::params;
 
@@ -26,6 +26,13 @@ impl Call<'_> {
         Ok(Response::Entry {
             entry: self.entry(space, path)?,
         })
+    }
+
+    /// The entry at its current path, so a client can follow renames made elsewhere.
+    pub(crate) fn locate(&self, space: &str, entry: EntryId) -> Result<Response> {
+        let entry = self.entry_by_id(space, entry)?;
+        self.require(space, &entry.path, Perm::Read)?;
+        Ok(Response::Entry { entry })
     }
 
     pub(crate) fn list(&self, space: &str, path: &SpacePath) -> Result<Response> {

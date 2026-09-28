@@ -1,13 +1,14 @@
-//! Folding acknowledged commits and restores into the model, and checking grants.
+//! Commits, restores and grants in the model: the outcome of a commit, and
+//! folding acknowledged commits and restores in.
 
 use herdfs_authority::Principal;
 use herdfs_core::{
-    ChunkId,
+    ChunkId, ChunkRef,
     chunk::total_len,
-    proto::{Request, Response, Version, VersionId},
+    proto::{EntryId, ErrorCode, Kind, Perm, Request, Response, Version, VersionId},
 };
 
-use crate::model::Model;
+use crate::model::{Model, Outcome, ensure};
 
 impl Model {
     pub fn commit(&mut self, who: &Principal, request: &Request, reply: &Response, now_ms: i64) {
@@ -102,5 +103,39 @@ impl Model {
         let expected: Vec<_> = chunks.iter().map(|&index| refs[index as usize].id).collect();
         // contract: S2 — a grant covers only chunks of that version.
         assert_eq!(signed, expected);
+    }
+
+    #[allow(clippy::too_many_arguments, reason = "mirrors the fields of Request::Commit")]
+    pub fn commit_outcome(
+        &self,
+        who: &Principal,
+        space: &str,
+        entry: EntryId,
+        request_id: &str,
+        base: Option<VersionId>,
+        guarded: bool,
+        chunks: &[ChunkRef],
+    ) -> Outcome {
+        self.space(space)?;
+        let retry = (who.user.clone(), request_id.to_owned());
+        if let Some(first) = self.commits.get(&retry) {
+            return ensure(self.versions[first].entry == entry, ErrorCode::Invalid);
+        }
+        let (path, node) = self.node_by_id(space, entry).ok_or(ErrorCode::NotFound)?;
+        self.require(who, space, path, Perm::Write)?;
+        ensure(node.kind == Kind::File, ErrorCode::Invalid)?;
+        let base_chunks = match base {
+            Some(base) if node.history.contains(&base) => self.versions[&base].chunks.as_slice(),
+            Some(_) => return Err(ErrorCode::Invalid),
+            None => &[],
+        };
+        let known = |chunk: &ChunkRef| {
+            base_chunks.contains(chunk) || self.uploads.get(&(who.user.clone(), chunk.id)) == Some(&chunk.len)
+        };
+        ensure(chunks.iter().all(known), ErrorCode::Invalid)?;
+        ensure(
+            !guarded || node.history.last().copied() == base,
+            ErrorCode::Conflict,
+        )
     }
 }

@@ -6,7 +6,7 @@ use herdfs_core::{
     proto::{Perm, Request},
 };
 
-use crate::{GRANTEES, SPACES, Sim};
+use crate::{GRANTEES, NO_ENTRY, SPACES, Sim};
 
 impl Sim {
     pub fn new_space(&mut self) {
@@ -171,11 +171,13 @@ impl Sim {
     pub fn read(&mut self) {
         let (who, space) = (self.actor(), self.space());
         let path = self.existing_path(&space);
-        let request = match self.rng.below(5) {
+        let entry = self.model.node(&space, &path).map_or(NO_ENTRY, |node| node.id);
+        let request = match self.rng.below(6) {
             0 => Request::Stat { space, path },
             1 => Request::List { space, path },
             2 => Request::Open { space, path },
             3 => Request::History { space, path },
+            4 => Request::Locate { space, entry },
             _ => Request::Whoami,
         };
         self.send(who, &request);

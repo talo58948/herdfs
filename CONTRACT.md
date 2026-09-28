@@ -10,12 +10,12 @@ Every test names the lines it checks with a `// contract: C9, S2` comment. Code 
 |---|---|
 | C1 | Read-your-writes on the same client after `close` or `fsync`. |
 | C2 | Close-to-open: an `open` on B that starts T_vis after A's commit sees that version or a newer one. |
-| C3 | Each commit is one immutable version. Readers never see a partial version. |
+| C3 | Each commit is one immutable version. A read never returns bytes of a partially committed version. An open file follows its latest version between reads, as a local file does when another program rewrites it. |
 | C4a | After `close` returns, data survives a client crash (journal) and commits after restart. |
 | C4b | After commit, data survives a crash of any component. |
 | C5 | Concurrent unguarded commits: the last becomes head, and all remain in history. |
 | C6 | Concurrent guarded commits on the same base: exactly one succeeds; the rest get `Conflict`. API-level in v0. |
-| C7 | Rename is atomic within a space; a directory rename moves the whole subtree at once. |
+| C7 | Rename is atomic within a space; a directory rename moves the whole subtree at once. Other clients follow a rename within T_vis: operations on an entry they hold reach it at its new path. |
 | C8 | Every access strategy returns identical bytes for the same version. |
 | C9 | A cold read of `[off, off+len)` fetches at most the chunks overlapping that range, plus configured prefetch. |
 | C10 | Mounting a space uses local disk proportional to metadata and cache, not to data size. |
