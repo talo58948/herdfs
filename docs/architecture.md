@@ -20,7 +20,7 @@ Plugins are separate programs that use a mount like any other program (the agent
 
 ## Data flow
 
-**Read.** `open` → `Open` RPC returns the entry and its head version's chunk list. The client picks an access strategy (below). On `read(off, len)`, the client maps the range to chunk indices, serves cached chunks, and asks `Grant` for presigned URLs of missing ones. It downloads them straight from the object store, verifies each chunk's BLAKE3 hash, and caches it. The authority checks read permission at grant time. URLs expire after 5 minutes.
+**Read.** `open` → `Open` RPC returns the entry and its head version's chunk list. The client picks an access strategy (below). On `read(off, len)`, the client maps the range to chunk indices, serves cached chunks, and asks `Grant` for presigned URLs of missing ones. It downloads them straight from the object store, verifies each chunk's BLAKE3 hash, and caches it. The authority checks read permission at grant time. URLs expire after the grant TTL (60 s).
 
 **Write.** A file opened for writing gets a local journal copy. The copy is materialized from the head version unless the open truncates or the file is new. On `close`, the client fsyncs the journal copy and returns. A background committer then chunks the copy, uploads chunks, and sends `Commit`. `fsync` waits for that commit and returns `EIO` if it fails. Until a commit is acknowledged, this client reads its own journal copy (read-your-writes).
 
