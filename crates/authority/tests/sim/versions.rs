@@ -118,12 +118,6 @@ impl Model {
         assert_eq!(signed, expected);
     }
 
-    /// Whether some entry, in any space, still holds `version`.
-    pub fn retained(&self, version: VersionId) -> bool {
-        let nodes = self.spaces.values().flat_map(|space| space.nodes.values());
-        nodes.into_iter().any(|node| node.history.contains(&version))
-    }
-
     #[allow(clippy::too_many_arguments, reason = "mirrors the fields of Request::Commit")]
     pub fn commit_outcome(
         &self,
@@ -144,9 +138,10 @@ impl Model {
         self.require(who, space, path, Perm::Write)?;
         ensure(node.kind == Kind::File, ErrorCode::Invalid)?;
         let base_chunks = match base {
-            Some(base) if node.history.contains(&base) => self.versions[&base].chunks.as_slice(),
-            Some(base) if self.retained(base) => return Err(ErrorCode::Invalid),
-            // Pruned, purged or deleted with its space: the writer commits again without a base.
+            Some(base) if node.history.contains(&base) && self.visible(space, path, node, base, who) => {
+                self.versions[&base].chunks.as_slice()
+            }
+            // Gone, of another entry, or hidden by S8 alike: the writer commits again without a base.
             Some(_) => return Err(ErrorCode::Conflict),
             None => &[],
         };

@@ -147,8 +147,9 @@ impl Sim {
         );
     }
 
-    /// Grants a user read on a file with history, then has them read it:
-    /// versions from before the grant stay hidden (S8).
+    /// Grants a user read or write on a file with history, then has them read
+    /// it and commit on its oldest version reusing its chunks: versions from
+    /// before the grant stay hidden and unusable (S6, S8).
     pub fn late_reader(&mut self) {
         let space = self.space();
         let files = self.model.spaces.get(&space).map(|known| known.nodes.iter());
@@ -163,14 +164,21 @@ impl Sim {
             return;
         };
         let (who, principal) = [(1, "user:bob"), (2, "user:carol"), (2, "group:eng")][self.rng.below(3)];
+        let perm = Some(if self.rng.chance(50) {
+            Perm::Write
+        } else {
+            Perm::Read
+        });
         let (space, principal) = (space.clone(), principal.to_owned());
-        let grant = Request::SetAcl {
-            space: space.clone(),
-            path: path.clone(),
-            principal,
-            perm: Some(Perm::Read),
-        };
-        self.send(0, &grant);
+        self.send(
+            0,
+            &Request::SetAcl {
+                space: space.clone(),
+                path: path.clone(),
+                principal,
+                perm,
+            },
+        );
         self.send(
             who,
             &Request::History {
@@ -181,12 +189,25 @@ impl Sim {
         self.send(
             who,
             &Request::Grant {
-                space,
+                space: space.clone(),
                 entry,
                 version: oldest,
                 chunks: vec![0],
             },
         );
+        let chunks = self.model.versions[&oldest].chunks.clone();
+        let request_id = format!("r{}", self.sent.len());
+        let commit = Request::Commit {
+            space,
+            entry,
+            request_id,
+            base: Some(oldest),
+            guarded: false,
+            chunks,
+            mtime_ms: None,
+        };
+        self.sent.push((who, commit.clone()));
+        self.send(who, &commit);
     }
 
     pub fn purge(&mut self) {

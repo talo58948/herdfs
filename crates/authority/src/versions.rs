@@ -45,13 +45,12 @@ impl Call<'_> {
         }
         let entry = self.entry_by_id(space, entry)?;
         self.require(space, &entry.path, Perm::Read)?;
-        let version = self.version_of(&entry, version)?.ok_or_else(|| {
+        let version = self.visible_version(space, &entry, version)?.ok_or_else(|| {
             refuse(
                 ErrorCode::NotFound,
                 format!("no version {} of entry {}", version.0, entry.id.0),
             )
         })?;
-        self.require_visible(space, &entry, &version)?;
         let chunks = indices
             .iter()
             .map(|&index| {
@@ -95,7 +94,7 @@ impl Call<'_> {
             ));
         }
         let base_chunks = match base {
-            Some(base) => self.base_chunks(&entry, base)?,
+            Some(base) => self.base_chunks(space, &entry, base)?,
             None => HashSet::new(),
         };
         let distinct: HashSet<_> = chunks.iter().map(|chunk| (chunk.id, chunk.len)).collect();
@@ -142,9 +141,8 @@ impl Call<'_> {
         self.require(space, path, Perm::Write)?;
         let entry = self.entry(space, path)?;
         let old = self
-            .version_of(&entry, version)?
+            .visible_version(space, &entry, version)?
             .ok_or_else(|| refuse(ErrorCode::NotFound, format!("no version {} of {path}", version.0)))?;
-        self.require_visible(space, &entry, &old)?;
         Ok(Response::Version {
             version: self.add_version(&entry, &old.chunks, self.now_ms)?,
         })
@@ -166,29 +164,25 @@ impl Call<'_> {
         Ok(())
     }
 
-    /// S8: a version older than the caller's access to the entry is hidden,
-    /// except the head. The refusal names no path.
-    fn require_visible(&self, space: &str, entry: &Entry, version: &Version) -> Result<()> {
+    /// `id` as a version of `entry` the caller may see, or `None` just as if
+    /// it did not exist: under S8 a version older than the caller's access
+    /// to the entry's path is hidden, except the head.
+    fn visible_version(&self, space: &str, entry: &Entry, id: VersionId) -> Result<Option<Version>> {
+        let Some(version) = self.version_of(entry, id)? else {
+            return Ok(None);
+        };
         let since = self.readable_since(space, &entry.path)?;
-        if entry.head != Some(version.id) && version.created_ms < since {
-            return Err(refuse(
-                ErrorCode::Denied,
-                "denied: that version predates your access",
-            ));
-        }
-        Ok(())
+        Ok((entry.head == Some(version.id) || version.created_ms >= since).then_some(version))
     }
 
-    /// The chunks of `base`, which must be a retained version of `entry`.
-    fn base_chunks(&self, entry: &Entry, base: VersionId) -> Result<HashSet<(ChunkId, u32)>> {
-        match self.version(base)? {
-            Some(version) if version.entry == entry.id => {
-                Ok(version.chunks.iter().map(|chunk| (chunk.id, chunk.len)).collect())
-            }
-            Some(_) => Err(refuse(ErrorCode::Invalid, "base is not a version of this entry")),
-            // Retention or a purge removed it: the caller commits again without a base.
-            None => Err(refuse(ErrorCode::Conflict, "base is no longer retained")),
-        }
+    /// The chunks of `base`. A base that is gone, of another entry, or hidden
+    /// from the caller gets the same `Conflict`, so the answer reveals nothing;
+    /// the caller commits again without a base, uploading every chunk.
+    fn base_chunks(&self, space: &str, entry: &Entry, base: VersionId) -> Result<HashSet<(ChunkId, u32)>> {
+        let Some(version) = self.visible_version(space, entry, base)? else {
+            return Err(refuse(ErrorCode::Conflict, "base is not available"));
+        };
+        Ok(version.chunks.iter().map(|chunk| (chunk.id, chunk.len)).collect())
     }
 
     fn version_of(&self, entry: &Entry, id: VersionId) -> Result<Option<Version>> {

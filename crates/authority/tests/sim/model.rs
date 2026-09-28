@@ -136,7 +136,7 @@ impl Model {
                 let (path, node) = self.node_by_id(space, *entry).ok_or(NotFound)?;
                 self.require(who, space, path, Perm::Read)?;
                 ensure(node.history.contains(version), NotFound)?;
-                ensure(self.visible(space, path, node, *version, who), Denied)?;
+                ensure(self.visible(space, path, node, *version, who), NotFound)?;
                 let count = self.versions[version].chunks.len();
                 ensure(chunks.iter().all(|&index| (index as usize) < count), Invalid)
             }
@@ -174,7 +174,7 @@ impl Model {
                 self.require(who, space, path, Perm::Write)?;
                 let node = self.node(space, path)?;
                 ensure(node.history.contains(version), NotFound)?;
-                ensure(self.visible(space, path, node, *version, who), Denied)
+                ensure(self.visible(space, path, node, *version, who), NotFound)
             }
             Request::Purge { space, path } => {
                 self.require(who, space, path, Perm::Write)?;

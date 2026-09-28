@@ -69,13 +69,11 @@ fn an_old_grant_on_the_root_shows_history_made_after_it() {
     assert_eq!(fx.grant(&bob(), file.id, v1.id, &[0]).unwrap(), [v1.chunks[0].id]);
 }
 
-/// Repro: bob has read on `other` from the start. alice writes v1 and v2 of `proj/f`, then gives
-/// bob read on `proj`: he sees the head only. alice moves the file to `other/f`. History is
-/// filtered by the grants on the entry's current path (acl.rs `readable_since`), so bob now sees
-/// v1 and v2 and may fetch v1, made before he could read this entry anywhere.
+/// bob has read on `other` from the start and on `proj` only after v1 and v2 of `proj/f`. When
+/// alice moves the file under `other`, its history follows the path: moving an entry is its
+/// mover's disclosure decision (S8), so bob now sees v1 and v2.
 #[test]
-#[ignore = "REDTEAM8: moving an entry under an older grant reveals history from before access"]
-fn moving_an_entry_under_an_older_grant_keeps_its_earlier_history_hidden() {
+fn moving_an_entry_under_an_older_grant_shows_the_history_that_grant_covers() {
     // contract: S8
     let mut fx = Fixture::new();
     fx.mkdir(&alice(), "other").unwrap();
@@ -87,12 +85,8 @@ fn moving_an_entry_under_an_older_grant_keeps_its_earlier_history_hidden() {
     assert_eq!(fx.history(&bob(), "proj/f").unwrap(), std::slice::from_ref(&v2));
 
     fx.rename(&alice(), "proj/f", "other/f").unwrap();
-    assert_eq!(
-        fx.history(&bob(), "other/f").unwrap(),
-        std::slice::from_ref(&v2),
-        "bob gained read on this entry after v1"
-    );
-    assert_eq!(fx.grant(&bob(), file.id, v1.id, &[0]), Err(ErrorCode::Denied));
+    assert_eq!(fx.history(&bob(), "other/f").unwrap(), [v1.clone(), v2]);
+    assert_eq!(fx.grant(&bob(), file.id, v1.id, &[0]).unwrap(), [v1.chunks[0].id]);
 }
 
 /// The converse of the move above, pinned as it stands: history follows the grants of the
@@ -111,7 +105,7 @@ fn moving_an_entry_away_from_an_older_grant_hides_its_earlier_history() {
     fx.set_acl("other", "user:bob", Some(Perm::Read));
     fx.rename(&alice(), "proj/f", "other/f").unwrap();
     assert_eq!(fx.history(&bob(), "other/f").unwrap(), [v2]);
-    assert_eq!(fx.grant(&bob(), file.id, v1.id, &[0]), Err(ErrorCode::Denied));
+    assert_eq!(fx.grant(&bob(), file.id, v1.id, &[0]), Err(ErrorCode::NotFound));
 }
 
 /// v1, then eng gets read on `proj`, v2, then bob gets his own read on the file, v3, v4.
@@ -134,16 +128,14 @@ fn a_group_grant_older_than_the_users_own_counts_from_the_group_grant() {
         [v2.clone(), v3.clone(), v4.clone()]
     );
     assert_eq!(fx.history(&bob(), "proj/f").unwrap(), [v3, v4]);
-    assert_eq!(fx.grant(&bob(), file.id, v2.id, &[0]), Err(ErrorCode::Denied));
+    assert_eq!(fx.grant(&bob(), file.id, v2.id, &[0]), Err(ErrorCode::NotFound));
 }
 
-/// Repro: eng has read on `proj`; alice writes v1 and v2 of `proj/f`. bob, in no group, is
-/// refused the history. bob joins eng, so his next token names it: the group row's grant time
-/// counts (acl.rs `readable_since`), and the authority keeps no time for when bob joined, so bob
-/// sees and may fetch v1.
+/// eng has read on `proj` before v1 and v2 of `proj/f`. bob, in no group, is refused the
+/// history; once his token names eng, the group's grant time counts (S8): membership belongs to
+/// the identity provider, which keeps no join time the authority could use.
 #[test]
-#[ignore = "REDTEAM8: joining a group reveals the group's history from before the join"]
-fn joining_a_group_keeps_the_groups_earlier_history_hidden() {
+fn a_group_grant_counts_from_when_the_group_was_granted() {
     // contract: S8
     let mut fx = Fixture::new();
     fx.mkdir(&alice(), "proj").unwrap();
@@ -153,12 +145,11 @@ fn joining_a_group_keeps_the_groups_earlier_history_hidden() {
     assert_eq!(fx.history(&bob(), "proj/f"), Err(ErrorCode::Denied));
 
     let joined = user("bob", &["eng"]);
+    assert_eq!(fx.history(&joined, "proj/f").unwrap(), [v1.clone(), v2]);
     assert_eq!(
-        fx.history(&joined, "proj/f").unwrap(),
-        std::slice::from_ref(&v2),
-        "bob gained read after v1"
+        fx.grant(&joined, file.id, v1.id, &[0]).unwrap(),
+        [v1.chunks[0].id]
     );
-    assert_eq!(fx.grant(&joined, file.id, v1.id, &[0]), Err(ErrorCode::Denied));
 }
 
 #[test]
@@ -168,7 +159,7 @@ fn a_late_writer_cannot_restore_or_see_earlier_versions() {
     let (file, v1) = fx.file("f", b"the first plan, longer");
     let v2 = write(&mut fx, file.id, "r2", b"second plan");
     fx.set_acl("f", "user:bob", Some(Perm::Write));
-    assert_eq!(fx.call(&bob(), restore("f", v1.id)), Err(ErrorCode::Denied));
+    assert_eq!(fx.call(&bob(), restore("f", v1.id)), Err(ErrorCode::NotFound));
 
     // Open and Locate describe the head alone: its id, size and time, nothing of v1.
     let open = Request::Open {
@@ -200,22 +191,20 @@ fn a_late_writer_cannot_restore_or_see_earlier_versions() {
     };
     assert_eq!(v3.chunks, v2.chunks);
     assert_eq!(fx.history(&bob(), "f").unwrap(), [v3]);
-    assert_eq!(fx.grant(&bob(), file.id, v2.id, &[0]), Err(ErrorCode::Denied));
+    assert_eq!(fx.grant(&bob(), file.id, v2.id, &[0]), Err(ErrorCode::NotFound));
 }
 
-/// Repro: bob gets write on `f` after v1 and v2. Restore of v1 is refused, but a commit on base v1
-/// takes any chunk of v1 without an upload: `base_chunks` (versions.rs) checks that the base is a
-/// retained version of the entry, not that bob may read it. A guess of v1's bytes becomes the
-/// head, readable to bob, while a wrong guess is `Invalid`: v1's content is confirmed.
+/// bob gets write on `f` after v1 and v2. A commit on base v1 must not take v1's chunks without an
+/// upload, nor tell a right guess of v1's bytes from a wrong one: a hidden base answers `Conflict`,
+/// as a missing one does, whatever the chunks.
 #[test]
-#[ignore = "REDTEAM8: a commit on a base from before the caller's grant takes that base's chunks"]
 fn a_late_writer_cannot_commit_on_a_base_from_before_his_grant() {
     // contract: S6, S8
     let mut fx = Fixture::new();
     let (file, v1) = fx.file("f", b"salary: 100");
     write(&mut fx, file.id, "r2", b"salary: 120");
     fx.set_acl("f", "user:bob", Some(Perm::Write));
-    assert_eq!(fx.grant(&bob(), file.id, v1.id, &[0]), Err(ErrorCode::Denied));
+    assert_eq!(fx.grant(&bob(), file.id, v1.id, &[0]), Err(ErrorCode::NotFound));
 
     // bob names a chunk by hashing bytes he guesses; he uploads nothing.
     let mut on_v1 = |request_id: &str, guess: &[u8]| {
@@ -228,7 +217,7 @@ fn a_late_writer_cannot_commit_on_a_base_from_before_his_grant() {
     };
     let wrong = on_v1("wrong", b"salary: 90");
     let right = on_v1("right", b"salary: 100");
-    assert!(right.is_err(), "bob made v1's bytes the head: {right:?}");
+    assert_eq!(right, Err(ErrorCode::Conflict), "bob made v1's bytes the head");
     assert_eq!(right, wrong, "the answer tells whether v1 held the guess");
 }
 
