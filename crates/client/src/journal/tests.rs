@@ -4,7 +4,7 @@ use herdfs_core::{ChunkId, ChunkRef};
 
 use super::commit::Outcome;
 use super::*;
-use herdfs_core::proto::VersionId;
+use herdfs_core::proto::{self, VersionId};
 
 const ENTRY: EntryId = EntryId(7);
 
@@ -237,4 +237,46 @@ fn remote_state_from_before_a_settled_commit_is_never_paired_with_the_journal_af
     );
     let after = journal.changes_as_of(ENTRY, journal.settled());
     assert!(after.is_some_and(|local| local.is_none()));
+}
+
+/// Sends `record` through a fake authority that refuses its first `conflicts` commits with
+/// `Conflict`, as one that no longer retains the base does; returns the bases it was sent.
+async fn sent_to_retention(
+    record: &Record,
+    conflicts: usize,
+) -> (Vec<Option<VersionId>>, crate::Result<Version>) {
+    let bases = std::sync::Mutex::new(Vec::new());
+    let attempt = |record: Record| {
+        let mut bases = bases.lock().unwrap();
+        bases.push(record.base.map(|base| base.id));
+        let refused = proto::Error {
+            code: proto::ErrorCode::Conflict,
+            message: "base not retained".into(),
+        };
+        let answer = if bases.len() <= conflicts {
+            Err(refused.into())
+        } else {
+            Ok(base())
+        };
+        std::future::ready(answer)
+    };
+    let sent = super::commit::anew(record, attempt).await;
+    (bases.into_inner().unwrap(), sent)
+}
+
+// contract: C4a, C14
+#[tokio::test]
+async fn a_commit_whose_base_is_no_longer_retained_is_sent_once_more_without_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (journal, _woken) = sealed(dir.path(), b"new");
+    let record = journal.next(ENTRY).unwrap().record;
+    let (bases, sent) = sent_to_retention(&record, 1).await;
+    assert_eq!(bases, [Some(VersionId(3)), None]);
+    assert!(sent.is_ok(), "committed without its base");
+    let (bases, sent) = sent_to_retention(&record, 2).await;
+    assert_eq!(bases, [Some(VersionId(3)), None], "sent twice, never more");
+    assert!(
+        sent.is_err_and(|err| err.is_final()),
+        "a second Conflict is final"
+    );
 }
