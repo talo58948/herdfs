@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use herdfs_core::ChunkId;
@@ -15,25 +15,21 @@ use serde_json::json;
 use crate::{ALICE, BOB, EACCES, Reply, Scene, assert_same, contains, errno, set_acl};
 
 /// The grant TTL of the contract.
-const GRANT_TTL_MS: i64 = 5 * 60 * 1000;
+const GRANT_TTL_MS: u64 = 5 * 60 * 1000;
 
-fn grants(reply: &Reply) -> Result<(Vec<String>, i64)> {
+/// The URLs of a grant and how long they stay valid.
+fn grants(reply: &Reply) -> Result<(Vec<String>, u64)> {
     match serde_json::from_slice(&reply.body)? {
-        Response::Grants { urls, expires_ms } => Ok((urls, expires_ms)),
+        Response::Grants { urls, ttl_ms } => Ok((urls, ttl_ms)),
         other => bail!("{}: expected grants, got {other:?}", reply.status),
     }
-}
-
-fn now_ms() -> i64 {
-    let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    i64::try_from(since_epoch.as_millis()).unwrap_or(i64::MAX)
 }
 
 /// bob's request for every chunk of the plan.
 fn plan_grant(scene: &Scene) -> Request {
     Request::Grant {
         space: SPACE.into(),
-        path: scene.plan.path.clone(),
+        entry: scene.plan.version.entry,
         version: scene.plan.version.id,
         chunks: scene.plan.chunk_indices(),
     }
@@ -119,8 +115,7 @@ fn revocation_stops_new_grants_at_once() -> Result<()> {
     let Some(scene) = Scene::start()? else {
         return Ok(());
     };
-    let (urls, expires_ms) = grants(&scene.attacker.call(&plan_grant(&scene))?)?;
-    let granted_by = now_ms();
+    let (urls, ttl_ms) = grants(&scene.attacker.call(&plan_grant(&scene))?)?;
     set_acl(&scene.lab, ALICE, "eng", "user:bob", None)?;
     for _ in 0..5 {
         assert_eq!(
@@ -133,7 +128,7 @@ fn revocation_stops_new_grants_at_once() -> Result<()> {
     assert_eq!(errno(fs::read(scene.bob_mount("eng/plan.txt"))), EACCES);
     // An outstanding URL stays good until it expires, within the TTL of its grant, as S4
     // allows; `an_outstanding_grant_url_dies_with_its_ttl` waits for that.
-    assert!(expires_ms <= granted_by + GRANT_TTL_MS, "expires {expires_ms}");
+    assert!(ttl_ms <= GRANT_TTL_MS, "valid for {ttl_ms} ms");
     let outstanding = scene.attacker.get(&urls[0])?;
     assert_eq!(outstanding.status, StatusCode::OK);
     assert_same(&outstanding.body, scene.plan.chunk(0), "the outstanding URL");
@@ -148,15 +143,16 @@ fn an_outstanding_grant_url_dies_with_its_ttl() -> Result<()> {
     let Some(scene) = Scene::start()? else {
         return Ok(());
     };
-    let (urls, expires_ms) = grants(&scene.attacker.call(&plan_grant(&scene))?)?;
+    let asked = Instant::now();
+    let (urls, ttl_ms) = grants(&scene.attacker.call(&plan_grant(&scene))?)?;
     set_acl(&scene.lab, ALICE, "eng", "user:bob", None)?;
     assert_eq!(
         scene.attacker.get(&urls[0])?.status,
         StatusCode::OK,
         "good until it expires"
     );
-    let left = u64::try_from(expires_ms - now_ms()).unwrap_or_default();
-    thread::sleep(Duration::from_millis(left) + Duration::from_secs(2));
+    let left = Duration::from_millis(ttl_ms).saturating_sub(asked.elapsed());
+    thread::sleep(left + Duration::from_secs(2));
     for url in &urls {
         assert_eq!(scene.attacker.get(url)?.status, StatusCode::FORBIDDEN, "{url}");
     }

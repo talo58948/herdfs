@@ -24,6 +24,65 @@ impl Sim {
         }
     }
 
+    /// Builds a chain of directories whose deepest path nears the 4096-byte
+    /// limit, then renames its top to a longer or a shorter name. The model
+    /// refuses a rename that pushes a path past the limit.
+    pub fn deep_rename(&mut self) {
+        let space = self.space();
+        let (top, long) = (SpacePath::try_from("z").unwrap(), "d".repeat(255));
+        let mkdir = |path: &SpacePath| Request::Mkdir {
+            space: space.clone(),
+            path: path.clone(),
+            mode: 0o755,
+        };
+        let mut deepest = top.clone();
+        self.send(0, &mkdir(&deepest));
+        for _ in 0..15 {
+            deepest = deepest.join(&long).unwrap();
+            self.send(0, &mkdir(&deepest));
+        }
+        // 1 + 15 * 256 + 201 = 4042 bytes.
+        let file = deepest.join(&"f".repeat(200)).unwrap();
+        self.send(
+            0,
+            &Request::Create {
+                space: space.clone(),
+                path: file,
+                mode: 0o644,
+            },
+        );
+        let to = if self.rng.chance(50) {
+            "e".repeat(255)
+        } else {
+            "short".into()
+        };
+        let to = SpacePath::try_from(to).unwrap();
+        // contract: C7
+        let rename = Request::Rename {
+            space: space.clone(),
+            from: top.clone(),
+            to: to.clone(),
+        };
+        self.send(0, &rename);
+        // Take the chain down again, deepest first: every later check would walk it.
+        let known = self.model.spaces.get(&space).map(|known| known.nodes.keys());
+        let chain = known
+            .into_iter()
+            .flatten()
+            .filter(|path| path.is_within(&top) || path.is_within(&to));
+        let mut chain: Vec<_> = chain.cloned().collect();
+        chain.sort_by_key(|path| std::cmp::Reverse(path.as_str().len()));
+        for path in chain {
+            self.send(
+                0,
+                &Request::Remove {
+                    space: space.clone(),
+                    path,
+                },
+            );
+        }
+    }
+
     pub fn make(&mut self) {
         // Mostly alice, who can write, so that trees grow deep enough to move.
         let who = if self.rng.chance(40) { 0 } else { self.actor() };

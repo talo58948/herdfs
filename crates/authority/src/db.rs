@@ -131,8 +131,8 @@ impl Call<'_> {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Adds a version by the caller and makes it the entry's head.
-    pub(crate) fn add_version(&self, entry: &Entry, chunks: &[ChunkRef]) -> Result<Version> {
+    /// Adds a version by the caller and makes it the entry's head, modified at `mtime_ms`.
+    pub(crate) fn add_version(&self, entry: &Entry, chunks: &[ChunkRef], mtime_ms: i64) -> Result<Version> {
         let size = total_len(chunks);
         let encoded = serde_json::to_string(chunks)
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
@@ -148,7 +148,7 @@ impl Call<'_> {
             )?;
         self.db
             .prepare_cached("UPDATE entries SET head = ?2, mtime_ms = ?3 WHERE id = ?1")?
-            .execute(params![entry.id.0, id, self.now_ms])?;
+            .execute(params![entry.id.0, id, mtime_ms])?;
         Ok(Version {
             id: VersionId(id),
             entry: entry.id,

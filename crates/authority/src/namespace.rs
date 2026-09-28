@@ -8,7 +8,7 @@ use rusqlite::params;
 
 use crate::{
     Call, Result,
-    db::{below, kind_name},
+    db::{below, kind_name, parse},
     refuse,
 };
 
@@ -86,6 +86,11 @@ impl Call<'_> {
                 format!("cannot move {from} into itself"),
             ));
         }
+        // Every path below `from` must stay within the path limit once moved.
+        if self.longest_within(space, from)?.rebase(from, to).is_none() {
+            let message = format!("moving {from} to {to} makes a path too long");
+            return Err(refuse(ErrorCode::Invalid, message));
+        }
         match self.find(space, to)? {
             Some(target) => self.replace(space, &source, &target)?,
             None => self.require_parent_dir(space, to)?,
@@ -150,6 +155,19 @@ impl Call<'_> {
             .prepare_cached("DELETE FROM entries WHERE id = ?1")?
             .execute([entry.id.0])?;
         Ok(())
+    }
+
+    /// The longest path, in bytes, at or below the non-root `dir`.
+    fn longest_within(&self, space: &str, dir: &SpacePath) -> Result<SpacePath> {
+        let (lo, hi) = below(dir);
+        let mut query = self.db.prepare_cached(
+            "SELECT path FROM entries WHERE space = ?1 AND (path = ?2 OR (path > ?3 AND path < ?4))
+             ORDER BY length(CAST(path AS BLOB)) DESC LIMIT 1",
+        )?;
+        let longest = query.query_row(params![space, dir.as_str(), lo, hi], |row| {
+            parse(row, 0, |text| SpacePath::try_from(text).ok())
+        })?;
+        Ok(longest)
     }
 
     /// A directory's mtime moves when an entry is added to it or taken from it.

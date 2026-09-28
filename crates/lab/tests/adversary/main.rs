@@ -194,6 +194,7 @@ fn commit(entry: EntryId, base: Option<VersionId>, chunks: Vec<ChunkRef>) -> Req
         base,
         guarded: false,
         chunks,
+        mtime_ms: None,
     }
 }
 

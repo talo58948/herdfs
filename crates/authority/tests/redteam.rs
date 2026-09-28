@@ -1,5 +1,4 @@
-//! Red team, round 1: confirmed breaks in the authority alone, each reduced to one failing test.
-//! They are ignored so main stays green; each runs once its bug is fixed.
+//! Red team, round 1: breaks found in the authority alone, each reduced to one test.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -28,7 +27,6 @@ const ROGUE_X: &str = "-jl_MBKrPoUjksv6ut9S1AkaQKUq-12zE9Lh4rS2aqs";
 /// of 60 s, which `server/auth.rs` keeps, so the token is accepted.
 // contract: S5
 #[tokio::test]
-#[ignore = "REDTEAM: a token is accepted for 60 s after its exp (jsonwebtoken's default leeway)"]
 async fn a_token_past_its_expiry_is_refused() {
     let lab = Lab::start().await;
     let mut claims = lab.claims("alice");
@@ -45,7 +43,6 @@ async fn a_token_past_its_expiry_is_refused() {
 /// refetch interval.
 // contract: S5
 #[tokio::test]
-#[ignore = "REDTEAM: a key the issuer withdrew stays trusted until a token names an unknown key id"]
 async fn a_key_the_issuer_withdrew_is_refused() {
     let jwk =
         |kid: &str, x: &str| json!({"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "kid": kid, "x": x});
@@ -109,7 +106,6 @@ async fn serve_with_keys(keys: Arc<Mutex<Vec<Value>>>) -> (String, String, tempf
 /// fails with `Unavailable` ("database failure") from then on, for everyone.
 // contract: C7
 #[test]
-#[ignore = "REDTEAM: a rename may push paths below it past 4096 bytes; listing them then fails"]
 fn a_rename_leaves_every_path_below_it_usable() {
     let mut fx = Fixture::new();
     let mut deepest = "a".to_owned();
@@ -140,7 +136,6 @@ fn a_rename_leaves_every_path_below_it_usable() {
 /// which the client takes as final: the closed write is set aside and never commits.
 // contract: C4a
 #[tokio::test]
-#[ignore = "REDTEAM: a commit of more than about 23,000 chunks (a 23 GiB file) exceeds the 2 MiB RPC limit"]
 async fn a_commit_of_a_large_file_is_accepted() {
     let lab = Lab::start().await;
     let alice = lab.user("alice");

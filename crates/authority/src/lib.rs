@@ -17,9 +17,6 @@ use herdfs_core::{
 };
 use rusqlite::Connection;
 
-/// How long a presigned chunk URL stays valid.
-const GRANT_TTL_MS: i64 = 5 * 60 * 1000;
-
 /// An authenticated caller.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Principal {
@@ -33,10 +30,9 @@ pub struct Principal {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
     Reply(Response),
-    /// The answer to `Grant`: presign these chunks, valid until `expires_ms`.
+    /// The answer to `Grant`: presign these chunks.
     Sign {
         chunks: Vec<ChunkId>,
-        expires_ms: i64,
     },
 }
 
@@ -109,11 +105,11 @@ impl Call<'_> {
             Request::Open { space, path } => self.open(&space, &path)?,
             Request::Grant {
                 space,
-                path,
+                entry,
                 version,
                 chunks,
             } => {
-                return self.grant(&space, &path, version, &chunks);
+                return self.grant(&space, entry, version, &chunks);
             }
             Request::Create { space, path, mode } => self.make(&space, &path, Kind::File, mode, None)?,
             Request::Mkdir { space, path, mode } => self.make(&space, &path, Kind::Dir, mode, None)?,
@@ -139,7 +135,8 @@ impl Call<'_> {
                 base,
                 guarded,
                 chunks,
-            } => self.commit(&space, entry, &request_id, base, guarded, &chunks)?,
+                mtime_ms,
+            } => self.commit(&space, entry, &request_id, base, guarded, &chunks, mtime_ms)?,
             Request::History { space, path } => self.history(&space, &path)?,
             Request::Restore { space, path, version } => self.restore(&space, &path, version)?,
             Request::SetAcl {

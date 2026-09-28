@@ -48,7 +48,7 @@ fn the_later_save_becomes_head_and_both_stay_in_history() -> Result<()> {
     let versions = history(&lab, "alice", FILE)?;
     let contents = versions
         .iter()
-        .map(|version| version_bytes(&lab, "a", "alice", FILE, version))
+        .map(|version| version_bytes(&lab, "a", "alice", version))
         .collect::<Result<Vec<_>>>()?;
     assert_eq!(
         contents,
@@ -108,5 +108,6 @@ fn guarded(base: &Version, n: usize) -> Request {
         } else {
             Vec::new()
         },
+        mtime_ms: None,
     }
 }

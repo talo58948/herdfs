@@ -51,7 +51,7 @@ fn restoring_v5_makes_it_head_and_keeps_every_version_readable() -> Result<()> {
     assert_eq!(versions.len(), VERSIONS + 1);
     assert_eq!(versions.last(), Some(&head));
     for (version, text) in versions.iter().zip(&saved) {
-        assert_eq!(version_bytes(&lab, "b", "bob", FILE, version)?, text.as_bytes());
+        assert_eq!(version_bytes(&lab, "b", "bob", version)?, text.as_bytes());
     }
     Ok(())
 }

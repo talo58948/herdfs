@@ -10,9 +10,13 @@ use tokio::sync::Mutex;
 
 use crate::Principal;
 
-/// An unknown key id refetches the issuer's keys at most this often, so
-/// forged key ids cannot flood the issuer.
+/// The issuer's keys are fetched again this often, so a key it withdraws
+/// stops working and a new one starts within this time.
 const REFETCH_EVERY: Duration = Duration::from_secs(30);
+/// While the issuer is unreachable, its last keys stay trusted this long.
+const TRUST_AT_MOST: Duration = Duration::from_secs(5 * 60);
+/// Clock skew allowed past a token's `exp`.
+const EXP_LEEWAY_S: u64 = 5;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(super) struct Verifier {
@@ -25,6 +29,9 @@ pub(super) struct Verifier {
 #[derive(Default)]
 struct Keys {
     set: JwkSet,
+    /// The last fetch, successful or not.
+    tried: Option<Instant>,
+    /// The last successful fetch.
     fetched: Option<Instant>,
 }
 
@@ -66,6 +73,7 @@ impl Verifier {
         validation.set_issuer(&[&self.issuer]);
         validation.set_audience(&[&self.audience]);
         validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+        validation.leeway = EXP_LEEWAY_S;
         let claims = decode::<Claims>(token, &key, &validation)
             .map_err(|error| unauthenticated(error.to_string()))?
             .claims;
@@ -77,15 +85,17 @@ impl Verifier {
 
     async fn key(&self, kid: &str) -> Result<DecodingKey, proto::Error> {
         let mut keys = self.keys.lock().await;
-        let may_refetch = keys.fetched.is_none_or(|at| at.elapsed() >= REFETCH_EVERY);
-        if keys.set.find(kid).is_none() && may_refetch {
-            keys.set = self.fetch().await.map_err(|error| {
-                proto::Error::new(
-                    ErrorCode::Unavailable,
-                    format!("fetching the issuer's keys: {error}"),
-                )
-            })?;
-            keys.fetched = Some(Instant::now());
+        let due = keys.tried.is_none_or(|at| at.elapsed() >= REFETCH_EVERY);
+        if keys.fetched.is_none() || due {
+            keys.tried = Some(Instant::now());
+            match self.fetch().await {
+                Ok(set) => (keys.set, keys.fetched) = (set, keys.tried),
+                Err(error) => tracing::warn!(%error, "fetching the issuer's keys"),
+            }
+        }
+        if keys.fetched.is_none_or(|at| at.elapsed() >= TRUST_AT_MOST) {
+            let message = "the issuer's keys could not be fetched";
+            return Err(proto::Error::new(ErrorCode::Unavailable, message));
         }
         let jwk = keys
             .set
