@@ -40,6 +40,7 @@ pub enum Outcome {
 
 pub struct Authority {
     db: Connection,
+    last_ms: Option<i64>,
 }
 
 impl Authority {
@@ -53,7 +54,15 @@ impl Authority {
         db.execute_batch(db::SCHEMA)?;
         db.pragma_update(None, "user_version", db::SCHEMA_VERSION)?;
         db.set_prepared_statement_cache_capacity(64);
-        Ok(Self { db })
+        let last_ms = db.query_row(
+            "SELECT max(at_ms) FROM (
+                SELECT created_ms AS at_ms FROM versions
+                UNION ALL SELECT granted_ms FROM acl
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(Self { db, last_ms })
     }
 
     /// Checks and applies one request in its own transaction.
@@ -84,10 +93,19 @@ impl Authority {
         now_ms: i64,
         run: impl FnOnce(&Call) -> Result<T>,
     ) -> Result<T, proto::Error> {
+        let now_ms = self.next_ms(now_ms);
         let tx = self.db.transaction().map_err(Fail::from)?;
         let out = run(&Call { db: &tx, who, now_ms })?;
         tx.commit().map_err(Fail::from)?;
         Ok(out)
+    }
+
+    fn next_ms(&mut self, wall_ms: i64) -> i64 {
+        let now_ms = self
+            .last_ms
+            .map_or(wall_ms, |last_ms| wall_ms.max(last_ms.saturating_add(1)));
+        self.last_ms = Some(now_ms);
+        now_ms
     }
 }
 

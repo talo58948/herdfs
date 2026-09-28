@@ -40,6 +40,7 @@ impl Authority {
     /// Prunes versions outside retention, drops chunk lists, uploads and request
     /// ids that nothing needs, and returns the chunks still live, across every space.
     pub fn collect(&mut self, now_ms: i64, policy: &Policy) -> anyhow::Result<Collected> {
+        let now_ms = self.next_ms(now_ms);
         let tx = self.db.transaction()?;
         let pruned = tx.execute(PRUNE, params![policy.versions, now_ms - policy.max_age_ms])?;
         let dropped = tx.execute(

@@ -85,15 +85,18 @@ impl Call<'_> {
             if first != entry {
                 return Err(refuse(ErrorCode::Invalid, "request id reused for another entry"));
             }
+            let entry = self.entry_by_id(space, entry)?;
+            self.require(space, &entry.path, Perm::Read)?;
             // The commit took effect; once retention or a purge removed its version,
             // the head answers, whatever newer commits made it, to a caller who may read it.
             let version = match self.version(version)? {
-                Some(version) => version,
-                None => {
-                    let entry = self.entry_by_id(space, entry)?;
-                    self.require(space, &entry.path, Perm::Read)?;
-                    self.head(&entry)?
-                }
+                Some(_) => self.visible_version(space, &entry, version)?.ok_or_else(|| {
+                    refuse(
+                        ErrorCode::NotFound,
+                        format!("no version {} of entry {}", version.0, entry.id.0),
+                    )
+                })?,
+                None => self.head(&entry)?,
             };
             return Ok(Response::Version { version });
         }

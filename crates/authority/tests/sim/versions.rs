@@ -144,10 +144,14 @@ impl Model {
         if let Some((first, version, _)) = self.commits.get(&retry) {
             ensure(*first == entry, ErrorCode::Invalid)?;
             let (path, node) = self.node_by_id(space, entry).ok_or(ErrorCode::NotFound)?;
+            self.require(who, space, path, Perm::Read)?;
             // A replay after its version went answers with the head, to a reader only.
             return match node.history.contains(version) {
-                true => Ok(()),
-                false => self.require(who, space, path, Perm::Read),
+                true => ensure(
+                    self.visible(space, path, node, *version, who),
+                    ErrorCode::NotFound,
+                ),
+                false => Ok(()),
             };
         }
         let (path, node) = self.node_by_id(space, entry).ok_or(ErrorCode::NotFound)?;
