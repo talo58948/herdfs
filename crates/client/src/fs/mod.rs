@@ -1,5 +1,6 @@
 //! The mounted space: inode numbers, attributes and open handles over the remote namespace.
 
+mod access;
 mod answer;
 mod fuse;
 mod handles;
@@ -123,7 +124,7 @@ impl Space {
         let cached = lock(&self.recent).get(path).cloned();
         if let Some((fetched, settled, entry)) = &cached {
             // A pending local write shadows the authority, even offline (C1, C12).
-            if self.journal.copy(entry.id).is_some() {
+            if self.journal.changes(entry.id).is_some() {
                 return Ok((entry.clone(), TTL));
             }
             // A local commit since the fetch has made the entry stale (C1).
@@ -191,7 +192,10 @@ impl Space {
 
     /// The entry's attributes, with size and mtime from its journal copy while it has one.
     fn attr(&self, entry: &Entry) -> FileAttr {
-        let local = self.journal.copy(entry.id).and_then(|copy| copy.metadata().ok());
+        let local = self
+            .journal
+            .changes(entry.id)
+            .and_then(|copy| copy.metadata().ok());
         let size = match (&local, entry.kind) {
             (Some(local), _) => local.len(),
             (None, Kind::Symlink) => entry.target.as_ref().map_or(0, |target| target.len() as u64),

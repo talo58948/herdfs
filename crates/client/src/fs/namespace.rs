@@ -46,10 +46,19 @@ impl Space {
             self.truncate(ino, size, change.fh).await?;
         }
         let (path, mode) = (self.path(ino)?, change.mode.map(|mode| mode & PERMISSIONS));
-        let entry = if mode.is_some() || change.mtime_ms.is_some() {
-            // A commit landing later would set the mtime to its own time.
-            self.committed(self.entry_id(ino)).await?;
-            self.remote.set_attr(path, mode, change.mtime_ms).await?
+        let entry_id = self.entry_id(ino);
+        // The next commit keeps a journaled mtime, which it would otherwise stamp over (cp -p).
+        let journaled = match change.mtime_ms {
+            Some(mtime) => self.journal.set_mtime(entry_id, mtime)?,
+            None => false,
+        };
+        let mtime_ms = change.mtime_ms.filter(|_| !journaled);
+        if mtime_ms.is_some() {
+            // A commit already under way would stamp its own time over this one.
+            self.committed(entry_id).await?;
+        }
+        let entry = if mode.is_some() || mtime_ms.is_some() {
+            self.remote.set_attr(path, mode, mtime_ms).await?
         } else {
             self.remote.stat(path).await?
         };

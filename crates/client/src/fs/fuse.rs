@@ -56,6 +56,8 @@ impl Filesystem for Fuse {
         if let Err(missing) = config.add_capabilities(InitFlags::FUSE_ATOMIC_O_TRUNC) {
             tracing::warn!(?missing, "kernel lacks atomic O_TRUNC");
         }
+        // Handles that bypass the page cache can still be mapped where the kernel allows it.
+        let _ = config.add_capabilities(InitFlags::FUSE_DIRECT_IO_ALLOW_MMAP);
         Ok(())
     }
 
@@ -190,11 +192,8 @@ impl Filesystem for Fuse {
         _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
-        // Journal writes are local, so they are answered right here.
-        match self.space.write(fh.0, offset, data) {
-            Ok(written) => reply.written(written),
-            Err(err) => reply.error(err.errno()),
-        }
+        // The first write may fetch the head's bytes into the journal copy.
+        self.spawn(reply, self.space().write(fh.0, offset, data.to_vec()));
     }
 
     fn flush(&self, _req: &Request, _ino: INodeNo, fh: FileHandle, _owner: LockOwner, reply: ReplyEmpty) {
@@ -258,15 +257,18 @@ impl Filesystem for Fuse {
 
     fn create(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
         umask: u32,
-        _flags: i32,
+        flags: i32,
         reply: ReplyCreate,
     ) {
-        self.spawn(reply, self.space().create(parent, name.to_owned(), mode & !umask));
+        let work = self
+            .space()
+            .create((parent, name.to_owned()), mode & !umask, flags, req.pid());
+        self.spawn(reply, work);
     }
 }
 

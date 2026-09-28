@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::{fs, sync::Mutex, time::Duration, time::Instant};
 
 use bytes::Bytes;
-use herdfs_core::proto::{self, Entry, Request, Response, Version, VersionId};
+use herdfs_core::proto::{self, Entry, EntryId, Request, Response, Version, VersionId};
 use herdfs_core::{ChunkId, ChunkRef, SpacePath};
 use reqwest::{RequestBuilder, StatusCode};
 
@@ -64,28 +64,35 @@ impl Remote {
     }
 
     /// The entry at `path` and its head version, `None` until its first commit.
-    pub async fn open(&self, path: SpacePath) -> Result<(Entry, Option<Version>), Error> {
+    /// The entry at `path`, its head version (`None` until its first commit), and whether
+    /// the caller may commit to it.
+    pub async fn open(&self, path: SpacePath) -> Result<(Entry, Option<Version>, bool), Error> {
         match self.call(|space| Request::Open { space, path }).await? {
-            Response::Opened { entry, version } => Ok((entry, version)),
+            Response::Opened {
+                entry,
+                version,
+                writable,
+            } => Ok((entry, version, writable)),
             other => Err(unexpected(&other)),
         }
     }
 
-    /// Presigned URLs for chunks of `version`, in the order asked, and their expiry (Unix ms).
+    /// Presigned URLs for chunks of `version` of `entry`, in the order asked, and how long
+    /// they stay valid from when the call was sent.
     pub async fn grant(
         &self,
-        path: SpacePath,
+        entry: EntryId,
         version: VersionId,
         chunks: Vec<u32>,
-    ) -> Result<(Vec<String>, i64), Error> {
+    ) -> Result<(Vec<String>, Duration), Error> {
         let request = |space| Request::Grant {
             space,
-            path,
+            entry,
             version,
             chunks,
         };
         match self.call(request).await? {
-            Response::Grants { urls, expires_ms } => Ok((urls, expires_ms)),
+            Response::Grants { urls, ttl_ms } => Ok((urls, Duration::from_millis(ttl_ms))),
             other => Err(unexpected(&other)),
         }
     }
@@ -133,8 +140,10 @@ impl Remote {
             entry,
             base,
             request_id,
+            mtime_ms,
             ..
         } = record.clone();
+        let base = base.map(|base| base.id);
         let request = |space| Request::Commit {
             space,
             entry,
@@ -142,6 +151,7 @@ impl Remote {
             base,
             guarded: false,
             chunks,
+            mtime_ms,
         };
         match self.call(request).await? {
             Response::Version { version } => Ok(version),

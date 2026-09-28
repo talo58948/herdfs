@@ -2,29 +2,25 @@
 
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use std::{ffi::OsString, fs::File, io, os::unix::fs::FileExt, path::Path};
+use std::{ffi::OsString, fs::File, io, os::unix::fs::FileExt};
 
 use fuser::{Errno, FileAttr, INodeNo, OpenAccMode, OpenFlags};
-use herdfs_core::proto::{EntryId, Version};
+use herdfs_core::proto::{EntryId, ErrorCode, Version};
 use herdfs_core::{ChunkId, SpacePath};
 
 use super::{PERMISSIONS, RECENT_LIMIT, Space};
-use crate::strategy::{OpenContext, Strategy, Upgrade};
 use crate::{error::Error, journal::Registration, lock, reader::OpenVersion};
-
-/// Opens of a file by one program count as repeated while each comes this soon after the last.
-const REOPENED_WITHIN: Duration = Duration::from_secs(300);
 
 pub struct Handle {
     entry: EntryId,
-    /// The version read while the entry has no journal copy; `None` for an empty file.
-    content: Option<Arc<OpenVersion>>,
+    /// The version read while the journal holds no changes: the head at open, or a newer one
+    /// this client committed since.
+    pub content: Mutex<Option<Arc<OpenVersion>>>,
     writable: bool,
     /// Written since the journal copy was last sealed.
     dirty: AtomicBool,
     /// Chunks this handle pinned, which release unpins.
-    pinned: Mutex<Vec<ChunkId>>,
+    pub pinned: Mutex<Vec<ChunkId>>,
     _registration: Registration,
 }
 
@@ -32,7 +28,7 @@ impl Handle {
     fn new(entry: EntryId, writable: bool, registration: Registration) -> Self {
         Self {
             entry,
-            content: None,
+            content: Mutex::default(),
             writable,
             dirty: AtomicBool::new(false),
             pinned: Mutex::default(),
@@ -42,62 +38,85 @@ impl Handle {
 }
 
 impl Space {
-    pub async fn open(self: Arc<Self>, ino: INodeNo, flags: OpenFlags, pid: u32) -> Result<u64, Error> {
+    /// Opens the file, and says whether the handle must bypass the kernel's page cache because
+    /// another open handle reads a different version.
+    pub async fn open(
+        self: Arc<Self>,
+        ino: INodeNo,
+        flags: OpenFlags,
+        pid: u32,
+    ) -> Result<(u64, bool), Error> {
         let (entry, path) = (self.entry_id(ino), self.path(ino)?);
         let writable = flags.acc_mode() != OpenAccMode::O_RDONLY;
-        let mut handle = Handle::new(entry, writable, self.journal.opened(entry));
+        let truncate = writable && flags.0 & libc::O_TRUNC != 0;
+        let handle = Handle::new(entry, writable, self.journal.opened(entry));
         let mut upgrade = None;
-        if writable {
-            let truncate = flags.0 & libc::O_TRUNC != 0;
-            self.writable(entry, &path, truncate).await?;
-            handle.dirty = truncate.into();
-        } else if self.journal.copy(entry).is_none() {
-            let head = self.head(entry, &path).await?;
-            upgrade = head.and_then(|head| self.start(OpenVersion::new(head), &path, pid, &mut handle));
+        // While this client holds changes, every handle reads them, so no head is needed (C1).
+        if self.journal.changes(entry).is_none() {
+            let head = self.head(entry, &path, writable, truncate).await?;
+            match head.map(OpenVersion::new) {
+                Some(head) if !writable => upgrade = self.start(head, &path, pid, &handle),
+                head => *lock(&handle.content) = head.map(Arc::new),
+            }
         }
-        let fh = self.register(handle);
+        if truncate {
+            let base = lock(&handle.content).clone();
+            self.prepare(entry, base, true).await?;
+            handle.dirty.store(true, Relaxed);
+        }
+        let (fh, direct) = self.register(handle);
         if let Some(upgrade) = upgrade {
-            tokio::spawn(self.upgrade(fh, upgrade, path));
+            tokio::spawn(self.upgrade(fh, upgrade));
         }
-        Ok(fh)
+        Ok((fh, direct))
     }
 
-    /// Creates an empty file and opens it for writing through a fresh journal copy.
+    /// Creates an empty file and opens it for writing. If another client created the name
+    /// first and O_EXCL was not asked for, opens that file instead, as O_CREAT does (C5).
     pub async fn create(
         self: Arc<Self>,
-        parent: INodeNo,
-        name: OsString,
+        (parent, name): (INodeNo, OsString),
         mode: u32,
-    ) -> Result<(FileAttr, u64), Error> {
+        flags: i32,
+        pid: u32,
+    ) -> Result<(FileAttr, u64, bool), Error> {
         let path = self.child(parent, &name)?;
-        let entry = self.remote.create(path, mode & PERMISSIONS).await?;
-        let handle = Handle::new(entry.id, true, self.journal.opened(entry.id));
-        self.journal
-            .install(entry.id, self.journal.scratch(entry.id)?, None)?;
-        Ok((self.added(&entry), self.register(handle)))
+        let entry = match self.remote.create(path.clone(), mode & PERMISSIONS).await {
+            Err(Error::Api(error)) if error.code == ErrorCode::Exists && flags & libc::O_EXCL == 0 => {
+                let entry = self.remote.stat(path).await?;
+                self.added(&entry);
+                let (fh, direct) = self
+                    .clone()
+                    .open(self.ino(entry.id), OpenFlags(flags), pid)
+                    .await?;
+                return Ok((self.attr(&entry), fh, direct));
+            }
+            created => created?,
+        };
+        let (fh, direct) = self.register(Handle::new(entry.id, true, self.journal.opened(entry.id)));
+        Ok((self.added(&entry), fh, direct))
     }
 
     pub async fn read(self: Arc<Self>, fh: u64, off: u64, len: u32) -> Result<Vec<u8>, Error> {
         let handle = self.handle(fh)?;
-        // A pending local write shadows the remote version for every handle (C1).
-        if let Some(copy) = self.journal.copy(handle.entry) {
+        // Changes pending on this client show through every handle (C1).
+        if let Some(copy) = self.journal.changes(handle.entry) {
             return Ok(read_copy(&copy, off, len)?);
         }
-        let Some(content) = &handle.content else {
-            return Ok(Vec::new());
-        };
-        // The inode's current path, so a rename on this client keeps reads working; one on
-        // another host fails grants until the file is reopened.
-        let path = self.path(self.ino(handle.entry))?;
-        self.reader.read(content, &path, off, len.into()).await
+        match self.content(&handle) {
+            Some(content) => self.reader.read(&content, off, len.into()).await,
+            None => Ok(Vec::new()),
+        }
     }
 
-    pub fn write(&self, fh: u64, off: u64, data: &[u8]) -> Result<u32, Error> {
+    /// Writes into the journal copy, which the first write makes.
+    pub async fn write(self: Arc<Self>, fh: u64, off: u64, data: Vec<u8>) -> Result<u32, Error> {
         let handle = self.handle(fh)?;
         if !handle.writable {
             return Err(Errno::EBADF.into());
         }
-        self.journal.write(handle.entry, off, data)?;
+        self.prepare(handle.entry, self.content(&handle), false).await?;
+        self.journal.write(handle.entry, off, &data)?;
         handle.dirty.store(true, Relaxed);
         Ok(data.len() as u32)
     }
@@ -140,9 +159,18 @@ impl Space {
             .map(|fh| self.handle(fh))
             .transpose()?
             .filter(|handle| handle.writable);
-        let entry = handle.as_ref().map_or(self.entry_id(ino), |handle| handle.entry);
+        let entry = self.entry_id(ino);
         let _registration = self.journal.opened(entry);
-        self.writable(entry, &self.path(ino)?, size == 0).await?;
+        let base = match &handle {
+            Some(handle) => self.content(handle),
+            None if self.journal.changes(entry).is_some() => None,
+            None => self
+                .head(entry, &self.path(ino)?, true, size == 0)
+                .await?
+                .map(OpenVersion::new)
+                .map(Arc::new),
+        };
+        self.prepare(entry, base, size == 0).await?;
         self.journal.set_len(entry, size)?;
         match handle {
             Some(handle) => handle.dirty.store(true, Relaxed),
@@ -151,38 +179,62 @@ impl Space {
         Ok(())
     }
 
-    /// Gives the entry a journal copy, materialized from its head unless truncating (C1).
-    async fn writable(&self, entry: EntryId, path: &SpacePath, truncate: bool) -> Result<(), Error> {
+    /// Gives the entry a journal copy to change, emptied if `truncate`: the one holding its
+    /// changes, else `base` materialized (C1).
+    async fn prepare(
+        &self,
+        entry: EntryId,
+        base: Option<Arc<OpenVersion>>,
+        truncate: bool,
+    ) -> Result<(), Error> {
         if self.journal.attach(entry, truncate)? {
             return Ok(());
         }
-        let head = match self.head(entry, path).await {
-            // A truncating write needs no old bytes, and its unguarded commit is right on an
-            // unknown base too (C5, C12).
-            Err(err) if truncate && err.is_offline() => None,
-            head => head?,
-        };
-        let head = head.map(OpenVersion::new);
         let mut scratch = self.journal.scratch(entry)?;
-        if let Some(head) = head.as_ref().filter(|_| !truncate) {
-            self.reader.materialize(head, path, &mut scratch.file).await?;
+        if let Some(base) = base.as_ref().filter(|_| !truncate) {
+            self.reader.materialize(base, &mut scratch.file).await?;
         }
         self.journal
-            .install(entry, scratch, head.as_ref().map(|head| &head.version))?;
+            .install(entry, scratch, base.as_ref().map(|base| &base.version))?;
         // Another open may have installed its copy first; truncate that one instead.
         self.journal.attach(entry, truncate)?;
         Ok(())
     }
 
-    /// The entry's current head. Every open asks, for close-to-open consistency (C2); offline,
-    /// the last head seen lets writes and cached reads go on (C12).
-    async fn head(&self, entry: EntryId, path: &SpacePath) -> Result<Option<Version>, Error> {
-        let (found, head) = match self.remote.open(path.clone()).await {
-            Err(err) if err.is_offline() => return lock(&self.heads).get(&entry).cloned().ok_or(err),
+    /// The version a handle reads without journal changes: its own, or a newer one this
+    /// client committed since, whose bytes it holds (C1).
+    fn content(&self, handle: &Handle) -> Option<Arc<OpenVersion>> {
+        let mut content = lock(&handle.content);
+        let known = content.as_ref().map(|content| content.version.id);
+        if let Some(own) = self.journal.base_after(handle.entry, known) {
+            *content = Some(Arc::new(OpenVersion::new(own)));
+        }
+        content.clone()
+    }
+
+    /// The entry's current head. Every open asks, for close-to-open consistency (C2), and one
+    /// for writing needs write access. Offline, the last head seen lets writes and cached reads
+    /// go on, and a truncating write needs none, since its unguarded commit is right on an
+    /// unknown base too (C5, C12).
+    async fn head(
+        &self,
+        entry: EntryId,
+        path: &SpacePath,
+        write: bool,
+        truncate: bool,
+    ) -> Result<Option<Version>, Error> {
+        let (found, head, writable) = match self.remote.open(path.clone()).await {
+            Err(err) if err.is_offline() => {
+                let known = lock(&self.heads).get(&entry).cloned();
+                return known.or(truncate.then_some(None)).ok_or(err);
+            }
             opened => opened?,
         };
         if found.id != entry {
             return Err(Errno::ENOENT.into());
+        }
+        if write && !writable {
+            return Err(Errno::EACCES.into());
         }
         self.remember(&found);
         let mut heads = lock(&self.heads);
@@ -203,73 +255,6 @@ impl Space {
         Ok(head)
     }
 
-    /// Decides the access strategy for this open (P1), begins it, and gives the handle its file.
-    fn start(&self, file: OpenVersion, path: &SpacePath, pid: u32, handle: &mut Handle) -> Option<Upgrade> {
-        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
-        let extension = Path::new(path.name()).extension();
-        let context = OpenContext {
-            size: file.version.size,
-            extension: extension.map(|extension| extension.to_string_lossy().into()),
-            opens: self.opened(file.version.entry, comm.trim_end()),
-            comm: comm.trim_end().to_owned(),
-            coverage: self.cache.coverage(&file.version.chunks),
-            throughput: self.reader.throughput.get(),
-            round_trip: self.remote.round_trip.get().unwrap_or_default(),
-        };
-        let (strategy, upgrade) = lock(&self.decider).decide(&context);
-        self.stats.decided(strategy);
-        tracing::debug!(%path, ?strategy, ?context, "access strategy");
-        let file = Arc::new(file);
-        self.begin(strategy, &file, path, handle);
-        handle.content = Some(file);
-        upgrade
-    }
-
-    /// How many times `comm` opened `entry` before, each within [`REOPENED_WITHIN`] of the last,
-    /// counting this open for the next.
-    fn opened(&self, entry: EntryId, comm: &str) -> u32 {
-        let mut opens = lock(&self.opens);
-        if opens.len() > RECENT_LIMIT {
-            opens.clear();
-        }
-        let (count, last) = opens
-            .entry((entry, comm.to_owned()))
-            .or_insert((0, Instant::now()));
-        if last.elapsed() > REOPENED_WITHIN {
-            *count = 0;
-        }
-        (*count, *last) = (*count + 1, Instant::now());
-        *count - 1
-    }
-
-    /// Pins every chunk for Pin, and prefetches them in the background for Fetch and Pin.
-    fn begin(&self, strategy: Strategy, file: &Arc<OpenVersion>, path: &SpacePath, handle: &Handle) {
-        if strategy == Strategy::Pin {
-            let mut pinned = lock(&handle.pinned);
-            *pinned = file.version.chunks.iter().map(|chunk| chunk.id).collect();
-            self.cache.pin(&pinned);
-        }
-        if strategy != Strategy::Stream {
-            let (reader, file, path) = (self.reader.clone(), file.clone(), path.clone());
-            tokio::spawn(async move {
-                if let Err(err) = reader.prefetch(&file, &path).await {
-                    tracing::warn!(%err, %path, "prefetch failed");
-                }
-            });
-        }
-    }
-
-    /// Begins the strategy Jev chose after the open, unless the handle is closed by then.
-    async fn upgrade(self: Arc<Self>, fh: u64, upgrade: Upgrade, path: SpacePath) {
-        // Pinning under the handles lock: release either comes later and unpins, or came first.
-        if let Ok(strategy) = upgrade.await
-            && let Some(handle) = lock(&self.handles).get(&fh)
-            && let Some(file) = &handle.content
-        {
-            self.begin(strategy, file, &path, handle);
-        }
-    }
-
     /// Persists the handle's writes, if any since the last seal, for the committer.
     fn seal(&self, handle: &Handle) -> Result<(), Error> {
         if !handle.dirty.swap(false, Relaxed) {
@@ -283,10 +268,21 @@ impl Space {
         Ok(sealed?)
     }
 
-    fn register(&self, handle: Handle) -> u64 {
+    /// Registers the handle, and says whether another open handle on its entry reads a
+    /// different version, which the kernel's per-inode page cache would mix up (C3).
+    fn register(&self, handle: Handle) -> (u64, bool) {
         let fh = self.next_handle.fetch_add(1, Relaxed);
-        lock(&self.handles).insert(fh, Arc::new(handle));
-        fh
+        let reads = |handle: &Handle| lock(&handle.content).as_ref().map(|content| content.version.id);
+        // While this client holds changes, every handle reads them.
+        let changes = self.journal.changes(handle.entry).is_some();
+        let mut handles = lock(&self.handles);
+        let view = reads(&handle);
+        let direct = !changes
+            && handles
+                .values()
+                .any(|other| other.entry == handle.entry && reads(other) != view);
+        handles.insert(fh, Arc::new(handle));
+        (fh, direct)
     }
 
     fn handle(&self, fh: u64) -> Result<Arc<Handle>, Error> {
