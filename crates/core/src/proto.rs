@@ -141,6 +141,9 @@ pub enum Request {
     /// `Conflict` if `base` is no longer retained, and the caller retries
     /// without a base, uploading every chunk. Retrying with the same
     /// `request_id` returns the first result instead of committing again.
+    /// A retried `request_id` from the same caller confirms the first commit:
+    /// its own version if still retained (the author may always see it), else
+    /// the current head if readable, else `Done`, which also means committed.
     /// `mtime_ms` keeps a modification time the writer set (`cp -p`);
     /// without it the commit time is used.
     Commit {
