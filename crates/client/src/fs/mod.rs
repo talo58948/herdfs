@@ -6,6 +6,7 @@ mod fuse;
 mod handles;
 mod namespace;
 mod paths;
+mod versions;
 
 use std::sync::{Arc, Mutex, OnceLock, atomic::AtomicU64};
 use std::time::{Duration, Instant};
@@ -16,6 +17,7 @@ use fuser::{Errno, FileAttr, FileType, INodeNo, Notifier};
 use handles::Handle;
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{Entry, EntryId, Kind};
+use tokio::task::JoinHandle;
 
 use crate::{
     Result, cache::Cache, journal::Journal, lock, lru::Lru, reader::Reader, remote::Remote, stats::Stats,
@@ -115,15 +117,15 @@ impl Space {
         let _ = self.notifier.set(notifier);
     }
 
-    /// Drops the kernel's pages of the entry, which a newer version replaced, before the reply
-    /// that switched it, so no later read sees the old one (C3). The kernel waits for the pages
-    /// a read in progress holds, which other tasks answer; reads and writes, which hold pages
-    /// themselves, never switch a version known before.
-    async fn invalidate(&self, entry: EntryId) {
-        if let Some(notifier) = self.notifier.get().cloned() {
-            let ino = self.ino(entry);
-            let _ = tokio::task::spawn_blocking(move || notifier.inval_inode(ino, 0, 0)).await;
-        }
+    /// Starts dropping the kernel's pages of the entry, which a newer version replaced. A reply
+    /// that switched the version waits for it, so no later read sees the old one (C3): the kernel
+    /// waits for the pages a read in progress holds, which other tasks answer. A read or write,
+    /// which holds pages itself, lets it run.
+    fn invalidate(&self, entry: EntryId) -> Option<JoinHandle<io::Result<()>>> {
+        let (notifier, ino) = (self.notifier.get().cloned()?, self.ino(entry));
+        Some(tokio::task::spawn_blocking(move || {
+            notifier.inval_inode(ino, 0, 0)
+        }))
     }
 
     /// The entry's attributes, with size and mtime from its journal copy while it has one.

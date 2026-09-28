@@ -86,7 +86,6 @@ fn read_on_after_a_commit(late_grant: bool) -> Result<Option<String>> {
 /// [`a_reader_granted_before_v1_reads_on_after_a_commit`], whose grant is older than v1.
 // contract: C3, S8 (bob may read the entry's current head)
 #[test]
-#[ignore = "ROUND9: an open file's reads fail once a commit hides the version it follows from the reader (S8)"]
 fn a_reader_granted_after_v1_reads_on_after_a_commit() -> Result<()> {
     let Some(read) = read_on_after_a_commit(true)? else {
         return Ok(());
@@ -167,7 +166,6 @@ fn patch_after_three_commits(collection: Option<Collection>) -> Result<Option<St
 /// the default retention.
 // contract: C5, C14, C3
 #[test]
-#[ignore = "ROUND9: a write to a file held open fails with ENOENT once the version it follows leaves retention"]
 fn a_writer_patches_a_file_whose_version_left_retention() -> Result<()> {
     let Some(patched) = patch_after_three_commits(Some(Collection::QUICK))? else {
         return Ok(());
