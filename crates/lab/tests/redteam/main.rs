@@ -2,6 +2,8 @@
 //! and run. Skips until the binaries are built.
 
 mod agents;
+mod atomic_saves;
+mod build_mtimes;
 mod commit_manifest;
 mod creates;
 mod debounce;
@@ -15,6 +17,7 @@ mod offline_writes;
 mod open_handles;
 mod paths;
 mod recovery;
+mod scratch_files;
 mod slow_links;
 mod versions;
 
