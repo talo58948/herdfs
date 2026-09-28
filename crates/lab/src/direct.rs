@@ -1,6 +1,8 @@
 //! Calls to the lab's services that bypass the mounts: the authority's API, tokens, and the store.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::path::Path;
 
 use anyhow::Result;
 use herdfs_core::proto::{self, Request, Response};
@@ -53,5 +55,16 @@ impl Lab {
     /// A presigned PUT for `key` in the bucket, naming host `s3.lab`.
     pub fn presign_put(&self, key: &str) -> Url {
         self.store.presign_put(key)
+    }
+
+    /// The objects in the bucket whose keys start with `prefix`, such as `chunks/`, with their
+    /// sizes, listed with the store's own credentials.
+    pub fn stored(&self, prefix: &str) -> Result<BTreeMap<String, u64>> {
+        self.store.list(prefix)
+    }
+
+    /// MinIO's data directory: every byte the store holds is in a file below it.
+    pub fn store_dir(&self) -> &Path {
+        &self.store.data
     }
 }

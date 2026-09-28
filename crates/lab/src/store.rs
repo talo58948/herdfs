@@ -1,12 +1,14 @@
 //! The object store: a MinIO server holding the `herdfs` bucket.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
 use anyhow::Result;
 use reqwest::Url;
 use reqwest::blocking::Client;
+use rusty_s3::actions::ListObjectsV2;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 
 use crate::process::Proc;
@@ -24,11 +26,17 @@ pub const STORE_CREDENTIALS: [(&str, &str); 2] = [
     ("AWS_SECRET_ACCESS_KEY", SECRET_KEY),
 ];
 const PRESIGN_TTL: Duration = Duration::from_secs(300);
+/// MinIO's data directory, under the lab's.
+const DATA: &str = "minio";
 
 pub(crate) struct Store {
     _server: Proc,
     bucket: Bucket,
     credentials: Credentials,
+    /// Reaches the store directly, not through any client's link.
+    http: Client,
+    /// Where MinIO keeps object bytes on disk.
+    pub(crate) data: PathBuf,
 }
 
 impl Store {
@@ -40,7 +48,7 @@ impl Store {
             .args(["server", "--quiet", "--address", &format!("127.0.0.1:{port}")])
             .arg("--certs-dir")
             .arg(dir.join("minio-certs"))
-            .arg(dir.join("minio"))
+            .arg(dir.join(DATA))
             .env("MINIO_ROOT_USER", ACCESS_KEY)
             .env("MINIO_ROOT_PASSWORD", SECRET_KEY)
             .env("MINIO_BROWSER", "off");
@@ -58,7 +66,32 @@ impl Store {
             _server: server,
             bucket,
             credentials,
+            http: http.clone(),
+            data: dir.join(DATA),
         })
+    }
+
+    /// Every object whose key starts with `prefix`, with its size in bytes.
+    pub(crate) fn list(&self, prefix: &str) -> Result<BTreeMap<String, u64>> {
+        let mut objects = BTreeMap::new();
+        let mut next: Option<String> = None;
+        loop {
+            let url = {
+                let mut list = self.bucket.list_objects_v2(Some(&self.credentials));
+                list.with_prefix(prefix);
+                if let Some(token) = &next {
+                    list.with_continuation_token(token.as_str());
+                }
+                list.sign(PRESIGN_TTL)
+            };
+            let page = self.http.get(url).send()?.error_for_status()?.text()?;
+            let page = ListObjectsV2::parse_response(&page)?;
+            objects.extend(page.contents.into_iter().map(|object| (object.key, object.size)));
+            let Some(token) = page.next_continuation_token else {
+                return Ok(objects);
+            };
+            next = Some(token);
+        }
     }
 
     pub(crate) fn presign_get(&self, key: &str) -> Url {

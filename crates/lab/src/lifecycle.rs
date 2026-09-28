@@ -9,7 +9,7 @@ use herdfs_core::SpacePath;
 use herdfs_core::proto::{Perm, Request};
 use reqwest::blocking::Client as Http;
 
-use crate::authority::Authority;
+use crate::authority::{Authority, Collection};
 use crate::client::{CACHE_BYTES, Client, ClientSpec};
 use crate::issuer::Issuer;
 use crate::process::{self, Proc};
@@ -26,6 +26,7 @@ const PORT_TRIES: usize = 3;
 pub struct LabConfig {
     clients: Vec<ClientSpec>,
     on_tmpfs: bool,
+    collection: Option<Collection>,
 }
 
 impl LabConfig {
@@ -57,6 +58,12 @@ impl LabConfig {
     /// Keeps the lab's directory in `/dev/shm`, so that many changes do not each wait on fsync.
     pub fn on_tmpfs(mut self) -> Self {
         self.on_tmpfs = true;
+        self
+    }
+
+    /// Runs the authority with `settings` for retention and collection instead of its defaults.
+    pub fn collection(mut self, settings: Collection) -> Self {
+        self.collection = Some(settings);
         self
     }
 
@@ -134,7 +141,7 @@ impl Lab {
         Ok(Self {
             agents: Vec::new(),
             clients,
-            authority: Authority::new(authority_port, http),
+            authority: Authority::new(authority_port, http, config.collection),
             toxiproxy,
             store,
             issuer,
