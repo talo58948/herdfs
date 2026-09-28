@@ -3,10 +3,10 @@
 //! read-write, so it reads A's journal copy; client B, cold, then reads the committed file
 //! through the strategy under test, and it must equal the same fsx run on a local directory.
 //!
-//! `FSX_OPS` sets the operations per run; `FSX_SEED` replays a seed. The nightly 1,000,000 ops
-//! commit about 8,000 versions, and the store keeps every chunk of each (C14): about 15 GB per
-//! variant. So runs longer than the default take turns, with other checkouts' too, and each
-//! skips unless the disk has [`LONG_RUN_FREE`] bytes free when its turn comes.
+//! `FSX_OPS` sets the operations per run; `FSX_SEED` replays a seed. A run commits about 8
+//! versions per 1,000 ops, most of the file each time, and the store keeps every chunk (C14):
+//! the nightly 1,000,000 ops store about 33 GB per variant. So runs longer than the default take
+//! turns, with other checkouts' too, and each skips unless the disk has room for its store.
 
 use std::env;
 use std::fs::{self, File};
@@ -19,8 +19,11 @@ use anyhow::{Context, Result, ensure};
 use herdfs_lab::{Lab, LabConfig, Profile, Strategy};
 
 const DEFAULT_OPS: u64 = 50_000;
-/// Free disk a run longer than [`DEFAULT_OPS`] needs: 1,000,000 ops store about 15 GB.
-const LONG_RUN_FREE: u64 = 20 << 30;
+/// Store bytes per op, with a margin over the 33 KB measured at 50,000 ops.
+const STORE_PER_OP: u64 = 40_000;
+/// Each client's chunk cache: the file many times over. The default 1 GiB fills up with the
+/// versions a reads back.
+const CACHE_BYTES: u64 = 64 << 20;
 const FILE: &str = "fsx.bin";
 /// Read-only opens after the run; several, so a chaos decider picks more than one strategy.
 const READS: u64 = 8;
@@ -60,24 +63,18 @@ fn exercise(strategy: impl FnOnce(u64) -> Strategy) -> Result<()> {
     let ops = setting("FSX_OPS", DEFAULT_OPS)?;
     let long = ops > DEFAULT_OPS;
     let _turn = long.then(take_turn).transpose()?;
-    let free = free_bytes(&env::temp_dir())?;
-    if long && free < LONG_RUN_FREE {
-        let gib = |bytes: u64| bytes >> 30;
-        eprintln!(
-            "skipped: {ops} fsx ops need {} GiB free for the store; {} has {} GiB",
-            gib(LONG_RUN_FREE),
-            env::temp_dir().display(),
-            gib(free)
-        );
+    if long && !room_for_store(ops)? {
         return Ok(());
     }
     let strategy = strategy(seed);
     eprintln!("fsx seed {seed}, {ops} ops, {strategy:?}; replay with FSX_SEED={seed} LAB_KEEP=1");
-    let lab = Lab::start(
-        LabConfig::default()
-            .client("a", "alice", &[], Profile::Lan, strategy)
-            .client("b", "bob", &[], Profile::Lan, strategy),
-    )?;
+    let clients = LabConfig::default()
+        .client("a", "alice", &[], Profile::Lan, strategy)
+        .client("b", "bob", &[], Profile::Lan, strategy)
+        .cache_bytes("a", CACHE_BYTES)
+        .cache_bytes("b", CACHE_BYTES);
+    // A default run stores under 2 GB, which tmpfs holds, sparing the shared disk.
+    let lab = Lab::start(if long { clients } else { clients.on_tmpfs() })?;
     let local = tempfile::tempdir()?;
     fsx(local.path(), local.path(), seed, ops)?;
     let expected = fs::read(local.path().join(FILE))?;
@@ -135,11 +132,25 @@ fn take_turn() -> Result<File> {
     Ok(turn)
 }
 
-/// Bytes free to this user on the file system holding `dir`.
-fn free_bytes(dir: &Path) -> Result<u64> {
-    let report = herdfs_lab::run(Command::new("df").args(["--output=avail", "-B1"]).arg(dir))?;
-    let free = report.lines().last().context("df printed nothing")?;
-    Ok(free.trim().parse()?)
+/// Whether the disk the lab lives on has room for the store of an `ops` run; says why not.
+fn room_for_store(ops: u64) -> Result<bool> {
+    let (dir, needed) = (env::temp_dir(), ops * STORE_PER_OP);
+    let report = herdfs_lab::run(Command::new("df").args(["--output=avail", "-B1"]).arg(&dir))?;
+    let free: u64 = report
+        .lines()
+        .last()
+        .context("df printed nothing")?
+        .trim()
+        .parse()?;
+    let gb = |bytes: u64| bytes / 1_000_000_000;
+    if free < needed {
+        let (needed, free) = (gb(needed), gb(free));
+        eprintln!(
+            "skipped: {ops} fsx ops need {needed} GB free for the store; {} has {free} GB",
+            dir.display()
+        );
+    }
+    Ok(free >= needed)
 }
 
 /// The number in environment variable `name`, or `default`.
