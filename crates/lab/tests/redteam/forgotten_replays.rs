@@ -110,17 +110,14 @@ fn replay_after(down: Duration) -> Result<Option<(&'static str, usize)>> {
     Ok(Some((holds, copies)))
 }
 
-/// Repro: [`replay_after`] with a down for 10 s, twice the grace. Collection deletes the
-/// `commits` row of the rewrite's request id once it is older than retain-days plus the grace
-/// (collect.rs `collect`, "DELETE FROM commits WHERE at_ms < ?1"), so the authority no longer
-/// knows the replay; its base v1 is still retained, so it commits the rewrite a second time, and
-/// the write the authority acknowledged before b's save becomes the head over it. At the
-/// contract's 1 h grace with `--retain-days 0`, that is a client whose commit answer was lost
-/// and which stays down over an hour; at the default 30 days, over 30 days. The control is
+/// [`replay_after`] with a down for 10 s, twice the grace. Collection used to delete the
+/// `commits` row of the rewrite's request id once it was older than retain-days plus the grace,
+/// so the authority no longer knew the replay; its base v1 was still retained, so it committed
+/// the rewrite a second time, over b's save. Request ids are now kept at least 30 days
+/// (collect.rs `REQUEST_MEMORY_MS`). The control is
 /// [`a_replay_within_the_grace_commits_nothing_new`].
 // contract: C5, C4a
 #[test]
-#[ignore = "ROUND17: a replay after the grace commits the acknowledged write again over newer saves"]
 fn a_replay_after_the_grace_commits_nothing_new() -> Result<()> {
     let Some(outcome) = replay_after(Duration::from_secs(10))? else {
         return Ok(());

@@ -15,7 +15,7 @@ use std::path::Path;
 pub use collect::{Collected, Policy};
 use herdfs_core::{
     ChunkId, ChunkRef,
-    proto::{self, ErrorCode, Kind, Request, Response},
+    proto::{self, ErrorCode, Kind, Perm, Request, Response},
 };
 use rusqlite::Connection;
 
@@ -64,6 +64,11 @@ impl Authority {
         now_ms: i64,
     ) -> Result<Outcome, proto::Error> {
         self.transact(who, now_ms, |call| call.dispatch(request))
+    }
+
+    /// Refuses an upload by `who` to `space` before its bytes are stored.
+    pub fn check_upload(&mut self, who: &Principal, space: &str, now_ms: i64) -> Result<(), proto::Error> {
+        self.transact(who, now_ms, |call| call.require_somewhere(space, Perm::Write))
     }
 
     /// Records that `who` uploaded `chunk` for the commit `request_id`, so their

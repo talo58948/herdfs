@@ -79,16 +79,13 @@ fn save_while_the_store_refuses(refuse: bool) -> Result<Option<Outcome>> {
     }))
 }
 
-/// Repro: [`save_while_the_store_refuses`] with the store refusing. The upload handler records
-/// the upload before it writes the object (authority server/mod.rs `upload`), and the store's
-/// failure leaves the record; the client, whose upload failed, still sends the commit (client
-/// journal/commit.rs `attempt`), which the record lets through (versions.rs `uploaded_len`). The
-/// commit is acknowledged, fsync succeeds and a drops its journal copy, but the version names a
-/// chunk the store never got: b's read fails, as does every read without a's cache, for good.
-/// The control is [`a_save_while_the_store_writes_is_readable_elsewhere`].
+/// [`save_while_the_store_refuses`] with the store refusing. The upload handler used to record
+/// the upload before it wrote the object and keep the record when the write failed, so the
+/// commit went through and named a chunk the store never got: fsync succeeded and b's read
+/// failed for good. It now records only once the store holds the bytes (authority
+/// server/mod.rs `upload`). The control is [`a_save_while_the_store_writes_is_readable_elsewhere`].
 // contract: C4a, C4b, C14
 #[test]
-#[ignore = "ROUND17: an upload the store failed still lets its commit through; the head is unreadable"]
 fn a_save_while_the_store_refuses_is_readable_elsewhere() -> Result<()> {
     let Some(outcome) = save_while_the_store_refuses(true)? else {
         return Ok(());

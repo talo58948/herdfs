@@ -8,6 +8,9 @@ use herdfs_core::ChunkId;
 
 use crate::{Sim, model::Model};
 
+/// Request ids stay at least this long whatever the retention (docs/architecture.md, Limits).
+const REQUEST_MEMORY_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
 impl Sim {
     pub fn collect(&mut self) {
         let policy = Policy {
@@ -59,7 +62,7 @@ impl Model {
             .retain(|_, (_, at_ms)| *at_ms >= now_ms - policy.grace_ms);
         self.forget(&pruned);
         let forgotten = now_ms
-            .saturating_sub(policy.max_age_ms)
+            .saturating_sub(policy.max_age_ms.max(REQUEST_MEMORY_MS))
             .saturating_sub(policy.grace_ms);
         self.commits.retain(|_, (.., at_ms)| *at_ms >= forgotten);
         pruned.len()

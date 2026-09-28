@@ -144,9 +144,10 @@ async fn rpc(
 }
 
 /// Stores a chunk even if it already exists, so an upload never reveals
-/// whether the same bytes are stored elsewhere. Recording first means a
-/// caller without write causes no store write; if the write then fails, the
-/// caller gets `Unavailable` and uploads again.
+/// whether the same bytes are stored elsewhere. Checking first means a caller
+/// without write causes no store write; recording only once the store holds
+/// the bytes means no commit can name a chunk it lacks (C4b). If the write
+/// fails, the caller gets `Unavailable` and uploads again.
 async fn upload(
     State(server): State<Arc<Server>>,
     Path((space, request_id, id)): Path<(String, String, String)>,
@@ -162,10 +163,14 @@ async fn upload(
     let len = u32::try_from(bytes.len()).map_err(|_| invalid("chunk too large"))?;
     let chunk = ChunkRef { id, len };
     let _uploading = server.uploading.read().await;
+    let (checked, space_checked) = (who.clone(), space.clone());
+    server
+        .run(move |authority, now_ms| authority.check_upload(&checked, &space_checked, now_ms))
+        .await?;
+    server.put(id, bytes).await?;
     server
         .run(move |authority, now_ms| authority.record_upload(&who, &space, &request_id, chunk, now_ms))
         .await?;
-    server.put(id, bytes).await?;
     Ok(Json(Response::Done))
 }
 

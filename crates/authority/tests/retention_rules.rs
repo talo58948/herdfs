@@ -241,8 +241,8 @@ fn after_a_collection_nothing_reaches_a_pruned_versions_chunks() {
     assert_eq!(commit(file.id, "on-v1", Some(v1.id)), Err(ErrorCode::Conflict));
     assert_eq!(commit(file.id, "on-v2", Some(v2.id)), Err(ErrorCode::Invalid));
     assert_eq!(commit(other.id, "elsewhere", None), Err(ErrorCode::Invalid));
-    // The request id that made v1 no longer answers with it.
-    assert_eq!(commit(file.id, "f", None), Err(ErrorCode::Invalid));
+    // The request id that made v1 answers with the head, never with v1.
+    assert_eq!(commit(file.id, "f", None).map(|version| version.id), Ok(v2.id));
     assert_eq!(fx.call(&alice(), restore("f", v1.id)), Err(ErrorCode::NotFound));
 
     // A fork copies each head only, so neither space names the pruned chunk.

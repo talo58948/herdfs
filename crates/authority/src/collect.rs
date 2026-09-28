@@ -42,6 +42,10 @@ const PRUNE: &str = "DELETE FROM versions WHERE id IN (
 const STALE_UPLOADS: &str = "DELETE FROM uploads WHERE (principal, request_id) IN (
     SELECT principal, request_id FROM uploads GROUP BY principal, request_id HAVING max(at_ms) < ?1)";
 
+/// Request ids are kept at least this long, whatever the retention, so a client that lost a
+/// commit's answer and returns within it confirms that commit instead of committing it again.
+const REQUEST_MEMORY_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
 impl Authority {
     /// Prunes versions outside retention, drops chunk lists, uploads and request
     /// ids that nothing needs, and returns the chunks still live, across every space.
@@ -54,7 +58,7 @@ impl Authority {
         )?;
         tx.execute(STALE_UPLOADS, [now_ms - policy.grace_ms])?;
         let forgotten = now_ms
-            .saturating_sub(policy.max_age_ms)
+            .saturating_sub(policy.max_age_ms.max(REQUEST_MEMORY_MS))
             .saturating_sub(policy.grace_ms);
         tx.execute("DELETE FROM commits WHERE at_ms < ?1", [forgotten])?;
         let mut live = listed(&tx)?;
