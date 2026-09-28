@@ -125,17 +125,39 @@ impl Call<'_> {
             } => {
                 return self.grant(&space, entry, version, &chunks);
             }
-            Request::Create { space, path, mode } => self.make(&space, &path, Kind::File, mode, None)?,
-            Request::Mkdir { space, path, mode } => self.make(&space, &path, Kind::Dir, mode, None)?,
-            Request::Symlink { space, path, target } => self.make(
+            Request::Create {
+                space,
+                path,
+                parent,
+                mode,
+            } => self.make(&space, &path, parent, Kind::File, mode, None)?,
+            Request::Mkdir {
+                space,
+                path,
+                parent,
+                mode,
+            } => self.make(&space, &path, parent, Kind::Dir, mode, None)?,
+            Request::Symlink {
+                space,
+                path,
+                parent,
+                target,
+            } => self.make(
                 &space,
                 &path,
+                parent,
                 Kind::Symlink,
                 namespace::SYMLINK_MODE,
                 Some(&target),
             )?,
-            Request::Remove { space, path } => self.remove(&space, &path)?,
-            Request::Rename { space, from, to } => self.rename(&space, &from, &to)?,
+            Request::Remove { space, path, parent } => self.remove(&space, &path, parent)?,
+            Request::Rename {
+                space,
+                from,
+                from_parent,
+                to,
+                to_parent,
+            } => self.rename(&space, &from, from_parent, &to, to_parent)?,
             Request::SetAttr {
                 space,
                 path,

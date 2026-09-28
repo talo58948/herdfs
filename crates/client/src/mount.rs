@@ -111,6 +111,7 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
     )?;
     let space = Arc::new(space);
     let committer = Committer {
+        space: space.clone(),
         journal,
         inodes,
         remote: remote.clone(),

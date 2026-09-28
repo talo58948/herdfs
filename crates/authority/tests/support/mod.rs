@@ -76,46 +76,65 @@ impl Fixture {
     }
 
     pub fn mkdir(&mut self, who: &Principal, at: &str) -> Result<Entry, ErrorCode> {
+        let path = path(at);
+        let parent = self.parent_id(who, &path);
         self.entry(
             who,
             Request::Mkdir {
                 space: SPACE.into(),
-                path: path(at),
+                path,
+                parent,
                 mode: 0o755,
             },
         )
     }
 
     pub fn create(&mut self, who: &Principal, at: &str) -> Result<Entry, ErrorCode> {
+        let path = path(at);
+        let parent = self.parent_id(who, &path);
         self.entry(
             who,
             Request::Create {
                 space: SPACE.into(),
-                path: path(at),
+                path,
+                parent,
                 mode: 0o644,
             },
         )
     }
 
     pub fn remove(&mut self, who: &Principal, at: &str) -> Result<Response, ErrorCode> {
+        let path = path(at);
+        let parent = self.parent_id(who, &path);
         self.call(
             who,
             Request::Remove {
                 space: SPACE.into(),
-                path: path(at),
+                path,
+                parent,
             },
         )
     }
 
     pub fn rename(&mut self, who: &Principal, from: &str, to: &str) -> Result<Response, ErrorCode> {
+        let (from, to) = (path(from), path(to));
+        let (from_parent, to_parent) = (self.parent_id(who, &from), self.parent_id(who, &to));
         self.call(
             who,
             Request::Rename {
                 space: SPACE.into(),
-                from: path(from),
-                to: path(to),
+                from,
+                from_parent,
+                to,
+                to_parent,
             },
         )
+    }
+
+    pub fn parent_id(&mut self, who: &Principal, child: &SpacePath) -> EntryId {
+        let parent = child.parent().unwrap_or_default();
+        self.stat(who, parent.as_str())
+            .map_or(EntryId(0), |entry| entry.id)
     }
 
     pub fn set_acl(&mut self, at: &str, principal: &str, perm: Option<Perm>) {

@@ -212,9 +212,22 @@ fn upload(lab: &Lab, user: &str, space: &str, bytes: &[u8]) -> Result<Vec<ChunkR
 
 /// Creates an empty file at `path` in `space` as `user`.
 fn create(lab: &Lab, user: &str, space: &str, path: &str) -> Result<EntryId> {
+    let path = SpacePath::try_from(path)?;
+    let parent_path = path.parent().unwrap_or_default();
+    let Response::Entry { entry: parent } = lab.rpc(
+        user,
+        &Request::Stat {
+            space: space.into(),
+            path: parent_path,
+        },
+    )?
+    else {
+        bail!("stat answers with the entry")
+    };
     let create = Request::Create {
         space: space.into(),
-        path: SpacePath::try_from(path)?,
+        path,
+        parent: parent.id,
         mode: 0o644,
     };
     match lab.rpc(user, &create)? {

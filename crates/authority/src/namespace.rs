@@ -50,10 +50,12 @@ impl Call<'_> {
         &self,
         space: &str,
         path: &SpacePath,
+        parent: EntryId,
         kind: Kind,
         mode: u32,
         target: Option<&str>,
     ) -> Result<Response> {
+        self.expect_parent(space, path, parent)?;
         self.require(space, path, Perm::Write)?;
         if self.find(space, path)?.is_some() {
             return Err(refuse(ErrorCode::Exists, format!("{path} exists")));
@@ -70,7 +72,8 @@ impl Call<'_> {
         })
     }
 
-    pub(crate) fn remove(&self, space: &str, path: &SpacePath) -> Result<Response> {
+    pub(crate) fn remove(&self, space: &str, path: &SpacePath, parent: EntryId) -> Result<Response> {
+        self.expect_parent(space, path, parent)?;
         self.require(space, path, Perm::Write)?;
         if path.is_root() {
             return Err(refuse(ErrorCode::Invalid, "the root cannot be removed"));
@@ -81,7 +84,16 @@ impl Call<'_> {
         Ok(Response::Entry { entry })
     }
 
-    pub(crate) fn rename(&self, space: &str, from: &SpacePath, to: &SpacePath) -> Result<Response> {
+    pub(crate) fn rename(
+        &self,
+        space: &str,
+        from: &SpacePath,
+        from_parent: EntryId,
+        to: &SpacePath,
+        to_parent: EntryId,
+    ) -> Result<Response> {
+        self.expect_parent(space, from, from_parent)?;
+        self.expect_parent(space, to, to_parent)?;
         self.require(space, from, Perm::Write)?;
         self.require(space, to, Perm::Write)?;
         let source = self.entry(space, from)?;
@@ -196,6 +208,18 @@ impl Call<'_> {
                 Err(refuse(ErrorCode::NotDir, format!("{parent} is not a directory")))
             }
             Some(_) => Ok(()),
+        }
+    }
+
+    /// Refuses a path whose parent no longer names the entry the client holds.
+    fn expect_parent(&self, space: &str, path: &SpacePath, expected: EntryId) -> Result<()> {
+        let parent = path.parent().unwrap_or_default();
+        match self.find(space, &parent)? {
+            Some(entry) if entry.id == expected => Ok(()),
+            _ => Err(refuse(
+                ErrorCode::NotFound,
+                format!("{parent} no longer names entry {}", expected.0),
+            )),
         }
     }
 }

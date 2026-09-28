@@ -136,15 +136,15 @@ impl State {
     /// Settles a commit of this client's, in the critical section that drops its copy: the
     /// committed version, if any, becomes the entry's head with its size and time, and what the
     /// authority said of the entry before is older (C1).
-    pub fn settle(&mut self, committed: Option<&Version>, mtime_ms: Option<i64>) {
+    pub fn settle(&mut self, committed: Option<&Version>, mtime_ms: Option<i64>) -> bool {
         self.changed = Instant::now();
         let Some(version) = committed else {
-            return;
+            return false;
         };
         if let Some(entry) = &mut self.entry {
             (entry.head, entry.size) = (Some(version.id), version.size);
             entry.mtime_ms = mtime_ms.unwrap_or(entry.mtime_ms);
         }
-        self.switch((Some(version.clone()), true));
+        self.switch((Some(version.clone()), true))
     }
 }

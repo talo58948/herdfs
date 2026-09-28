@@ -17,6 +17,7 @@ use std::{collections::HashMap, fs::File, io, os::unix::fs::MetadataExt};
 pub use fuse::Fuse;
 use fuser::{Errno, FileAttr, FileType, INodeNo, Notifier, OpenAccMode, OpenFlags};
 use handles::Handle;
+pub(crate) use inode::State;
 pub use inodes::Inodes;
 pub use kernel::Kernel;
 use herdfs_core::proto::{Entry, EntryId, Kind};

@@ -7,7 +7,7 @@ use std::thread;
 
 use anyhow::Result;
 use herdfs_core::SpacePath;
-use herdfs_core::proto::Request;
+use herdfs_core::proto::{EntryId, Request, Response};
 use herdfs_lab::{ADMIN, Lab, Links, SPACE};
 
 use crate::{VISIBLE_AFTER, assert_bytes, save, two_clients};
@@ -57,11 +57,19 @@ fn an_offline_append_after_listing_a_big_directory_is_committed() -> Result<()> 
         return Ok(());
     };
     save(&lab.mount_path("a").join("log"), b"first\n")?;
-    lab.rpc(ADMIN, &mkdir("big")?)?;
+    let parent = mkdir(&lab, "big")?;
     for index in 0..MANY {
         let path = SpacePath::try_from(format!("big/{index}"))?;
         let (space, mode) = (SPACE.into(), 0o644);
-        lab.rpc(ADMIN, &Request::Create { space, path, mode })?;
+        lab.rpc(
+            ADMIN,
+            &Request::Create {
+                space,
+                path,
+                parent,
+                mode,
+            },
+        )?;
     }
     thread::sleep(VISIBLE_AFTER);
     assert_bytes(
@@ -74,7 +82,29 @@ fn an_offline_append_after_listing_a_big_directory_is_committed() -> Result<()> 
     append_offline(&lab, "log", b"second\n", b"first\nsecond\n")
 }
 
-fn mkdir(at: &str) -> Result<Request> {
+fn mkdir(lab: &herdfs_lab::Lab, at: &str) -> Result<EntryId> {
     let (space, path, mode) = (SPACE.into(), SpacePath::try_from(at)?, 0o755);
-    Ok(Request::Mkdir { space, path, mode })
+    let Response::Entry { entry: root } = lab.rpc(
+        ADMIN,
+        &Request::Stat {
+            space: SPACE.into(),
+            path: SpacePath::root(),
+        },
+    )?
+    else {
+        anyhow::bail!("Stat answered something else")
+    };
+    let Response::Entry { entry } = lab.rpc(
+        ADMIN,
+        &Request::Mkdir {
+            space,
+            path,
+            parent: root.id,
+            mode,
+        },
+    )?
+    else {
+        anyhow::bail!("Mkdir answered something else")
+    };
+    Ok(entry.id)
 }

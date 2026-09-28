@@ -39,7 +39,6 @@ fn reads_without_store(lab: &Lab, file: &File, bytes: &[u8]) -> Result<bool> {
 /// cache pressure tests that v2 replaced v1 in its pin set. A fresh Pin open of v2 is the control.
 // contract: C1, C3, P1 (docs/architecture.md: Pin is never evicted while pinned)
 #[test]
-#[ignore = "ROUND23: a Pin handle does not re-pin a version committed by its own client"]
 fn a_pin_handle_keeps_a_new_version_committed_by_its_client_pinned() -> Result<()> {
     let Some(lab) = start()? else {
         return Ok(());

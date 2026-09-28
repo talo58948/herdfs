@@ -60,7 +60,6 @@ fn make_child(lab: &Lab, trial: usize, reuse: bool) -> Result<[bool; 2]> {
 /// control leaves the parent in place; three attacks move it and install a replacement there.
 // contract: C7
 #[test]
-#[ignore = "ROUND23: a mutation can land in a replacement at a renamed parent's old path"]
 fn a_mutation_racing_a_rename_does_not_land_in_a_reused_parent_path() -> Result<()> {
     let Some(lab) = start()? else {
         return Ok(());

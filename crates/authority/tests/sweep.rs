@@ -20,8 +20,7 @@ async fn a_sweep_deletes_only_chunks_unreferenced_for_the_grace() {
     // contract: C15, S7
     let lab = Lab::start().await;
     let alice = lab.user("alice");
-    lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
-        .await;
+    let root = lab.create_space(&alice, "team").await;
     let bytes: [&[u8]; 3] = [b"first version", b"second version", b"uploaded only"];
     for chunk in bytes {
         assert_eq!(
@@ -34,7 +33,7 @@ async fn a_sweep_deletes_only_chunks_unreferenced_for_the_grace() {
     let (_, file) = lab
         .rpc(
             &alice,
-            &json!({"op": "create", "space": "team", "path": "f", "mode": 420}),
+            &json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420}),
         )
         .await;
     for (index, chunk) in bytes[..2].iter().enumerate() {
@@ -84,12 +83,11 @@ async fn a_purged_chunk_goes_on_the_first_sweep_after_the_grace() {
     const INTERVAL_MS: i64 = 50_000;
     let lab = Lab::start().await;
     let alice = lab.user("alice");
-    lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
-        .await;
+    let root = lab.create_space(&alice, "team").await;
     let (_, file) = lab
         .rpc(
             &alice,
-            &json!({"op": "create", "space": "team", "path": "f", "mode": 420}),
+            &json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420}),
         )
         .await;
     let chunks: [&[u8]; 2] = [b"purged", b"head"];
@@ -134,12 +132,11 @@ async fn collection_runs_periodically() {
     // contract: C14, C15, S7
     let lab = Lab::start_with_ttl(Duration::from_millis(1)).await;
     let alice = lab.user("alice");
-    lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
-        .await;
+    let root = lab.create_space(&alice, "team").await;
     let (_, file) = lab
         .rpc(
             &alice,
-            &json!({"op": "create", "space": "team", "path": "f", "mode": 420}),
+            &json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420}),
         )
         .await;
     let chunks: [&[u8]; 2] = [b"pruned", b"head"];

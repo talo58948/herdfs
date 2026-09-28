@@ -42,8 +42,7 @@ fn written(lab: &Lab, bytes: &[u8]) -> bool {
 async fn odd_request_ids_in_the_upload_path_are_answered_alike() {
     let lab = Lab::start().await;
     let alice = lab.user("alice");
-    lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
-        .await;
+    let root = lab.create_space(&alice, "team").await;
     let long = "r".repeat(8 << 10);
     let ids = [
         "plain",
@@ -70,7 +69,7 @@ async fn odd_request_ids_in_the_upload_path_are_answered_alike() {
     assert_eq!(refused.0, StatusCode::BAD_REQUEST, "{refused:?}");
     assert!(!written(&lab, b"not utf-8"));
 
-    let create = json!({"op": "create", "space": "team", "path": "f", "mode": 420});
+    let create = json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420});
     let (_, file) = lab.rpc(&alice, &create).await;
     let commit = json!({"op": "commit", "space": "team", "entry": file["entry"]["id"],
         "request_id": "r1", "base": null, "guarded": false, "chunks": chunks});

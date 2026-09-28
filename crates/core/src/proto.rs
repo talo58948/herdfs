@@ -104,16 +104,22 @@ pub enum Request {
     Create {
         space: String,
         path: SpacePath,
+        /// The entry that `path`'s parent path must name.
+        parent: EntryId,
         mode: u32,
     },
     Mkdir {
         space: String,
         path: SpacePath,
+        /// The entry that `path`'s parent path must name.
+        parent: EntryId,
         mode: u32,
     },
     Symlink {
         space: String,
         path: SpacePath,
+        /// The entry that `path`'s parent path must name.
+        parent: EntryId,
         target: String,
     },
     /// Removes a file, a symlink or an empty directory. Answers with the
@@ -121,13 +127,19 @@ pub enum Request {
     Remove {
         space: String,
         path: SpacePath,
+        /// The entry that `path`'s parent path must name.
+        parent: EntryId,
     },
     /// Moves an entry, or a directory with its subtree, in one step.
     /// Replaces an existing file, or an empty directory, at `to`.
     Rename {
         space: String,
         from: SpacePath,
+        /// The entry that `from`'s parent path must name.
+        from_parent: EntryId,
         to: SpacePath,
+        /// The entry that `to`'s parent path must name.
+        to_parent: EntryId,
     },
     SetAttr {
         space: String,

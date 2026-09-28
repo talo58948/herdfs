@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use herdfs_core::SpacePath;
 use herdfs_core::proto::EntryId;
 
-use super::{Space, handles::Handle};
+use super::{Space, State, handles::Handle};
 use crate::lock;
 use crate::strategy::{OpenContext, Strategy, Upgrade};
 use crate::version::OpenVersion;
@@ -18,6 +18,19 @@ const REOPENED_WITHIN: Duration = Duration::from_secs(300);
 const OPENS: u64 = 4096;
 
 impl Space {
+    /// Changes the version an inode follows, then moves its Pin handles to that version.
+    pub(crate) fn switch_version<T>(
+        &self,
+        entry: EntryId,
+        change: impl FnOnce(&mut State) -> Option<(T, bool)>,
+    ) -> Option<T> {
+        let (changed, switched) = self.inodes.with(entry, change).flatten()?;
+        if switched {
+            self.follow_pins(entry);
+        }
+        Some(changed)
+    }
+
     /// Decides the access strategy for this open of `file` (P1), and begins it.
     pub(super) fn start(
         &self,
@@ -84,7 +97,7 @@ impl Space {
     }
 
     /// Moves Pin handles to the version their inode now follows.
-    pub(super) fn follow_pins(&self, entry: EntryId) {
+    fn follow_pins(&self, entry: EntryId) {
         let handles = lock(&self.handles);
         let Some(file) = self.inodes.with(entry, |state| state.followed()).flatten() else {
             return;

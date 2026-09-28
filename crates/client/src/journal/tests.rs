@@ -5,8 +5,10 @@ use herdfs_core::{ChunkId, ChunkRef};
 use super::commit::Outcome;
 use super::*;
 use crate::cache::Cache;
-use crate::fs::Kernel;
+use crate::fs::{Kernel, Space};
 use crate::remote::Remote;
+use crate::stats::Stats;
+use crate::strategy::{Decider, Strategy};
 use herdfs_core::proto::VersionId;
 
 mod commits;
@@ -46,13 +48,30 @@ impl Mount {
         fs::write(&token, "t").unwrap();
         let remote = Remote::new("http://127.0.0.1:9", "test", token, &[]).unwrap();
         let cache = Cache::open(other.path().join("cache"), 1 << 20).unwrap();
+        let (remote, cache, stats, kernel) = (
+            Arc::new(remote),
+            Arc::new(cache),
+            Arc::new(Stats::default()),
+            Arc::new(Kernel::new(EntryId(1))),
+        );
+        let space = Space::new(
+            remote.clone(),
+            cache.clone(),
+            journal.clone(),
+            stats.clone(),
+            Decider::Fixed(Strategy::Stream),
+            kernel.clone(),
+            inodes.clone(),
+        )
+        .unwrap();
         let committer = Committer {
+            space: Arc::new(space),
             journal: journal.clone(),
             inodes: inodes.clone(),
-            remote: Arc::new(remote),
-            cache: Arc::new(cache),
-            stats: Arc::default(),
-            kernel: Arc::new(Kernel::new(EntryId(1))),
+            remote,
+            cache,
+            stats,
+            kernel,
         };
         let mount = Self {
             journal,

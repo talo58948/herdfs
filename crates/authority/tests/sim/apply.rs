@@ -124,13 +124,19 @@ impl Model {
                 self.commits.retain(|_, (entry, ..)| !entries.contains(entry));
             }
             Request::Grant { .. } => panic!("Grant answered {reply:?}"),
-            Request::Create { space, path, mode } => {
+            Request::Create {
+                space, path, mode, ..
+            } => {
                 self.add(space, path, reply, node(Kind::File, *mode, None, now_ms));
             }
-            Request::Mkdir { space, path, mode } => {
+            Request::Mkdir {
+                space, path, mode, ..
+            } => {
                 self.add(space, path, reply, node(Kind::Dir, *mode, None, now_ms));
             }
-            Request::Symlink { space, path, target } => {
+            Request::Symlink {
+                space, path, target, ..
+            } => {
                 self.add(
                     space,
                     path,
@@ -138,7 +144,7 @@ impl Model {
                     node(Kind::Symlink, 0o777, Some(target), now_ms),
                 );
             }
-            Request::Remove { space, path } => {
+            Request::Remove { space, path, .. } => {
                 // The answer is the entry as it was, so a client drops exactly its state.
                 assert_eq!(
                     *reply,
@@ -149,7 +155,7 @@ impl Model {
                 self.remove(space, path);
                 self.touch_parent(space, path, now_ms);
             }
-            Request::Rename { space, from, to } => {
+            Request::Rename { space, from, to, .. } => {
                 assert_eq!(*reply, Response::Done);
                 self.rename(space, from, to, now_ms);
             }

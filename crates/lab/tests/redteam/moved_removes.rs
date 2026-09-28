@@ -5,7 +5,7 @@ use std::fs;
 
 use anyhow::{Result, ensure};
 use herdfs_core::SpacePath;
-use herdfs_core::proto::Request;
+use herdfs_core::proto::{Request, Response};
 use herdfs_lab::{ADMIN, SPACE};
 
 use crate::{VISIBLE_AFTER, save, two_clients};
@@ -23,15 +23,28 @@ fn moved_entry_after_a_remove(remove: bool) -> Result<Option<Vec<u8>>> {
     save(&on_a, b"saved")?;
     fs::write(&on_a, b"rewritten")?;
     let (p, q) = (SpacePath::try_from("p")?, SpacePath::try_from("q")?);
+    let Response::Entry { entry: root } = lab.rpc(
+        ADMIN,
+        &Request::Stat {
+            space: SPACE.into(),
+            path: SpacePath::root(),
+        },
+    )?
+    else {
+        anyhow::bail!("Stat answered something else")
+    };
     let moved = Request::Rename {
         space: SPACE.into(),
         from: p.clone(),
+        from_parent: root.id,
         to: q,
+        to_parent: root.id,
     };
     lab.rpc(ADMIN, &moved)?;
     let created = Request::Create {
         space: SPACE.into(),
         path: p,
+        parent: root.id,
         mode: 0o644,
     };
     lab.rpc(ADMIN, &created)?;

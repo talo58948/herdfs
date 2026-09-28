@@ -63,12 +63,17 @@ fn an_upload_committed_within_the_grace_survives_collection() -> Result<()> {
     };
     let bytes = random_bytes(SECRET_LEN);
     let entry = create(&lab, ALICE, SPACE, "slow.bin")?;
-    let started = Instant::now();
-    let chunks = upload(&lab, ALICE, SPACE, &bytes)?;
-    let commit_at = started + QUICK.grace - 2 * QUICK.every;
-    thread::sleep(commit_at.saturating_duration_since(Instant::now()));
+    // A saturated scheduler may miss the setup window; only exercise the contract once it did not.
+    let chunks = loop {
+        let started = Instant::now();
+        let chunks = upload(&lab, ALICE, SPACE, &bytes)?;
+        let commit_at = started + QUICK.grace - 2 * QUICK.every;
+        thread::sleep(commit_at.saturating_duration_since(Instant::now()));
+        if started.elapsed() < QUICK.grace {
+            break chunks;
+        }
+    };
     let version = commit(&lab, ALICE, SPACE, entry, chunks)??;
-    assert!(started.elapsed() < QUICK.grace, "the commit came after the grace");
     assert!(read_version(&lab, ALICE, SPACE, &version)? == bytes);
     thread::sleep(ERASED_WITHIN);
     assert!(read_version(&lab, ALICE, SPACE, &version)? == bytes);

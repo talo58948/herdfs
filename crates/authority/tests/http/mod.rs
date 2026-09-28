@@ -244,6 +244,13 @@ impl Lab {
         (reply.status(), reply.json().await.unwrap())
     }
 
+    pub async fn create_space(&self, token: &str, space: &str) -> Value {
+        let request = json!({"op": "create_space", "space": space});
+        let (status, reply) = self.rpc(token, &request).await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        reply["entry"]["id"].clone()
+    }
+
     pub async fn upload(&self, token: &str, space: &str, id: ChunkId, body: Vec<u8>) -> (StatusCode, Value) {
         // One commit per upload, so each upload ages on its own.
         let url = format!("{}/v1/spaces/{space}/commits/{id}/chunks/{id}", self.url);

@@ -14,7 +14,7 @@ use herdfs_core::{ChunkId, chunk};
 use tokio::sync::mpsc;
 
 use super::{Journal, REJECTED, Record, write_record};
-use crate::fs::{Inodes, Kernel};
+use crate::fs::{Inodes, Kernel, Space};
 use crate::stats::{Stats, bump};
 use crate::{Error, Result, cache::Cache, remote::Remote};
 
@@ -39,6 +39,7 @@ pub enum Outcome {
 
 /// What the commit tasks share.
 pub struct Committer {
+    pub space: Arc<Space>,
     pub journal: Arc<Journal>,
     pub inodes: Arc<Inodes>,
     pub remote: Arc<Remote>,
@@ -203,7 +204,7 @@ impl Committer {
     /// with attributes from before the commit (C1).
     pub(super) fn finish(&self, job: &Job, outcome: Outcome) {
         let (entry, seal) = (job.record.entry, job.record.seal);
-        let settled = self.inodes.with(entry, |state| {
+        let settled = self.space.switch_version(entry, |state| {
             let local = state.local.as_mut()?;
             local.reading = None;
             let settled = !matches!(outcome, Outcome::Retrying);
@@ -231,13 +232,11 @@ impl Committer {
             if settled || !latest {
                 let _ = fs::remove_file(&job.sealed);
             }
-            if settled {
-                state.settle(version.as_ref(), job.record.mtime_ms);
-            }
-            Some(())
+            let switched = settled && state.settle(version.as_ref(), job.record.mtime_ms);
+            Some(((), switched))
         });
         // This client removed the entry meanwhile, and its local state with it (C10).
-        if settled.flatten().is_none() {
+        if settled.is_none() {
             let _ = fs::remove_file(&job.sealed);
         }
     }

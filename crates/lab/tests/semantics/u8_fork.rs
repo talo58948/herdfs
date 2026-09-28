@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use std::{panic, thread};
 
 use anyhow::{Context, Result, bail};
-use herdfs_core::proto::{ErrorCode, Request, Response};
+use herdfs_core::proto::{EntryId, ErrorCode, Request, Response};
 use herdfs_lab::{ADMIN, Lab, LabConfig, Profile, SPACE, Strategy};
 
 use crate::support::{self, VISIBLE_AFTER, counter, errno, noise, path, save};
@@ -48,13 +48,27 @@ fn a_fork_takes_linear_time_and_leaves_its_parent_alone() -> Result<()> {
     };
     let big = noise(BIG_LEN);
     save(&lab.mount_path("a").join(BIG), &big)?;
+    let root = entry_at(&lab, "")?;
+    let mut dirs = Vec::with_capacity(DIRS);
     for dir in 0..DIRS {
         let (space, path, mode) = (SPACE.into(), path(&format!("d{dir:02}"))?, 0o755);
-        lab.rpc(ADMIN, &Request::Mkdir { space, path, mode })?;
+        let Response::Entry { entry } = lab.rpc(
+            ADMIN,
+            &Request::Mkdir {
+                space,
+                path,
+                parent: root,
+                mode,
+            },
+        )?
+        else {
+            bail!("Mkdir answered something else")
+        };
+        dirs.push(entry.id);
     }
-    fill(&lab, DIRS..SMALL)?;
+    fill(&lab, &dirs, DIRS..SMALL)?;
     let small = fork_per_entry(&lab, SMALL)?;
-    fill(&lab, SMALL..LARGE)?;
+    fill(&lab, &dirs, SMALL..LARGE)?;
     let large = fork_per_entry(&lab, LARGE)?;
     assert!(large <= BOUND_PER_ENTRY.as_secs_f64(), "{large} s per entry");
     assert!(large <= small * LINEAR_SLACK, "{small} then {large} s per entry");
@@ -88,14 +102,14 @@ fn a_fork_takes_linear_time_and_leaves_its_parent_alone() -> Result<()> {
 
 /// Adds files numbered `files` to the lab's space, spread over its directories, each with one
 /// empty version.
-fn fill(lab: &Lab, files: Range<usize>) -> Result<()> {
+fn fill(lab: &Lab, dirs: &[EntryId], files: Range<usize>) -> Result<()> {
     let files: Vec<usize> = files.collect();
     // One token for all, as a client holds one, saves signing a token per call.
     let token = &lab.token(ADMIN, &[]);
     thread::scope(|scope| {
         let fillers: Vec<_> = files
             .chunks(files.len().div_ceil(FILLERS))
-            .map(|share| scope.spawn(move || share.iter().try_for_each(|&n| add_file(lab, token, n))))
+            .map(|share| scope.spawn(move || share.iter().try_for_each(|&n| add_file(lab, token, dirs, n))))
             .collect();
         fillers
             .into_iter()
@@ -103,10 +117,11 @@ fn fill(lab: &Lab, files: Range<usize>) -> Result<()> {
     })
 }
 
-fn add_file(lab: &Lab, token: &str, n: usize) -> Result<()> {
+fn add_file(lab: &Lab, token: &str, dirs: &[EntryId], n: usize) -> Result<()> {
     let create = Request::Create {
         space: SPACE.into(),
         path: path(&format!("d{:02}/f{n}", n % DIRS))?,
+        parent: dirs[n % DIRS],
         mode: 0o644,
     };
     let Response::Entry { entry } = lab.rpc_with(token, &create)? else {
@@ -123,6 +138,17 @@ fn add_file(lab: &Lab, token: &str, n: usize) -> Result<()> {
     };
     lab.rpc_with(token, &commit)?;
     Ok(())
+}
+
+fn entry_at(lab: &Lab, at: &str) -> Result<EntryId> {
+    let stat = Request::Stat {
+        space: SPACE.into(),
+        path: path(at)?,
+    };
+    match lab.rpc(ADMIN, &stat)? {
+        Response::Entry { entry } => Ok(entry.id),
+        other => bail!("Stat answered {other:?}"),
+    }
 }
 
 fn fork_name(entries: usize, attempt: usize) -> String {
