@@ -20,11 +20,13 @@ mod offline_writes;
 mod open_handles;
 mod paths;
 mod recovery;
+mod replayed_commits;
 mod saved_mtime;
 mod scratch_files;
 mod shared_builds;
 mod slow_links;
 mod times;
+mod unusable_versions;
 mod versions;
 
 use std::fs::File;
