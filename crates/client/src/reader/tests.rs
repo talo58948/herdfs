@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use futures::FutureExt;
 
-use herdfs_core::{ChunkRef, proto::EntryId};
+use herdfs_core::ChunkRef;
+use herdfs_core::proto::{EntryId, Version};
 
 use super::*;
 

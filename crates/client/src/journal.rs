@@ -5,20 +5,19 @@
 //! changes again, so a commit always holds one whole write (C3); later writes start a new
 //! working copy.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use herdfs_core::proto::{EntryId, Version};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, mpsc, watch};
 
-use crate::lock;
+use crate::fs::Inodes;
 
 mod commit;
 mod working;
@@ -46,17 +45,16 @@ pub struct Record {
 
 pub struct Journal {
     dir: PathBuf,
-    entries: Mutex<HashMap<EntryId, Tracked>>,
+    /// Where each entry's local state lives, in its inode (fs/inode.rs).
+    inodes: Arc<Inodes>,
     wake: mpsc::UnboundedSender<EntryId>,
-    /// Counts settled commits, so cached remote state from before one can be told apart.
-    settled: AtomicU64,
     /// Wakes committers waiting out a quiet period when an fsync wants its commit now.
     urged: Notify,
 }
 
-/// An entry that has open handles or journal copies.
+/// This client's changes to one entry, held in its inode while it has some or a handle is open.
 #[derive(Default)]
-struct Tracked {
+pub struct Local {
     handles: usize,
     /// What handles write to, from the first write after a seal to the next seal.
     working: Option<Arc<File>>,
@@ -79,27 +77,31 @@ struct Tracked {
     refused: u64,
 }
 
-/// Keeps an entry's journal copies alive while one of its handles is open.
-pub struct Registration(Arc<Journal>, EntryId);
+impl Local {
+    /// The journal copy while it holds changes: the working copy, else the sealed one a pending
+    /// commit reads. Every read on this client sees it (C1).
+    pub fn copy(&self) -> Option<Arc<File>> {
+        let sealed = self.pending.as_ref().map(|(_, sealed)| sealed);
+        self.working.as_ref().or(sealed).cloned()
+    }
 
-impl Drop for Registration {
-    fn drop(&mut self) {
-        self.0.closed(self.1);
+    fn idle(&self) -> bool {
+        self.handles == 0 && self.pending.is_none() && !self.committing
     }
 }
 
 impl Journal {
     /// Opens the journal in `dir` and queues the sealed write each record names (C4a). Other
     /// copies were never closed, so nothing was promised for them.
-    pub fn open(dir: PathBuf) -> io::Result<(Self, mpsc::UnboundedReceiver<EntryId>)> {
+    pub fn open(dir: PathBuf, inodes: Arc<Inodes>) -> io::Result<(Self, mpsc::UnboundedReceiver<EntryId>)> {
         fs::create_dir_all(dir.join(REJECTED))?;
         let (wake, woken) = mpsc::unbounded_channel();
+        let urged = Notify::new();
         let journal = Self {
             dir,
-            entries: Mutex::default(),
+            inodes,
             wake,
-            settled: AtomicU64::default(),
-            urged: Notify::new(),
+            urged,
         };
         let paths = fs::read_dir(&journal.dir)?.map(|item| Ok(item?.path()));
         let paths: Vec<PathBuf> = paths.collect::<io::Result<_>>()?;
@@ -125,108 +127,112 @@ impl Journal {
             }
             file => Arc::new(file?),
         };
-        let mut entries = lock(&self.entries);
-        let tracked = entries.entry(record.entry).or_default();
-        (tracked.base, tracked.seals) = (record.base.clone(), record.seal);
-        self.queue(tracked, record, file);
+        self.local(record.entry, true, |local| {
+            (local.base, local.seals) = (record.base.clone(), record.seal);
+            self.queue(local, record, file);
+        });
         Ok(vec![path.to_owned(), sealed])
+    }
+
+    /// Runs `change` on the entry's local state, made first with `make`, under its inode's lock
+    /// alone; then forgets that state, with its working copy, once no handle holds it and nothing
+    /// is left to commit. `None` if the entry has none.
+    fn local<T>(&self, entry: EntryId, make: bool, change: impl FnOnce(&mut Local) -> T) -> Option<T> {
+        self.inodes
+            .local(entry, make, |state| {
+                let local = state.local.as_mut()?;
+                let changed = change(local);
+                if local.idle() {
+                    let _ = fs::remove_file(self.working_path(entry));
+                    state.local = None;
+                }
+                Some(changed)
+            })
+            .flatten()
+    }
+
+    pub fn inodes(&self) -> Arc<Inodes> {
+        self.inodes.clone()
     }
 
     /// The entry's latest seal, and the latest one whose commit the authority refused, or 0.
     pub fn seals(&self, entry: EntryId) -> (u64, u64) {
-        let entries = lock(&self.entries);
-        entries
-            .get(&entry)
-            .map_or((0, 0), |tracked| (tracked.seals, tracked.refused))
+        let seals = self.local(entry, false, |local| (local.seals, local.refused));
+        seals.unwrap_or((0, 0))
     }
 
     /// Whether a handle has the entry open.
     pub fn is_open(&self, entry: &EntryId) -> bool {
-        lock(&self.entries)
-            .get(entry)
-            .is_some_and(|tracked| tracked.handles > 0)
+        self.local(*entry, false, |local| local.handles > 0) == Some(true)
     }
 
-    pub fn opened(self: &Arc<Self>, entry: EntryId) -> Registration {
-        lock(&self.entries).entry(entry).or_default().handles += 1;
-        Registration(self.clone(), entry)
+    /// Counts a handle opened on the entry, which keeps its local state until `closed`.
+    pub fn opened(&self, entry: EntryId) {
+        self.local(entry, true, |local| local.handles += 1);
     }
 
-    fn closed(&self, entry: EntryId) {
-        let mut entries = lock(&self.entries);
-        if let Some(tracked) = entries.get_mut(&entry) {
-            tracked.handles -= 1;
-        }
-        self.tidy(&mut entries, entry);
+    pub fn closed(&self, entry: EntryId) {
+        self.local(entry, false, |local| {
+            local.handles = local.handles.saturating_sub(1);
+        });
     }
 
-    /// The entry's journal copy while it holds changes: the working copy, else the sealed one
-    /// a pending commit reads. Every read on this client sees it (C1).
+    /// The entry's journal copy while it holds changes (C1).
     pub fn changes(&self, entry: EntryId) -> Option<Arc<File>> {
-        let entries = lock(&self.entries);
-        let tracked = entries.get(&entry)?;
-        let sealed = tracked.pending.as_ref().map(|(_, sealed)| sealed);
-        tracked.working.as_ref().or(sealed).cloned()
-    }
-
-    pub fn settled(&self) -> u64 {
-        self.settled.load(Relaxed)
-    }
-
-    /// The entry's journal copy as `changes` gives it, unless a commit has settled since the
-    /// count `settled` without leaving one: remote state from then may predate that commit (C1).
-    pub fn changes_as_of(&self, entry: EntryId, settled: u64) -> Option<Option<Arc<File>>> {
-        let local = self.changes(entry);
-        // A settle drops the copy and counts itself in one critical section.
-        (local.is_some() || self.settled() == settled).then_some(local)
+        self.local(entry, false, |local| local.copy()).flatten()
     }
 
     /// Makes the working copy durable, renames it to the next sealed file, and records that
     /// for the committer (C3, C4a).
     pub fn seal(&self, entry: EntryId) -> io::Result<()> {
-        let working = lock(&self.entries).get(&entry).and_then(|t| t.working.clone());
+        let working = self.local(entry, false, |local| local.working.clone()).flatten();
         let Some(working) = working else {
             return Ok(());
         };
         // The bulk of the flush, outside the lock; the second sync below only catches writes
         // that land before the rename.
         working.sync_all()?;
-        let mut entries = lock(&self.entries);
-        let sealing =
-            |tracked: &&mut Tracked| tracked.working.as_ref().is_some_and(|w| Arc::ptr_eq(w, &working));
-        // Otherwise another handle sealed this copy meanwhile, and every write made to it.
-        let Some(tracked) = entries.get_mut(&entry).filter(sealing) else {
-            return Ok(());
-        };
-        let seal = tracked.seals + 1;
+        let sealed = self.local(entry, false, |local| {
+            // Otherwise another handle sealed this copy meanwhile, and every write made to it.
+            let sealing = local
+                .working
+                .as_ref()
+                .is_some_and(|copy| Arc::ptr_eq(copy, &working));
+            sealing.then(|| self.sealed(entry, local, working))
+        });
+        sealed.flatten().unwrap_or(Ok(()))
+    }
+
+    fn sealed(&self, entry: EntryId, local: &mut Local, working: Arc<File>) -> io::Result<()> {
+        let seal = local.seals + 1;
         fs::rename(self.working_path(entry), self.sealed_path(entry, seal))?;
         working.sync_all()?;
-        let older = tracked.pending.as_ref().map(|(record, _)| record.seal);
-        (tracked.seals, tracked.working) = (seal, None);
+        let older = local.pending.as_ref().map(|(record, _)| record.seal);
+        (local.seals, local.working) = (seal, None);
         let now = Instant::now();
-        let due = *tracked.due.get_or_insert(now + LONGEST_QUIET);
-        tracked.quiet_until = Some((now + QUIET).min(due));
+        let due = *local.due.get_or_insert(now + LONGEST_QUIET);
+        local.quiet_until = Some((now + QUIET).min(due));
         let record = Record {
             entry,
             seal,
-            base: tracked.base.clone(),
+            base: local.base.clone(),
             mtime_ms: working.metadata()?.modified().ok().map(crate::unix_ms),
             request_id: format!("{:032x}", rand::random::<u128>()),
         };
-        self.queue(tracked, record.clone(), working);
+        self.queue(local, record.clone(), working);
         // Persisted before the older sealed file goes, so a crash leaves one a record names.
         write_record(&self.record_path(entry), &record)?;
-        if let Some(older) = older.filter(|older| tracked.reading != Some(*older)) {
+        if let Some(older) = older.filter(|older| local.reading != Some(*older)) {
             let _ = fs::remove_file(self.sealed_path(entry, older));
         }
         Ok(())
     }
 
     /// Makes `record` the pending write, in place of any older one, and wakes the committer.
-    fn queue(&self, tracked: &mut Tracked, record: Record, sealed: Arc<File>) {
+    fn queue(&self, local: &mut Local, record: Record, sealed: Arc<File>) {
         let entry = record.entry;
-        tracked.pending = Some((record, sealed));
-        if !std::mem::replace(&mut tracked.committing, true) {
+        local.pending = Some((record, sealed));
+        if !std::mem::replace(&mut local.committing, true) {
             // Fails only once the committer has stopped, at shutdown.
             let _ = self.wake.send(entry);
         }
@@ -235,30 +241,18 @@ impl Journal {
     /// Drops the entry's changes, which removing it made moot: deletion wins (C10). An fsync
     /// waiting for them returns, as it would for a removed local file.
     pub fn discard(&self, entry: EntryId) {
-        let mut entries = lock(&self.entries);
-        let Some(tracked) = entries.get_mut(&entry) else {
-            return;
-        };
-        if let Some((record, _)) = tracked.pending.take() {
-            let _ = fs::remove_file(self.record_path(entry));
-            // A commit under way still reads it; settling it removes it.
-            if tracked.reading != Some(record.seal) {
-                let _ = fs::remove_file(self.sealed_path(entry, record.seal));
+        self.local(entry, false, |local| {
+            if let Some((record, _)) = local.pending.take() {
+                let _ = fs::remove_file(self.record_path(entry));
+                // A commit under way still reads it; settling it removes it.
+                if local.reading != Some(record.seal) {
+                    let _ = fs::remove_file(self.sealed_path(entry, record.seal));
+                }
+                local.attempts.send_replace((record.seal, true));
             }
-            tracked.attempts.send_replace((record.seal, true));
-        }
-        tracked.working = None;
-        let _ = fs::remove_file(self.working_path(entry));
-        self.tidy(&mut entries, entry);
-    }
-
-    /// Forgets an entry nobody has open once nothing is left to commit, with its working copy.
-    fn tidy(&self, entries: &mut HashMap<EntryId, Tracked>, entry: EntryId) {
-        let idle = |t: &Tracked| t.handles == 0 && t.pending.is_none() && !t.committing;
-        if entries.get(&entry).is_some_and(idle) {
+            local.working = None;
             let _ = fs::remove_file(self.working_path(entry));
-            entries.remove(&entry);
-        }
+        });
     }
 
     fn working_path(&self, entry: EntryId) -> PathBuf {

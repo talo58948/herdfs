@@ -62,11 +62,6 @@ impl<K: Clone + Eq + Hash, V: Clone> Lru<K, V> {
         self.entries.contains_key(key)
     }
 
-    pub fn purge(&mut self, stale: impl Fn(&K) -> bool) {
-        let keys: Vec<K> = self.entries.keys().filter(|key| stale(key)).cloned().collect();
-        keys.iter().for_each(|key| self.remove(key));
-    }
-
     /// Drops the least recently used entries, except those `keep` names, until the total fits
     /// `capacity`. Returns the dropped keys.
     pub fn evict(&mut self, capacity: u64, keep: impl Fn(&K) -> bool) -> Vec<K> {

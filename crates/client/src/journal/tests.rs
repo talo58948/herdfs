@@ -4,7 +4,8 @@ use herdfs_core::{ChunkId, ChunkRef};
 
 use super::commit::Outcome;
 use super::*;
-use herdfs_core::proto::{self, VersionId};
+use herdfs_core::SpacePath;
+use herdfs_core::proto::{self, Entry, Kind, VersionId};
 
 const ENTRY: EntryId = EntryId(7);
 
@@ -25,15 +26,15 @@ fn base() -> Version {
 
 /// A journal with `bytes` written to a sealed copy of `ENTRY`, whose handle is closed.
 fn sealed(dir: &Path, bytes: &[u8]) -> (Arc<Journal>, mpsc::UnboundedReceiver<EntryId>) {
-    let (journal, woken) = Journal::open(dir.into()).unwrap();
+    let (journal, woken) = Journal::open(dir.into(), Arc::default()).unwrap();
     let journal = Arc::new(journal);
-    let registration = journal.opened(ENTRY);
+    journal.opened(ENTRY);
     journal
         .install(ENTRY, journal.scratch(ENTRY).unwrap(), Some(&base()))
         .unwrap();
     journal.write(ENTRY, 0, bytes).unwrap();
     journal.seal(ENTRY).unwrap();
-    drop(registration);
+    journal.closed(ENTRY);
     (journal, woken)
 }
 
@@ -53,12 +54,12 @@ fn a_sealed_write_is_recovered_after_a_restart_and_an_unclosed_one_dropped() {
     assert_eq!(woken.try_recv().unwrap(), ENTRY);
     let before = journal.next(ENTRY).unwrap().record;
     assert_eq!(before.base, Some(base()));
-    let _writer = journal.opened(ENTRY);
+    journal.opened(ENTRY);
     journal.attach(ENTRY, true).unwrap();
     journal.write(ENTRY, 0, b"never closed").unwrap();
     drop(journal);
 
-    let (journal, mut woken) = Journal::open(dir.path().into()).unwrap();
+    let (journal, mut woken) = Journal::open(dir.path().into(), Arc::default()).unwrap();
     assert_eq!(woken.try_recv().unwrap(), ENTRY);
     let job = journal.next(ENTRY).unwrap();
     assert_eq!(job.record, before);
@@ -73,13 +74,13 @@ fn a_sealed_copy_never_changes_under_the_committer() {
     let dir = tempfile::tempdir().unwrap();
     let (journal, _woken) = sealed(dir.path(), b"first");
     let first = journal.next(ENTRY).unwrap();
-    let writer = journal.opened(ENTRY);
+    journal.opened(ENTRY);
     journal.write(ENTRY, 5, b" and more").unwrap();
     assert_eq!(read(&journal), b"first and more");
     journal.attach(ENTRY, true).unwrap();
     journal.write(ENTRY, 0, b"second").unwrap();
     journal.seal(ENTRY).unwrap();
-    drop(writer);
+    journal.closed(ENTRY);
     assert_eq!(fs::read(&first.sealed).unwrap(), b"first");
 
     journal.finish(&first, Outcome::Committed(base()));
@@ -94,7 +95,7 @@ fn a_sealed_copy_never_changes_under_the_committer() {
 fn changes_shadow_reads_until_committed_then_the_commit_does() {
     let dir = tempfile::tempdir().unwrap();
     let (journal, _woken) = sealed(dir.path(), b"new");
-    let reader = journal.opened(ENTRY);
+    journal.opened(ENTRY);
     assert_eq!(journal.pending_count(), 1);
 
     let job = journal.next(ENTRY).unwrap();
@@ -110,7 +111,7 @@ fn changes_shadow_reads_until_committed_then_the_commit_does() {
         "nothing left to shadow the authority"
     );
     assert!(journal.next(ENTRY).is_none());
-    drop(reader);
+    journal.closed(ENTRY);
     assert_eq!(journal.pending_count(), 0);
     assert_eq!(
         fs::read_dir(dir.path()).unwrap().count(),
@@ -142,20 +143,20 @@ fn a_rejected_write_is_set_aside_with_its_bytes() {
 #[test]
 fn a_set_mtime_rides_the_next_commit_unless_one_is_under_way() {
     let dir = tempfile::tempdir().unwrap();
-    let (journal, _woken) = Journal::open(dir.path().into()).unwrap();
+    let (journal, _woken) = Journal::open(dir.path().into(), Arc::default()).unwrap();
     let journal = Arc::new(journal);
     assert!(
         !journal.set_mtime(ENTRY, 1).unwrap(),
         "no copy: set at the authority"
     );
-    let writer = journal.opened(ENTRY);
+    journal.opened(ENTRY);
     journal
         .install(ENTRY, journal.scratch(ENTRY).unwrap(), None)
         .unwrap();
     journal.write(ENTRY, 0, b"copied").unwrap();
     assert!(journal.set_mtime(ENTRY, 2).unwrap());
     journal.seal(ENTRY).unwrap();
-    drop(writer);
+    journal.closed(ENTRY);
     assert!(
         journal.set_mtime(ENTRY, 3).unwrap(),
         "pending: the record takes it"
@@ -176,7 +177,7 @@ fn a_record_whose_commit_settled_before_a_crash_is_dropped_at_recovery() {
     let job = journal.next(ENTRY).unwrap();
     drop(journal);
     fs::remove_file(&job.sealed).unwrap();
-    let (journal, _woken) = Journal::open(dir.path().into()).unwrap();
+    let (journal, _woken) = Journal::open(dir.path().into(), Arc::default()).unwrap();
     assert!(journal.next(ENTRY).is_none());
     assert!(!dir.path().join("7.json").exists());
 }
@@ -186,7 +187,7 @@ fn a_record_whose_commit_settled_before_a_crash_is_dropped_at_recovery() {
 fn a_file_closed_again_and_again_commits_within_a_second_of_its_first_close() {
     let dir = tempfile::tempdir().unwrap();
     let (journal, _woken) = sealed(dir.path(), b"first");
-    let _writer = journal.opened(ENTRY);
+    journal.opened(ENTRY);
     std::thread::sleep(Duration::from_millis(900));
     journal.write(ENTRY, 0, b"again").unwrap();
     journal.seal(ENTRY).unwrap();
@@ -226,17 +227,36 @@ fn a_commit_keeps_the_time_of_the_last_write() {
 fn remote_state_from_before_a_settled_commit_is_never_paired_with_the_journal_after_it() {
     let dir = tempfile::tempdir().unwrap();
     let (journal, _woken) = sealed(dir.path(), b"appended");
-    let before = journal.settled();
+    let inodes = journal.inodes();
+    let entry = Entry {
+        id: ENTRY,
+        path: SpacePath::try_from("f").unwrap(),
+        kind: Kind::File,
+        mode: 0o644,
+        mtime_ms: 0,
+        head: Some(VersionId(3)),
+        size: 3,
+        target: None,
+    };
+    let before = Instant::now();
+    inodes.observe(&entry, before, false);
+    let view = || inodes.with(ENTRY, |state| state.view()).flatten().unwrap();
     let job = journal.next(ENTRY).unwrap();
-    let local = journal.changes_as_of(ENTRY, before).unwrap();
-    assert!(local.is_some(), "while the commit runs, its copy shows");
-    journal.finish(&job, Outcome::Committed(base()));
-    assert!(
-        journal.changes_as_of(ENTRY, before).is_none(),
+    assert!(view().1.is_some(), "while the commit runs, its copy shows");
+    let committed = Version {
+        id: VersionId(4),
+        size: 8,
+        ..base()
+    };
+    journal.finish(&job, Outcome::Committed(committed));
+    inodes.observe(&entry, before, false);
+    let (settled, local) = view();
+    assert_eq!(
+        (settled.head, settled.size),
+        (Some(VersionId(4)), 8),
         "state asked for before the settle is stale once its copy is gone"
     );
-    let after = journal.changes_as_of(ENTRY, journal.settled());
-    assert!(after.is_some_and(|local| local.is_none()));
+    assert!(local.is_none());
 }
 
 /// Sends `record` through a fake authority that refuses its first `conflicts` commits with

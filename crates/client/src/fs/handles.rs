@@ -12,7 +12,7 @@ use herdfs_core::proto::{EntryId, ErrorCode};
 use super::{PERMISSIONS, Space};
 use tempfile::NamedTempFile;
 
-use crate::journal::{Journal, Registration};
+use crate::journal::Journal;
 use crate::{Error, Result, lock, reader::Head};
 
 pub struct Handle {
@@ -26,11 +26,13 @@ pub struct Handle {
     synced: AtomicU64,
     /// Chunks this handle pinned, which release unpins.
     pub pinned: Mutex<Vec<ChunkId>>,
-    _registration: Registration,
+    /// Keeps the entry's local state while the handle is open.
+    journal: Arc<Journal>,
 }
 
 impl Handle {
     fn new(entry: EntryId, writable: bool, journal: &Arc<Journal>) -> Self {
+        journal.opened(entry);
         Self {
             entry,
             writable,
@@ -38,8 +40,14 @@ impl Handle {
             truncated: AtomicBool::new(false),
             synced: AtomicU64::new(journal.seals(entry).0),
             pinned: Mutex::default(),
-            _registration: journal.opened(entry),
+            journal: journal.clone(),
         }
+    }
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        self.journal.closed(self.entry);
     }
 }
 
@@ -89,10 +97,10 @@ impl Space {
             }
             created => created?,
         };
-        self.reader
-            .follow(entry.id, (None, true), |entry| self.journal.is_open(entry));
+        let attr = self.added(&entry);
+        self.inodes.switch(entry.id, (None, true));
         let fh = self.register(Handle::new(entry.id, true, &self.journal));
-        Ok((self.added(&entry), fh))
+        Ok((attr, fh))
     }
 
     pub async fn read(self: Arc<Self>, fh: u64, off: u64, len: u32) -> Result<Vec<u8>> {
@@ -170,7 +178,8 @@ impl Space {
         let handle = fh.map(|fh| self.handle(fh)).transpose()?;
         let handle = handle.filter(|handle| handle.writable);
         let entry = self.entry_id(ino);
-        let _registration = self.journal.opened(entry);
+        // A short open, which keeps the journal copy while it changes.
+        let _short = Handle::new(entry, true, &self.journal);
         if handle.is_none() {
             self.head(entry, &self.located(ino).await?, true, size == 0)
                 .await?;
@@ -192,7 +201,7 @@ impl Space {
         }
         // A truncating write needs no old bytes, only the base its commit names.
         let (scratch, base) = match truncate {
-            true => (self.journal.scratch(entry)?, self.reader.current(entry).flatten()),
+            true => (self.journal.scratch(entry)?, self.inodes.followed(entry)),
             false => self.usable(entry, |base| self.copy_of(entry, base)).await?,
         };
         self.journal
