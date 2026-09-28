@@ -31,15 +31,28 @@ fn bob_cannot_commit_alices_chunks_without_uploading_them() -> Result<()> {
     };
     let mut padded = plan.version.chunks.clone();
     padded.push(secret.version.chunks[0]);
+    // A base bob cannot use (alice's, on another entry) answers as a missing base does (S8).
     let claims = [
-        commit(claim.id, None, secret.version.chunks.clone()),
-        commit(claim.id, Some(secret.version.id), secret.version.chunks.clone()),
-        commit(plan.version.entry, Some(plan.version.id), padded),
+        (
+            commit(claim.id, None, secret.version.chunks.clone()),
+            StatusCode::BAD_REQUEST,
+            "invalid",
+        ),
+        (
+            commit(claim.id, Some(secret.version.id), secret.version.chunks.clone()),
+            StatusCode::CONFLICT,
+            "conflict",
+        ),
+        (
+            commit(plan.version.entry, Some(plan.version.id), padded),
+            StatusCode::BAD_REQUEST,
+            "invalid",
+        ),
     ];
-    for request in &claims {
+    for (request, status, code) in &claims {
         let reply = scene.attacker.call(request)?;
-        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{request:?}");
-        assert_eq!(reply.json()?["code"], "invalid");
+        assert_eq!(reply.status, *status, "{request:?}");
+        assert_eq!(reply.json()?["code"], *code);
     }
     // The refusal reads the same whether or not the chunk is stored anywhere.
     let stored = secret.version.chunks[0];
