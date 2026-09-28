@@ -6,10 +6,12 @@ use std::sync::{Arc, Mutex};
 use std::{ffi::OsString, fs::File, io, os::unix::fs::FileExt};
 
 use fuser::{Errno, FileAttr, INodeNo, OpenAccMode, OpenFlags};
-use herdfs_core::proto::{Entry, EntryId, ErrorCode};
-use herdfs_core::{ChunkId, SpacePath};
+use herdfs_core::ChunkId;
+use herdfs_core::proto::{EntryId, ErrorCode};
 
-use super::{Asked, PERMISSIONS, Space};
+use super::{PERMISSIONS, Space};
+use tempfile::NamedTempFile;
+
 use crate::{Error, Result, journal::Registration, lock, reader::Head};
 
 pub struct Handle {
@@ -94,7 +96,12 @@ impl Space {
         if let Some(copy) = self.journal.changes(handle.entry) {
             return Ok(read_copy(&copy, off, len)?);
         }
-        match self.current(handle.entry).await? {
+        self.usable(handle.entry, |file| self.read_version(file, off, len))
+            .await
+    }
+
+    async fn read_version(&self, file: Head, off: u64, len: u32) -> Result<Vec<u8>> {
+        match file {
             Some(file) => self.reader.read(&file, off, len.into()).await,
             None => Ok(Vec::new()),
         }
@@ -172,14 +179,10 @@ impl Space {
             return Ok(());
         }
         // A truncating write needs no old bytes, only the base its commit names.
-        let base = match truncate {
-            true => self.reader.current(entry).flatten(),
-            false => self.current(entry).await?,
+        let (scratch, base) = match truncate {
+            true => (self.journal.scratch(entry)?, self.reader.current(entry).flatten()),
+            false => self.usable(entry, |base| self.copy_of(entry, base)).await?,
         };
-        let mut scratch = self.journal.scratch(entry)?;
-        if let Some(base) = base.as_ref().filter(|_| !truncate) {
-            self.reader.materialize(base, scratch.as_file_mut()).await?;
-        }
         self.journal
             .install(entry, scratch, base.as_ref().map(|base| &base.version))?;
         // Another open may have installed its copy first; truncate that one instead.
@@ -187,58 +190,13 @@ impl Space {
         Ok(())
     }
 
-    /// The version the entry's handles read: the one this client follows, else its head now.
-    async fn current(&self, entry: EntryId) -> Result<Head> {
-        if let Some(file) = self.reader.current(entry) {
-            return Ok(file);
+    /// A scratch copy of `base`, to become the entry's working copy.
+    async fn copy_of(&self, entry: EntryId, base: Head) -> Result<(NamedTempFile, Head)> {
+        let mut scratch = self.journal.scratch(entry)?;
+        if let Some(base) = &base {
+            self.reader.materialize(base, scratch.as_file_mut()).await?;
         }
-        let path = self.located(self.ino(entry)).await?;
-        self.head(entry, &path, false, false).await
-    }
-
-    /// Remembers an entry the authority returned, and switches an inode that open files read to
-    /// a newer head it names, so every handle reads it from its next read (C3).
-    pub(super) async fn follow(&self, entry: &Entry, asked: Asked) {
-        self.remember(entry, asked);
-        let current = self.reader.current(entry.id);
-        let current = current.map(|file| file.map(|file| file.version.id));
-        let (open, changed) = (self.journal.is_open(&entry.id), current != Some(entry.head));
-        if open && changed && self.journal.changes(entry.id).is_none() {
-            let _ = self.head(entry.id, &entry.path, false, false).await;
-        }
-    }
-
-    /// The entry's current head, which its open files then follow. Every open asks, for
-    /// close-to-open consistency (C2), and one for writing needs write access. Offline, the
-    /// head followed, with the access it came with, lets writes and cached reads go on, and a
-    /// truncating write needs none, since its unguarded commit is right on an unknown base too
-    /// (C5, C12).
-    async fn head(&self, entry: EntryId, path: &SpacePath, write: bool, truncate: bool) -> Result<Head> {
-        let asked = self.asked();
-        let (found, head, writable) = match self.remote.open(path.clone()).await {
-            Err(err) if err.is_offline() => {
-                return match self.reader.known(entry) {
-                    Some((_, false)) if write => Err(Errno::EACCES.into()),
-                    Some((file, _)) => Ok(file),
-                    None if truncate => Ok(None),
-                    None => Err(err),
-                };
-            }
-            opened => opened.map_err(|err| self.gone(path, err))?,
-        };
-        self.remember(&found, asked);
-        // The name now holds another entry, which the kernel looks up again (C7).
-        if found.id != entry {
-            return Err(Errno::ESTALE.into());
-        }
-        let open = |entry: &EntryId| self.journal.is_open(entry);
-        if self.reader.follow(entry, (head, writable), open) {
-            self.invalidate(entry).await;
-        }
-        if write && !writable {
-            return Err(Errno::EACCES.into());
-        }
-        Ok(self.reader.current(entry).flatten())
+        Ok((scratch, base))
     }
 
     /// Persists the handle's writes, if any since the last seal, for the committer. A truncation

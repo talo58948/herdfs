@@ -17,7 +17,8 @@ use crate::{Average, Error, Result, cache::Cache, lock, lru::Lru, remote::Remote
 
 /// Concurrent downloads per request, which is also the prefetch batch size.
 const DOWNLOADS: usize = 8;
-/// A cached grant this close to expiry is renewed rather than reused.
+/// A cached grant this close to expiry is renewed rather than reused; a shorter grant TTL
+/// halves it.
 const GRANT_MARGIN: Duration = Duration::from_secs(10);
 /// Verified chunks kept in memory, so the FUSE reads within one chunk do not each re-read
 /// and re-hash it from disk.
@@ -38,7 +39,7 @@ pub struct Reader {
     cache: Arc<Cache>,
     stats: Arc<Stats>,
     memory: Mutex<Lru<ChunkId, Arc<Vec<u8>>>>,
-    /// Presigned URLs by version and chunk index, with their expiry, reused until then.
+    /// Presigned URLs by version and chunk index, with when to renew them, reused until then.
     grants: Mutex<HashMap<(VersionId, usize), (String, Instant)>>,
     /// A lock per chunk being fetched, so concurrent reads download it once.
     fetching: Mutex<HashMap<ChunkId, Arc<FetchLock<()>>>>,
@@ -71,6 +72,11 @@ impl Reader {
 
     pub fn current(&self, entry: EntryId) -> Option<Head> {
         self.known(entry).map(|(file, _)| file)
+    }
+
+    /// Forgets the version the entry's open files read, which this client may no longer use.
+    pub fn forget(&self, entry: EntryId) {
+        lock(&self.heads).remove(&entry);
     }
 
     /// Makes `head` the version the entry's open files read, unless a newer one is known, and
@@ -250,8 +256,8 @@ impl Reader {
         let version = file.version.id;
         let usable = |index: &usize| {
             let grants = lock(&self.grants);
-            let (url, expires) = grants.get(&(version, *index))?;
-            (*expires > Instant::now() + GRANT_MARGIN).then(|| url.clone())
+            let (url, renew) = grants.get(&(version, *index))?;
+            (*renew > Instant::now()).then(|| url.clone())
         };
         let wanted = indices.iter().filter(|i| usable(i).is_none());
         let wanted: Vec<u32> = wanted.map(|&i| i as u32).collect();
@@ -261,9 +267,10 @@ impl Reader {
             let (urls, ttl) = grant.await?;
             bump(&self.stats.grants, 1);
             let mut grants = lock(&self.grants);
-            grants.retain(|_, (_, expires)| *expires > Instant::now());
+            grants.retain(|_, (_, renew)| *renew > Instant::now());
+            let renew = asked + ttl - GRANT_MARGIN.min(ttl / 2);
             let granted = wanted.into_iter().zip(urls);
-            grants.extend(granted.map(|(index, url)| ((version, index as usize), (url, asked + ttl))));
+            grants.extend(granted.map(|(index, url)| ((version, index as usize), (url, renew))));
         }
         let missing = || Error::Protocol("grant lacks usable URLs".into());
         indices.iter().map(|i| usable(i).ok_or_else(missing)).collect()
