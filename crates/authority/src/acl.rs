@@ -16,6 +16,13 @@ fn perm_name(perm: Perm) -> &'static str {
     }
 }
 
+/// One ACL row of the caller.
+struct Grant {
+    path: SpacePath,
+    perm: Perm,
+    granted_ms: i64,
+}
+
 /// Names only the perm: the path of a request by id may be hidden from the caller.
 fn denied(need: Perm) -> Fail {
     refuse(ErrorCode::Denied, format!("denied: needs {}", perm_name(need)))
@@ -36,26 +43,40 @@ impl Call<'_> {
     pub(crate) fn may(&self, space: &str, path: &SpacePath, need: Perm) -> Result<bool> {
         let grants = self.grants(space)?.into_iter();
         let best = grants
-            .filter(|(granted, _)| path.is_within(granted))
-            .map(|(_, perm)| perm)
+            .filter(|grant| path.is_within(&grant.path))
+            .map(|grant| grant.perm)
             .max();
         Ok(best >= Some(need))
+    }
+
+    /// When the caller could first read `path` under its current rows, so
+    /// it sees no history from before (S8). Admins of the root see it all.
+    pub(crate) fn readable_since(&self, space: &str, path: &SpacePath) -> Result<i64> {
+        let grants = self.grants(space)?;
+        if grants
+            .iter()
+            .any(|grant| grant.path.is_root() && grant.perm == Perm::Admin)
+        {
+            return Ok(i64::MIN);
+        }
+        let applying = grants.iter().filter(|grant| path.is_within(&grant.path));
+        Ok(applying.map(|grant| grant.granted_ms).min().unwrap_or(i64::MAX))
     }
 
     /// Fails unless the caller holds `need` on some path of the space.
     pub(crate) fn require_somewhere(&self, space: &str, need: Perm) -> Result<()> {
         self.require_space(space)?;
-        if !self.grants(space)?.iter().any(|(_, perm)| *perm >= need) {
+        if !self.grants(space)?.iter().any(|grant| grant.perm >= need) {
             return Err(denied(need));
         }
         Ok(())
     }
 
     /// The caller's ACL rows in `space`, from its user and its groups.
-    fn grants(&self, space: &str) -> Result<Vec<(SpacePath, Perm)>> {
+    fn grants(&self, space: &str) -> Result<Vec<Grant>> {
         let mut query = self
             .db
-            .prepare_cached("SELECT path, perm FROM acl WHERE space = ?1 AND principal = ?2")?;
+            .prepare_cached("SELECT path, perm, granted_ms FROM acl WHERE space = ?1 AND principal = ?2")?;
         let mut grants = Vec::new();
         for principal in self.principals() {
             let rows = query.query_map(params![space, principal], |row| {
@@ -65,7 +86,11 @@ impl Call<'_> {
                         .into_iter()
                         .find(|perm| perm_name(*perm) == text)
                 })?;
-                Ok((granted, perm))
+                Ok(Grant {
+                    path: granted,
+                    perm,
+                    granted_ms: row.get(2)?,
+                })
             })?;
             grants.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
         }
@@ -87,12 +112,20 @@ impl Call<'_> {
             return Err(refuse(ErrorCode::Invalid, format!("bad principal {principal:?}")));
         }
         match perm {
+            // A changed perm keeps the row's grant time, which S8 counts from.
             Some(perm) => self
                 .db
                 .prepare_cached(
-                    "INSERT OR REPLACE INTO acl (space, path, principal, perm) VALUES (?1, ?2, ?3, ?4)",
+                    "INSERT INTO acl (space, path, principal, perm, granted_ms) VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT (space, principal, path) DO UPDATE SET perm = excluded.perm",
                 )?
-                .execute(params![space, path.as_str(), principal, perm_name(perm)])?,
+                .execute(params![
+                    space,
+                    path.as_str(),
+                    principal,
+                    perm_name(perm),
+                    self.now_ms
+                ])?,
             None => self
                 .db
                 .prepare_cached("DELETE FROM acl WHERE space = ?1 AND path = ?2 AND principal = ?3")?
@@ -104,8 +137,10 @@ impl Call<'_> {
     /// Makes the caller admin of the root of `space`.
     pub(crate) fn make_admin(&self, space: &str) -> Result<()> {
         self.db
-            .prepare_cached("INSERT INTO acl (space, path, principal, perm) VALUES (?1, '', ?2, ?3)")?
-            .execute(params![space, self.who.user, perm_name(Perm::Admin)])?;
+            .prepare_cached(
+                "INSERT INTO acl (space, path, principal, perm, granted_ms) VALUES (?1, '', ?2, ?3, ?4)",
+            )?
+            .execute(params![space, self.who.user, perm_name(Perm::Admin), self.now_ms])?;
         Ok(())
     }
 

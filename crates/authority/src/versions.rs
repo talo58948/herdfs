@@ -51,6 +51,7 @@ impl Call<'_> {
                 format!("no version {} of entry {}", version.0, entry.id.0),
             )
         })?;
+        self.require_visible(space, &entry, &version)?;
         let chunks = indices
             .iter()
             .map(|&index| {
@@ -93,13 +94,8 @@ impl Call<'_> {
                 format!("entry {} is not a file", entry.id.0),
             ));
         }
-        let base_chunks: HashSet<_> = match base {
-            Some(base) => {
-                let version = self.version_of(&entry, base)?;
-                let version = version
-                    .ok_or_else(|| refuse(ErrorCode::Invalid, "base is not a version of this entry"))?;
-                version.chunks.iter().map(|chunk| (chunk.id, chunk.len)).collect()
-            }
+        let base_chunks = match base {
+            Some(base) => self.base_chunks(&entry, base)?,
             None => HashSet::new(),
         };
         let distinct: HashSet<_> = chunks.iter().map(|chunk| (chunk.id, chunk.len)).collect();
@@ -125,9 +121,21 @@ impl Call<'_> {
     pub(crate) fn history(&self, space: &str, path: &SpacePath) -> Result<Response> {
         self.require(space, path, Perm::Read)?;
         let entry = self.entry(space, path)?;
-        Ok(Response::History {
-            versions: self.versions(entry.id)?,
-        })
+        let since = self.readable_since(space, path)?;
+        let mut versions = self.versions(entry.id)?;
+        versions.retain(|version| entry.head == Some(version.id) || version.created_ms >= since);
+        Ok(Response::History { versions })
+    }
+
+    /// Deletes every version of the entry but its head; the next collection
+    /// erases the bytes only they referenced.
+    pub(crate) fn purge(&self, space: &str, path: &SpacePath) -> Result<Response> {
+        self.require(space, path, Perm::Write)?;
+        let entry = self.entry(space, path)?;
+        self.db
+            .prepare_cached("DELETE FROM versions WHERE entry = ?1 AND id IS NOT ?2")?
+            .execute(params![entry.id.0, entry.head.map(|head| head.0)])?;
+        Ok(Response::Done)
     }
 
     pub(crate) fn restore(&self, space: &str, path: &SpacePath, version: VersionId) -> Result<Response> {
@@ -136,6 +144,7 @@ impl Call<'_> {
         let old = self
             .version_of(&entry, version)?
             .ok_or_else(|| refuse(ErrorCode::NotFound, format!("no version {} of {path}", version.0)))?;
+        self.require_visible(space, &entry, &old)?;
         Ok(Response::Version {
             version: self.add_version(&entry, &old.chunks, self.now_ms)?,
         })
@@ -145,9 +154,41 @@ impl Call<'_> {
     pub(crate) fn record_upload(&self, space: &str, chunk: ChunkRef) -> Result<()> {
         self.require_somewhere(space, Perm::Write)?;
         self.db
-            .prepare_cached("INSERT OR REPLACE INTO uploads (principal, chunk, len) VALUES (?1, ?2, ?3)")?
-            .execute(params![self.who.user, chunk.id.to_string(), chunk.len])?;
+            .prepare_cached(
+                "INSERT OR REPLACE INTO uploads (principal, chunk, len, at_ms) VALUES (?1, ?2, ?3, ?4)",
+            )?
+            .execute(params![
+                self.who.user,
+                chunk.id.to_string(),
+                chunk.len,
+                self.now_ms
+            ])?;
         Ok(())
+    }
+
+    /// S8: a version older than the caller's access to the entry is hidden,
+    /// except the head. The refusal names no path.
+    fn require_visible(&self, space: &str, entry: &Entry, version: &Version) -> Result<()> {
+        let since = self.readable_since(space, &entry.path)?;
+        if entry.head != Some(version.id) && version.created_ms < since {
+            return Err(refuse(
+                ErrorCode::Denied,
+                "denied: that version predates your access",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The chunks of `base`, which must be a retained version of `entry`.
+    fn base_chunks(&self, entry: &Entry, base: VersionId) -> Result<HashSet<(ChunkId, u32)>> {
+        match self.version(base)? {
+            Some(version) if version.entry == entry.id => {
+                Ok(version.chunks.iter().map(|chunk| (chunk.id, chunk.len)).collect())
+            }
+            Some(_) => Err(refuse(ErrorCode::Invalid, "base is not a version of this entry")),
+            // Retention or a purge removed it: the caller commits again without a base.
+            None => Err(refuse(ErrorCode::Conflict, "base is no longer retained")),
+        }
     }
 
     fn version_of(&self, entry: &Entry, id: VersionId) -> Result<Option<Version>> {

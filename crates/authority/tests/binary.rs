@@ -53,3 +53,31 @@ async fn the_binary_serves_health_with_the_documented_flags() {
     authority.wait().unwrap();
     assert!(healthy, "no health answer on {listen} within 10 s");
 }
+
+#[test]
+fn the_binary_refuses_a_grace_shorter_than_twice_the_grant_ttl() {
+    // contract: S4, S7
+    let dir = tempfile::tempdir().unwrap();
+    let status = Command::new(env!("CARGO_BIN_EXE_herdfs-authority"))
+        .args(["--listen", "127.0.0.1:0", "--db"])
+        .arg(dir.path().join("authority.db"))
+        .args([
+            "--s3-endpoint",
+            "http://127.0.0.1:9",
+            "--s3-public-endpoint",
+            "http://s3.lab:9",
+        ])
+        .args(["--s3-bucket", "herdfs", "--s3-region", "us-east-1"])
+        .args([
+            "--oidc-issuer",
+            "http://127.0.0.1:9",
+            "--oidc-audience",
+            "herdfs",
+        ])
+        .args(["--grant-ttl", "60", "--gc-grace", "119"])
+        .envs([("AWS_ACCESS_KEY_ID", "key"), ("AWS_SECRET_ACCESS_KEY", "secret")])
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!status.success());
+}

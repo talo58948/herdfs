@@ -1,4 +1,4 @@
-//! Spaces: creating, forking, and checking that one exists.
+//! Spaces: creating, forking, deleting, and checking that one exists.
 
 use herdfs_core::{
     SpacePath,
@@ -21,7 +21,8 @@ const FORK: [&str; 4] = [
      WHERE source.space = ?1",
     "UPDATE entries SET head = (SELECT id FROM versions WHERE entry = entries.id)
      WHERE space = ?2",
-    "INSERT INTO acl (space, path, principal, perm) SELECT ?2, path, principal, perm FROM acl WHERE space = ?1",
+    "INSERT INTO acl (space, path, principal, perm, granted_ms)
+     SELECT ?2, path, principal, perm, granted_ms FROM acl WHERE space = ?1",
 ];
 
 /// `[a-z0-9][a-z0-9._-]{0,62}`
@@ -57,6 +58,19 @@ impl Call<'_> {
         Ok(Response::Entry {
             entry: self.entry(name, &SpacePath::root())?,
         })
+    }
+
+    /// Deletes the space's entries, versions, request ids and grants; the next
+    /// collection erases the bytes only they referenced.
+    pub(crate) fn delete_space(&self, space: &str) -> Result<Response> {
+        self.require(space, &SpacePath::root(), Perm::Admin)?;
+        self.db
+            .prepare_cached("DELETE FROM entries WHERE space = ?1")?
+            .execute([space])?;
+        self.db
+            .prepare_cached("DELETE FROM acl WHERE space = ?1")?
+            .execute([space])?;
+        Ok(Response::Done)
     }
 
     pub(crate) fn require_space(&self, space: &str) -> Result<()> {

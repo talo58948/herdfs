@@ -95,14 +95,33 @@ impl Model {
         self.versions.insert(version.id, version);
     }
 
-    pub fn check_grant(&self, request: &Request, signed: &[ChunkId]) {
-        let Request::Grant { version, chunks, .. } = request else {
+    pub fn check_grant(&self, who: &Principal, request: &Request, signed: &[ChunkId]) {
+        let Request::Grant {
+            space,
+            entry,
+            version,
+            chunks,
+        } = request
+        else {
             panic!("{request:?} signed")
         };
+        let (path, node) = self.node_by_id(space, *entry).expect("a granted entry exists");
+        // contract: S8 — a grant never covers a version made before the caller could read the entry.
+        assert!(
+            self.visible(space, path, node, *version, who),
+            "{} saw {version:?} of {path}",
+            who.user
+        );
         let refs = &self.versions[version].chunks;
         let expected: Vec<_> = chunks.iter().map(|&index| refs[index as usize].id).collect();
         // contract: S2 — a grant covers only chunks of that version.
         assert_eq!(signed, expected);
+    }
+
+    /// Whether some entry, in any space, still holds `version`.
+    pub fn retained(&self, version: VersionId) -> bool {
+        let nodes = self.spaces.values().flat_map(|space| space.nodes.values());
+        nodes.into_iter().any(|node| node.history.contains(&version))
     }
 
     #[allow(clippy::too_many_arguments, reason = "mirrors the fields of Request::Commit")]
@@ -126,11 +145,17 @@ impl Model {
         ensure(node.kind == Kind::File, ErrorCode::Invalid)?;
         let base_chunks = match base {
             Some(base) if node.history.contains(&base) => self.versions[&base].chunks.as_slice(),
-            Some(_) => return Err(ErrorCode::Invalid),
+            Some(base) if self.retained(base) => return Err(ErrorCode::Invalid),
+            // Pruned, purged or deleted with its space: the writer commits again without a base.
+            Some(_) => return Err(ErrorCode::Conflict),
             None => &[],
         };
         let known = |chunk: &ChunkRef| {
-            base_chunks.contains(chunk) || self.uploads.get(&(who.user.clone(), chunk.id)) == Some(&chunk.len)
+            let uploaded = self
+                .uploads
+                .get(&(who.user.clone(), chunk.id))
+                .map(|(len, _)| *len);
+            base_chunks.contains(chunk) || uploaded == Some(chunk.len)
         };
         ensure(chunks.iter().all(known), ErrorCode::Invalid)?;
         ensure(

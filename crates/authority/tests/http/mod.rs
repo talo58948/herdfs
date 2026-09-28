@@ -13,7 +13,8 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::Path,
+    body::Bytes,
+    extract::{Path, Query},
     http::StatusCode,
     routing::{get, put},
 };
@@ -38,13 +39,69 @@ pub const NONE_HEADER: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0";
 pub const PUBLIC_S3: &str = "http://s3.lab:9000";
 
 pub struct Lab {
+    pub server: Arc<Server>,
     pub url: String,
     pub issuer: String,
     pub jwks_fetches: Arc<AtomicUsize>,
-    /// Each object key the authority wrote, with how often.
-    pub objects: Arc<Mutex<BTreeMap<String, usize>>>,
+    /// The fake bucket's objects, by key.
+    pub objects: Store,
     pub http: reqwest::Client,
     _dir: TempDir,
+}
+
+/// An object in the fake bucket.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stored {
+    pub writes: usize,
+    pub size: usize,
+    pub modified_ms: i64,
+}
+
+pub type Store = Arc<Mutex<BTreeMap<String, Stored>>>;
+
+/// A bucket that takes PUT and DELETE, and lists with ListObjectsV2 two keys a page.
+fn fake_s3(objects: Store) -> Router {
+    let (puts, deletes) = (Arc::clone(&objects), Arc::clone(&objects));
+    let put_object = move |Path(key): Path<String>, body: Bytes| async move {
+        let mut objects = puts.lock().unwrap();
+        let writes = objects.get(&key).map_or(0, |stored| stored.writes);
+        objects.insert(
+            key,
+            Stored {
+                writes: writes + 1,
+                size: body.len(),
+                modified_ms: now_ms(),
+            },
+        );
+    };
+    let delete_object = move |Path(key): Path<String>| async move {
+        deletes.lock().unwrap().remove(&key);
+    };
+    let list = move |Path(bucket): Path<String>, Query(query): Query<BTreeMap<String, String>>| async move {
+        let bucket = bucket.trim_end_matches('/');
+        let prefix = format!("{bucket}/{}", query.get("prefix").map_or("", String::as_str));
+        let skip: usize = query
+            .get("continuation-token")
+            .map_or(0, |token| token.parse().unwrap());
+        let objects = objects.lock().unwrap();
+        let matching: Vec<_> = objects
+            .iter()
+            .filter(|(key, _)| key.starts_with(&prefix))
+            .collect();
+        let contents: String = matching.iter().skip(skip).take(2).map(|(key, stored)| {
+            let (key, at) = (&key[bucket.len() + 1..], jiff::Timestamp::from_millisecond(stored.modified_ms).unwrap());
+            format!("<Contents><Key>{key}</Key><LastModified>{at}</LastModified><ETag>\"x\"</ETag><Size>{}</Size></Contents>", stored.size)
+        }).collect();
+        let next = if skip + 2 < matching.len() {
+            format!("<NextContinuationToken>{}</NextContinuationToken>", skip + 2)
+        } else {
+            String::new()
+        };
+        format!(
+            r#"<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">{contents}{next}</ListBucketResult>"#
+        )
+    };
+    Router::new().route("/{*key}", put(put_object).delete(delete_object).get(list))
 }
 
 /// Serves the router built for its own base URL.
@@ -83,12 +140,8 @@ impl Lab {
                 .route("/jwks", get(jwks))
         })
         .await;
-        let objects = Arc::new(Mutex::new(BTreeMap::new()));
-        let stored = Arc::clone(&objects);
-        let write = move |Path(key): Path<String>| async move {
-            *stored.lock().unwrap().entry(key).or_insert(0) += 1;
-        };
-        let s3 = serve(|_| Router::new().route("/{*key}", put(write))).await;
+        let objects = Store::default();
+        let s3 = serve(|_| fake_s3(Arc::clone(&objects))).await;
         let dir = tempfile::tempdir().unwrap();
         let authority = Authority::open(&dir.path().join("authority.db")).unwrap();
         let bucket = |url: &str| {
@@ -102,9 +155,12 @@ impl Lab {
             credentials,
             issuer.clone(),
             "herdfs".into(),
+            std::time::Duration::from_secs(60),
         );
+        let server = Arc::new(server);
         let url = serve(|_| server.router()).await;
         Self {
+            server,
             url,
             issuer,
             jwks_fetches,
