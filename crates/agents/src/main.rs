@@ -1,4 +1,7 @@
 //! Runs agent sessions that users request by creating files under `<mount>/.agents/<host>/`.
+//!
+//! A session is a directory there with a `prompt` and optionally a `cwd`. The prompt must be
+//! non-empty: another host's newly created file reads empty until its writer's close commits it.
 
 mod session;
 
@@ -111,7 +114,7 @@ impl Runner {
 
     /// Marks the session running and runs it in the background, holding `slot` until it ends.
     async fn start(&self, dir: PathBuf, slot: OwnedSemaphorePermit) {
-        if let Err(err) = session::set_status(&dir, "running").await {
+        if let Err(err) = session::claim(&dir).await {
             log_error(&dir, &err);
             return;
         }

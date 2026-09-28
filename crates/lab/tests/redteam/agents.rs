@@ -58,7 +58,6 @@ fn ended(session: &Path) -> Result<String> {
 /// missing.
 // contract: none (docs/architecture.md: other hosts see `output` when the session ends)
 #[test]
-#[ignore = "REDTEAM2: a session reads done on other hosts before its output is committed"]
 fn a_done_session_shows_its_whole_output_on_other_hosts() -> Result<()> {
     let Some((mut lab, session)) = requester_and_host(Profile::Wan)? else {
         return Ok(());
@@ -84,7 +83,6 @@ fn a_done_session_shows_its_whole_output_on_other_hosts() -> Result<()> {
 /// the symlink, so c's private file becomes the session's output, which a reads.
 // contract: A1 (a session is its directory in the mount; the runner already refuses a cwd outside it)
 #[test]
-#[ignore = "REDTEAM2: the agents runner follows session symlinks to the host's own files"]
 fn a_session_never_reads_the_hosts_files_outside_the_mount() -> Result<()> {
     let Some((mut lab, session)) = requester_and_host(Profile::Lan)? else {
         return Ok(());
@@ -110,7 +108,6 @@ fn a_session_never_reads_the_hosts_files_outside_the_mount() -> Result<()> {
 /// finished: it runs the session on an empty prompt before a has closed it.
 // contract: A1 (docs/architecture.md: the session holds `prompt`; a file becomes visible to other hosts on close)
 #[test]
-#[ignore = "REDTEAM2: the agents runner starts a session on a prompt still being written"]
 fn a_session_runs_on_the_prompt_its_requester_wrote() -> Result<()> {
     let Some((mut lab, session)) = requester_and_host(Profile::Lan)? else {
         return Ok(());

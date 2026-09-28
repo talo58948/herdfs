@@ -1,11 +1,15 @@
 //! One session directory: its files, and running the agent command for it.
+//!
+//! Session files come from whoever can write the host's directory, so they are opened only as
+//! regular files and never through a symlink, which could point at the runner host's own files.
 
 use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, bail, ensure};
-use tokio::fs;
+use tokio::fs::{self, File, OpenOptions};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 const OUTSIDE_MOUNT: &str = "cwd outside mount";
@@ -36,41 +40,35 @@ impl Agent {
 
     async fn execute(&self, dir: &Path) -> anyhow::Result<()> {
         let cwd = self.cwd(dir).await?;
-        let prompt = fs::File::open(dir.join("prompt")).await.context("prompt")?;
-        let output = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("output"))
-            .await
-            .context("output")?
-            .into_std()
-            .await;
-        let status = Command::new("sh")
+        let prompt = open(&dir.join("prompt"), OpenOptions::new().read(true)).await?;
+        let output = open(&dir.join("output"), OpenOptions::new().create(true).append(true)).await?;
+        let stdout = output.try_clone().await?.into_std().await;
+        let exit = Command::new("sh")
             .arg("-c")
             .arg(&self.command)
             .current_dir(cwd)
             .env("HERDFS_SESSION_DIR", dir)
             .env("HERDFS_MOUNT", &self.mount)
             .stdin(prompt.into_std().await)
-            .stdout(output.try_clone()?)
-            .stderr(output)
+            .stdout(stdout.try_clone()?)
+            .stderr(stdout)
             .status()
             .await
             .context("spawn")?;
-        let Some(code) = status.code() else {
-            bail!("{status}")
-        };
+        // On herdfs, fsync means committed: other hosts must never see the session end
+        // before they can see all of its output.
+        output.sync_all().await.context("sync output")?;
+        let Some(code) = exit.code() else { bail!("{exit}") };
         ensure!(code == 0, "exit {code}");
         Ok(())
     }
 
     /// The directory named by the session's `cwd` file, or the mount root without one.
     async fn cwd(&self, dir: &Path) -> anyhow::Result<PathBuf> {
-        let relative = match fs::read_to_string(dir.join("cwd")).await {
-            Ok(text) => PathBuf::from(text.trim()),
-            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(self.mount.clone()),
-            Err(err) => return Err(err).context("cwd"),
+        let Some(text) = read(&dir.join("cwd")).await? else {
+            return Ok(self.mount.clone());
         };
+        let relative = Path::new(text.trim());
         let plain = relative
             .components()
             .all(|part| matches!(part, Component::Normal(_) | Component::CurDir));
@@ -81,28 +79,90 @@ impl Agent {
     }
 }
 
-/// The prompt's stamp, if the session has a prompt and no status yet.
+/// The prompt's stamp, if the session has a non-empty prompt and no status yet.
 pub(crate) async fn new_prompt(dir: &Path) -> Option<Stamp> {
-    // A status we cannot check counts as present: never starting beats starting twice.
-    if fs::try_exists(dir.join("status")).await.unwrap_or(true) {
+    // A status of any kind, even one we cannot check, counts as present: never starting beats
+    // starting twice.
+    let status = fs::symlink_metadata(dir.join("status")).await;
+    if !matches!(status, Err(err) if err.kind() == ErrorKind::NotFound) {
         return None;
     }
-    let meta = fs::metadata(dir.join("prompt")).await.ok()?;
+    let meta = fs::symlink_metadata(dir.join("prompt")).await.ok()?;
+    // Another host's create shows an empty prompt before the writer's close commits its bytes.
+    if meta.len() == 0 {
+        return None;
+    }
     Some(Stamp {
         len: meta.len(),
         modified: meta.modified().ok()?,
     })
 }
 
-/// Marks the session failed if a previous runner left it `running`.
-pub(crate) async fn recover(dir: &Path) -> io::Result<()> {
-    match fs::read_to_string(dir.join("status")).await {
-        Ok(status) if status.trim() == "running" => set_status(dir, "failed: runner restarted").await,
-        Err(err) if err.kind() != ErrorKind::NotFound => Err(err),
-        _ => Ok(()),
-    }
+/// Marks the session `running`, once its directory proves to be inside the host's.
+pub(crate) async fn claim(dir: &Path) -> io::Result<()> {
+    check_dir(dir).await?;
+    set_status(dir, "running").await
 }
 
-pub(crate) async fn set_status(dir: &Path, status: &str) -> io::Result<()> {
-    fs::write(dir.join("status"), format!("{status}\n")).await
+/// Marks the session failed if a previous runner left it `running`.
+pub(crate) async fn recover(dir: &Path) -> io::Result<()> {
+    check_dir(dir).await?;
+    if read(&dir.join("status"))
+        .await?
+        .is_some_and(|status| status.trim() == "running")
+    {
+        set_status(dir, "failed: runner restarted").await?;
+    }
+    Ok(())
+}
+
+/// Fails if `dir` is reached through a symlink. It is named under the canonical mount, so
+/// resolving to itself keeps it inside `<mount>/.agents/<host>/`.
+async fn check_dir(dir: &Path) -> io::Result<()> {
+    if fs::canonicalize(dir).await? == dir {
+        return Ok(());
+    }
+    Err(io::Error::other("session directory is reached through a symlink"))
+}
+
+async fn set_status(dir: &Path, status: &str) -> io::Result<()> {
+    let mut file = open(
+        &dir.join("status"),
+        OpenOptions::new().write(true).create(true).truncate(true),
+    )
+    .await?;
+    file.write_all(format!("{status}\n").as_bytes()).await?;
+    file.sync_all().await
+}
+
+/// A session file's text, or `None` if it does not exist.
+async fn read(path: &Path) -> io::Result<Option<String>> {
+    let mut file = match open(path, OpenOptions::new().read(true)).await {
+        Ok(file) => file,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let mut text = String::new();
+    file.read_to_string(&mut text).await?;
+    Ok(Some(text))
+}
+
+/// Opens a session file only if it is a regular file, without following a symlink.
+async fn open(path: &Path, options: &mut OpenOptions) -> io::Result<File> {
+    // O_NONBLOCK refuses a FIFO below instead of hanging on it; regular files ignore the flag.
+    let opened = options
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .await;
+    let not_regular = || io::Error::other("not a regular file in the session");
+    let file = match opened {
+        Err(err) if matches!(err.raw_os_error(), Some(libc::ELOOP | libc::EISDIR | libc::ENXIO)) => {
+            return Err(not_regular());
+        }
+        opened => opened?,
+    };
+    if !file.metadata().await?.is_file() {
+        return Err(not_regular());
+    }
+    Ok(file)
 }
