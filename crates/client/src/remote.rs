@@ -3,12 +3,12 @@
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::{fs, time::Duration, time::Instant};
+use std::{fs, io, time::Duration, time::Instant};
 
 use bytes::Bytes;
 use herdfs_core::proto::{Entry, EntryId, Request, Response, Version, VersionId};
 use herdfs_core::{ChunkId, ChunkRef, SpacePath};
-use reqwest::{RequestBuilder, StatusCode};
+use reqwest::{RequestBuilder, StatusCode, header::CONTENT_TYPE};
 
 use crate::{Average, Error, Result, journal::Record, lock};
 
@@ -225,12 +225,16 @@ impl Remote {
     /// Sends the request that `request` builds for this client's space.
     async fn call(&self, request: impl FnOnce(String) -> Request) -> Result<Response> {
         let (url, request) = (format!("{}/v1/rpc", self.authority), request(self.space.clone()));
-        let rpc = |token: &str| self.http.post(&url).bearer_auth(token).json(&request);
-        // A commit runs in the background, and its chunk list may be long.
-        let commit = matches!(request, Request::Commit { .. });
-        let body = commit.then(|| serde_json::to_vec(&request).map_or(0, |body| body.len()));
+        // Serialized once, for every try and for the deadline of a commit, which runs in the
+        // background with a chunk list that may be long.
+        let body = Bytes::from(serde_json::to_vec(&request).map_err(io::Error::from)?);
+        let background = matches!(request, Request::Commit { .. }).then_some(body.len());
+        let rpc = |token: &str| {
+            let json = self.http.post(&url).header(CONTENT_TYPE, "application/json");
+            json.bearer_auth(token).body(body.clone())
+        };
         let started = Instant::now();
-        let response = self.send(rpc, body).await?;
+        let response = self.send(rpc, background).await?;
         self.round_trip.add(started.elapsed().as_secs_f64());
         Ok(response.json().await?)
     }
