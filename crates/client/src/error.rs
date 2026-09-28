@@ -6,6 +6,8 @@ use fuser::Errno;
 use herdfs_core::ChunkId;
 use herdfs_core::proto::{self, ErrorCode};
 
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// The authority understood the request and refused it.

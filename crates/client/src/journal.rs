@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -59,14 +59,13 @@ struct Tracked {
     handles: usize,
     /// What handles write to, from the first write after a seal to the next seal.
     working: Option<Arc<File>>,
-    /// The latest sealed copy, while its commit is pending; reads see it without a working copy.
-    sealed: Option<(u64, Arc<File>)>,
     /// The version the copies started from, then each version they committed.
     base: Option<Version>,
     /// A modification time set since the last seal, for the next one to keep.
     mtime: Option<i64>,
-    /// The latest seal the committer has not settled; newer seals replace it.
-    pending: Option<Record>,
+    /// The latest seal the committer has not settled, which newer seals replace, and its sealed
+    /// copy, which reads see without a working copy.
+    pending: Option<(Record, Arc<File>)>,
     seals: u64,
     committing: bool,
     /// Until when the committer waits for a newer seal before committing the pending one.
@@ -78,14 +77,11 @@ struct Tracked {
 }
 
 /// Keeps an entry's journal copies alive while one of its handles is open.
-pub struct Registration {
-    journal: Arc<Journal>,
-    entry: EntryId,
-}
+pub struct Registration(Arc<Journal>, EntryId);
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        self.journal.closed(self.entry);
+        self.0.closed(self.1);
     }
 }
 
@@ -95,26 +91,22 @@ impl Journal {
     pub fn open(dir: PathBuf) -> io::Result<(Self, mpsc::UnboundedReceiver<EntryId>)> {
         fs::create_dir_all(dir.join(REJECTED))?;
         let (wake, woken) = mpsc::unbounded_channel();
-        let (entries, settled, urged) = (Mutex::default(), AtomicU64::default(), Notify::new());
         let journal = Self {
             dir,
-            entries,
+            entries: Mutex::default(),
             wake,
-            settled,
-            urged,
+            settled: AtomicU64::default(),
+            urged: Notify::new(),
         };
         let paths = fs::read_dir(&journal.dir)?.map(|item| Ok(item?.path()));
         let paths: Vec<PathBuf> = paths.collect::<io::Result<_>>()?;
-        let records = paths
-            .iter()
-            .filter(|path| path.extension() == Some(OsStr::new("json")));
-        let kept = records
-            .map(|path| journal.recover(path))
-            .collect::<io::Result<Vec<_>>>()?;
-        let kept: HashSet<&PathBuf> = kept.iter().flatten().collect();
-        for path in paths.iter().filter(|path| path.is_file() && !kept.contains(path)) {
-            fs::remove_file(path)?;
+        let is_record = |path: &&PathBuf| path.extension() == Some(OsStr::new("json"));
+        let mut kept = HashSet::new();
+        for record in paths.iter().filter(is_record) {
+            kept.extend(journal.recover(record)?);
         }
+        let stray = |path: &&PathBuf| path.is_file() && !kept.contains(*path);
+        paths.iter().filter(stray).try_for_each(fs::remove_file)?;
         Ok((journal, woken))
     }
 
@@ -125,16 +117,14 @@ impl Journal {
         let file = Arc::new(File::open(&sealed)?);
         let mut entries = lock(&self.entries);
         let tracked = entries.entry(record.entry).or_default();
-        tracked.base = record.base.clone();
-        (tracked.seals, tracked.sealed) = (record.seal, Some((record.seal, file)));
-        self.queue(tracked, record);
+        (tracked.base, tracked.seals) = (record.base.clone(), record.seal);
+        self.queue(tracked, record, file);
         Ok([path.to_owned(), sealed])
     }
 
     pub fn opened(self: &Arc<Self>, entry: EntryId) -> Registration {
         lock(&self.entries).entry(entry).or_default().handles += 1;
-        let journal = self.clone();
-        Registration { journal, entry }
+        Registration(self.clone(), entry)
     }
 
     fn closed(&self, entry: EntryId) {
@@ -150,10 +140,8 @@ impl Journal {
     pub fn changes(&self, entry: EntryId) -> Option<Arc<File>> {
         let entries = lock(&self.entries);
         let tracked = entries.get(&entry)?;
-        tracked
-            .working
-            .clone()
-            .or_else(|| Some(tracked.sealed.as_ref()?.1.clone()))
+        let sealed = tracked.pending.as_ref().map(|(_, sealed)| sealed);
+        tracked.working.as_ref().or(sealed).cloned()
     }
 
     pub fn settled(&self) -> u64 {
@@ -163,9 +151,7 @@ impl Journal {
     /// Makes the working copy durable, renames it to the next sealed file, and records that
     /// for the committer (C3, C4a).
     pub fn seal(&self, entry: EntryId) -> io::Result<()> {
-        let working = lock(&self.entries)
-            .get(&entry)
-            .and_then(|tracked| tracked.working.clone());
+        let working = lock(&self.entries).get(&entry).and_then(|t| t.working.clone());
         let Some(working) = working else {
             return Ok(());
         };
@@ -182,19 +168,17 @@ impl Journal {
         let seal = tracked.seals + 1;
         fs::rename(self.working_path(entry), self.sealed_path(entry, seal))?;
         working.sync_all()?;
-        let older = tracked.sealed.replace((seal, working)).map(|(older, _)| older);
+        let older = tracked.pending.as_ref().map(|(record, _)| record.seal);
         (tracked.seals, tracked.working) = (seal, None);
         tracked.quiet_until = Some(Instant::now() + QUIET);
-        let request_id = format!("{:032x}", rand::random::<u128>());
-        let (base, mtime_ms) = (tracked.base.clone(), tracked.mtime.take());
         let record = Record {
             entry,
             seal,
-            base,
-            mtime_ms,
-            request_id,
+            base: tracked.base.clone(),
+            mtime_ms: tracked.mtime.take(),
+            request_id: format!("{:032x}", rand::random::<u128>()),
         };
-        self.queue(tracked, record.clone());
+        self.queue(tracked, record.clone(), working);
         // Persisted before the older sealed file goes, so a crash leaves one a record names.
         write_record(&self.record_path(entry), &record)?;
         if let Some(older) = older.filter(|older| tracked.reading != Some(*older)) {
@@ -204,26 +188,22 @@ impl Journal {
     }
 
     /// Makes `record` the pending write, in place of any older one, and wakes the committer.
-    fn queue(&self, tracked: &mut Tracked, record: Record) {
+    fn queue(&self, tracked: &mut Tracked, record: Record, sealed: Arc<File>) {
         let entry = record.entry;
-        tracked.pending = Some(record);
+        tracked.pending = Some((record, sealed));
         if !std::mem::replace(&mut tracked.committing, true) {
             // Fails only once the committer has stopped, at shutdown.
             let _ = self.wake.send(entry);
         }
     }
 
-    /// Forgets an entry nobody has open once nothing is left to commit, with its copies.
+    /// Forgets an entry nobody has open once nothing is left to commit, with its working copy.
     fn tidy(&self, entries: &mut HashMap<EntryId, Tracked>, entry: EntryId) {
         let idle = |t: &Tracked| t.handles == 0 && t.pending.is_none() && !t.committing;
-        let Some(tracked) = entries.get(&entry).filter(|tracked| idle(tracked)) else {
-            return;
-        };
-        if let Some((seal, _)) = tracked.sealed {
-            let _ = fs::remove_file(self.sealed_path(entry, seal));
+        if entries.get(&entry).is_some_and(idle) {
+            let _ = fs::remove_file(self.working_path(entry));
+            entries.remove(&entry);
         }
-        let _ = fs::remove_file(self.working_path(entry));
-        entries.remove(&entry);
     }
 
     fn working_path(&self, entry: EntryId) -> PathBuf {
@@ -237,10 +217,6 @@ impl Journal {
     fn record_path(&self, entry: EntryId) -> PathBuf {
         self.dir.join(format!("{}.json", entry.0))
     }
-}
-
-fn open_copy(path: &Path) -> io::Result<File> {
-    OpenOptions::new().read(true).write(true).open(path)
 }
 
 fn write_record(path: &Path, record: &Record) -> io::Result<()> {

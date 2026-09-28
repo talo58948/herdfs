@@ -1,33 +1,36 @@
-//! Where each chunk of a version lies in the file.
+//! A version opened for reading, and where each of its chunks lies in the file.
 
 use std::ops::Range;
 
-use herdfs_core::ChunkRef;
+use herdfs_core::{ChunkId, proto::Version};
 
-/// The cumulative end offset of each chunk, searched by bisection.
-pub struct ChunkMap {
+pub struct OpenVersion {
+    pub version: Version,
+    /// The cumulative end offset of each chunk, searched by bisection.
     ends: Vec<u64>,
 }
 
-impl ChunkMap {
-    pub fn new(chunks: &[ChunkRef]) -> Self {
-        let ends = chunks
+impl OpenVersion {
+    pub fn new(version: Version) -> Self {
+        let ends = version
+            .chunks
             .iter()
             .scan(0, |end, chunk| {
                 *end += u64::from(chunk.len);
                 Some(*end)
             })
             .collect();
-        Self { ends }
+        Self { version, ends }
     }
 
-    pub fn size(&self) -> u64 {
-        self.ends.last().copied().unwrap_or(0)
+    pub fn id(&self, index: usize) -> ChunkId {
+        self.version.chunks[index].id
     }
 
     /// Indices of the chunks that overlap `[off, off + len)`.
     pub fn overlapping(&self, off: u64, len: u64) -> Range<usize> {
-        let end = off.saturating_add(len).min(self.size());
+        let size = self.ends.last().copied().unwrap_or(0);
+        let end = off.saturating_add(len).min(size);
         if off >= end {
             return 0..0;
         }
@@ -47,11 +50,12 @@ impl ChunkMap {
 
 #[cfg(test)]
 mod tests {
-    use herdfs_core::ChunkId;
+    use herdfs_core::ChunkRef;
+    use herdfs_core::proto::{EntryId, VersionId};
 
     use super::*;
 
-    fn map(lens: &[u32]) -> ChunkMap {
+    fn open(lens: &[u32]) -> OpenVersion {
         let chunks: Vec<_> = lens
             .iter()
             .map(|&len| ChunkRef {
@@ -59,13 +63,20 @@ mod tests {
                 len,
             })
             .collect();
-        ChunkMap::new(&chunks)
+        OpenVersion::new(Version {
+            id: VersionId(1),
+            entry: EntryId(1),
+            size: lens.iter().map(|&len| u64::from(len)).sum(),
+            author: "user:test".into(),
+            created_ms: 0,
+            chunks,
+        })
     }
 
     // contract: C9
     #[test]
     fn overlapping_is_exactly_the_touched_chunks() {
-        let map = map(&[10, 10, 10]);
+        let map = open(&[10, 10, 10]);
         assert_eq!(map.overlapping(0, 10), 0..1);
         assert_eq!(map.overlapping(5, 10), 0..2);
         assert_eq!(map.overlapping(10, 10), 1..2);
@@ -73,13 +84,13 @@ mod tests {
         assert_eq!(map.overlapping(25, 100), 2..3);
         assert_eq!(map.overlapping(30, 1), 0..0);
         assert_eq!(map.overlapping(3, 0), 0..0);
-        assert_eq!(ChunkMap::new(&[]).overlapping(0, 1), 0..0);
+        assert_eq!(open(&[]).overlapping(0, 1), 0..0);
     }
 
     // contract: C9
     #[test]
     fn within_gives_offsets_inside_each_chunk() {
-        let map = map(&[10, 20, 5]);
+        let map = open(&[10, 20, 5]);
         assert_eq!(map.within(0, 4, 100), 4..10);
         assert_eq!(map.within(1, 4, 100), 0..20);
         assert_eq!(map.within(1, 12, 3), 2..5);

@@ -14,10 +14,9 @@ pub struct Lru<K, V> {
 
 impl<K, V> Default for Lru<K, V> {
     fn default() -> Self {
-        let (entries, by_use) = (HashMap::new(), BTreeMap::new());
         Self {
-            entries,
-            by_use,
+            entries: HashMap::new(),
+            by_use: BTreeMap::new(),
             total: 0,
             clock: 1 << 63,
         }
@@ -63,7 +62,6 @@ impl<K: Clone + Eq + Hash, V: Clone> Lru<K, V> {
         self.entries.contains_key(key)
     }
 
-    /// Drops the entries `stale` names.
     pub fn purge(&mut self, stale: impl Fn(&K) -> bool) {
         let keys: Vec<K> = self.entries.keys().filter(|key| stale(key)).cloned().collect();
         keys.iter().for_each(|key| self.remove(key));

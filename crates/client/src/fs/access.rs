@@ -8,8 +8,8 @@ use herdfs_core::proto::EntryId;
 
 use super::{RECENT, Space, handles::Handle};
 use crate::lock;
-use crate::reader::OpenVersion;
 use crate::strategy::{OpenContext, Strategy, Upgrade};
+use crate::version::OpenVersion;
 
 /// Opens of a file by one program count as repeated while each comes this soon after the last.
 const REOPENED_WITHIN: Duration = Duration::from_secs(300);

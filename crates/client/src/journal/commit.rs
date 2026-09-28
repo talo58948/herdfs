@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, watch};
 
 use super::{Journal, REJECTED, Record, write_record};
 use crate::stats::{Stats, bump};
-use crate::{cache::Cache, error::Error, lock, reader::Reader, remote::Remote};
+use crate::{Result, cache::Cache, lock, reader::Reader, remote::Remote};
 
 const FIRST_RETRY: Duration = Duration::from_secs(1);
 const LAST_RETRY: Duration = Duration::from_secs(30);
@@ -92,27 +92,20 @@ impl Committer {
             let Some(quiet) = self.journal.quiet(entry) else {
                 return self.journal.next(entry);
             };
-            tokio::select! {
-                () = tokio::time::sleep(quiet) => {}
-                () = urged => {}
-            }
+            let _ = tokio::time::timeout(quiet, urged).await;
         }
     }
 
     /// Chunks the sealed copy, caching each chunk and uploading those its base lacks without
     /// asking whether the store already has them (S6), and commits.
-    async fn attempt(&self, job: &Job) -> Result<Version, Error> {
+    async fn attempt(&self, job: &Job) -> Result<Version> {
         let base = job.record.base.iter().flat_map(|base| &base.chunks);
         let base: HashSet<ChunkId> = base.map(|chunk| chunk.id).collect();
         let sealed = File::open(&job.sealed)?;
         let (sender, mut chunks) = mpsc::channel(2);
         // Chunking reads and hashes the whole file, so it stays off the async workers.
         let splitter = tokio::task::spawn_blocking(move || {
-            for chunk in chunk::split(sealed) {
-                if sender.blocking_send(chunk).is_err() {
-                    break;
-                }
-            }
+            let _ = chunk::split(sealed).try_for_each(|chunk| sender.blocking_send(chunk));
         });
         let (mut refs, mut uploaded) = (Vec::new(), HashSet::new());
         while let Some(chunk) = chunks.recv().await {
@@ -139,7 +132,7 @@ impl Journal {
     pub fn next(&self, entry: EntryId) -> Option<Job> {
         let mut entries = lock(&self.entries);
         let tracked = entries.get_mut(&entry)?;
-        if let Some(record) = &tracked.pending {
+        if let Some((record, _)) = &tracked.pending {
             tracked.reading = Some(record.seal);
             let (record, sealed) = (record.clone(), self.sealed_path(entry, record.seal));
             return Some(Job { record, sealed });
@@ -158,26 +151,21 @@ impl Journal {
             return;
         };
         tracked.reading = None;
-        tracked
-            .attempts
-            .send_replace((seal, matches!(outcome, Outcome::Committed(_))));
-        let settled = match outcome {
-            Outcome::Retrying => false,
-            Outcome::Committed(version) => {
-                tracked.base = Some(version);
-                true
-            }
-            Outcome::Rejected => {
-                self.reject(job);
-                true
-            }
-        };
+        let settled = !matches!(outcome, Outcome::Retrying);
+        let committed = matches!(outcome, Outcome::Committed(_));
+        tracked.attempts.send_replace((seal, committed));
+        match outcome {
+            Outcome::Committed(version) => tracked.base = Some(version),
+            Outcome::Rejected => self.reject(job),
+            Outcome::Retrying => {}
+        }
+        let latest = tracked.pending.as_ref().map(|(record, _)| record.seal) == Some(seal);
         // Settled, or replaced by a newer seal: nothing reads this sealed copy any more.
-        if settled || tracked.sealed.as_ref().is_none_or(|(latest, _)| *latest != seal) {
+        if settled || !latest {
             let _ = fs::remove_file(&job.sealed);
         }
-        if settled && tracked.pending.as_ref().is_some_and(|record| record.seal == seal) {
-            (tracked.pending, tracked.sealed) = (None, None);
+        if settled && latest {
+            tracked.pending = None;
             let _ = fs::remove_file(self.record_path(entry));
         }
         if settled {
@@ -188,10 +176,8 @@ impl Journal {
     /// Moves the record to `rejected/`, with a hard link that keeps its bytes.
     fn reject(&self, job: &Job) {
         let record = &job.record;
-        let kept = self
-            .dir
-            .join(REJECTED)
-            .join(format!("{}-{}", record.entry.0, record.request_id));
+        let name = format!("{}-{}", record.entry.0, record.request_id);
+        let kept = self.dir.join(REJECTED).join(name);
         let result = write_record(&kept.with_extension("json"), record)
             .and_then(|()| fs::hard_link(&job.sealed, kept.with_extension("copy")));
         if let Err(err) = result {
@@ -217,14 +203,11 @@ impl Journal {
     pub fn pending(&self, entry: EntryId) -> Option<(u64, watch::Receiver<(u64, bool)>)> {
         let entries = lock(&self.entries);
         let tracked = entries.get(&entry)?;
-        Some((tracked.pending.as_ref()?.seal, tracked.attempts.subscribe()))
+        Some((tracked.pending.as_ref()?.0.seal, tracked.attempts.subscribe()))
     }
 
     pub fn pending_count(&self) -> usize {
         let entries = lock(&self.entries);
-        entries
-            .values()
-            .filter(|tracked| tracked.pending.is_some())
-            .count()
+        entries.values().filter(|t| t.pending.is_some()).count()
     }
 }

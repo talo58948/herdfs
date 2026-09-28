@@ -1,51 +1,34 @@
 //! How writes reach an entry's working copy, which a seal may have taken since the last one.
 
-use std::fs::{self, File};
+use std::fs::{File, Permissions};
 use std::io;
-use std::os::unix::fs::FileExt;
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use herdfs_core::proto::{EntryId, Version};
+use tempfile::{Builder, NamedTempFile};
 
-use super::{Journal, Tracked, open_copy, write_record};
+use super::{Journal, Tracked, write_record};
 use crate::lock;
 
-/// A file being filled to become a working copy; deleted unless installed.
-pub struct Scratch {
-    path: PathBuf,
-    pub file: File,
-}
-
-impl Scratch {
-    fn rename_to(self, path: &Path) -> io::Result<()> {
-        fs::rename(&self.path, path)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
 impl Journal {
-    pub fn scratch(&self, entry: EntryId) -> io::Result<Scratch> {
-        let path = self
-            .dir
-            .join(format!("{}.{:x}.tmp", entry.0, rand::random::<u64>()));
-        let file = File::create(&path)?;
-        Ok(Scratch { path, file })
+    /// A file to fill as the entry's next working copy, deleted unless installed. Its mode is
+    /// the one `File::create` gives the other journal files.
+    pub fn scratch(&self, entry: EntryId) -> io::Result<NamedTempFile> {
+        Builder::new()
+            .prefix(&format!("{}.", entry.0))
+            .suffix(".tmp")
+            .permissions(Permissions::from_mode(0o666))
+            .tempfile_in(&self.dir)
     }
 
     /// Makes `scratch` the entry's working copy over `base`, unless another open got there first.
-    pub fn install(&self, entry: EntryId, scratch: Scratch, base: Option<&Version>) -> io::Result<()> {
+    pub fn install(&self, entry: EntryId, scratch: NamedTempFile, base: Option<&Version>) -> io::Result<()> {
         let mut entries = lock(&self.entries);
         let tracked = entries.entry(entry).or_default();
-        if tracked.working.is_none() && tracked.sealed.is_none() {
-            scratch.rename_to(&self.working_path(entry))?;
-            tracked.working = Some(Arc::new(open_copy(&self.working_path(entry))?));
+        if tracked.working.is_none() && tracked.pending.is_none() {
+            tracked.working = Some(Arc::new(scratch.persist(self.working_path(entry))?));
             tracked.base = base.cloned();
         }
         Ok(())
@@ -53,13 +36,11 @@ impl Journal {
 
     /// Joins the entry's journal copies for writing, emptying them if asked. False if it has none.
     pub fn attach(&self, entry: EntryId, truncate: bool) -> io::Result<bool> {
-        if self.changes(entry).is_none() {
-            return Ok(false);
-        }
-        if truncate {
+        let attached = self.changes(entry).is_some();
+        if attached && truncate {
             self.set_len(entry, 0)?;
         }
-        Ok(true)
+        Ok(attached)
     }
 
     pub fn write(&self, entry: EntryId, off: u64, data: &[u8]) -> io::Result<()> {
@@ -80,12 +61,10 @@ impl Journal {
     ) -> io::Result<()> {
         loop {
             let mut entries = lock(&self.entries);
-            let tracked = entries
-                .get_mut(&entry)
-                .ok_or_else(|| io::Error::other("no journal copy"))?;
+            let no_copy = || io::Error::other("no journal copy");
+            let tracked = entries.get_mut(&entry).ok_or_else(no_copy)?;
             let Some(working) = &tracked.working else {
-                let seal = tracked.sealed.as_ref().map(|(seal, _)| *seal);
-                let seal = seal.ok_or_else(|| io::Error::other("no journal copy"))?;
+                let seal = tracked.pending.as_ref().ok_or_else(no_copy)?.0.seal;
                 // Opened under the lock, before a commit can delete it.
                 let sealed = (!empty).then(|| File::open(self.sealed_path(entry, seal)));
                 drop(entries);
@@ -111,18 +90,16 @@ impl Journal {
             tracked.mtime = Some(mtime_ms);
             return Ok(true);
         }
-        let Some(record) = tracked
+        let Some((record, sealed)) = tracked
             .pending
             .as_mut()
-            .filter(|record| tracked.reading != Some(record.seal))
+            .filter(|(record, _)| tracked.reading != Some(record.seal))
         else {
             return Ok(false);
         };
         record.mtime_ms = Some(mtime_ms);
         write_record(&self.record_path(entry), record)?;
-        if let Some((_, sealed)) = &tracked.sealed {
-            sealed.set_modified(time)?;
-        }
+        sealed.set_modified(time)?;
         Ok(true)
     }
 
@@ -132,15 +109,15 @@ impl Journal {
     fn restart(&self, entry: EntryId, seal: u64, sealed: Option<File>) -> io::Result<()> {
         let mut scratch = self.scratch(entry)?;
         if let Some(mut sealed) = sealed {
-            io::copy(&mut sealed, &mut scratch.file)?;
+            io::copy(&mut sealed, scratch.as_file_mut())?;
         }
         let mut entries = lock(&self.entries);
         let current = |tracked: &&mut Tracked| {
-            tracked.working.is_none() && tracked.sealed.as_ref().is_none_or(|(latest, _)| *latest == seal)
+            let latest = tracked.pending.as_ref().map(|(record, _)| record.seal);
+            tracked.working.is_none() && latest.is_none_or(|latest| latest == seal)
         };
         if let Some(tracked) = entries.get_mut(&entry).filter(current) {
-            scratch.rename_to(&self.working_path(entry))?;
-            tracked.working = Some(Arc::new(open_copy(&self.working_path(entry))?));
+            tracked.working = Some(Arc::new(scratch.persist(self.working_path(entry))?));
         }
         Ok(())
     }

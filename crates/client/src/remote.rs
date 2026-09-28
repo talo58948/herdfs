@@ -6,11 +6,11 @@ use std::sync::{Arc, Mutex};
 use std::{fs, time::Duration, time::Instant};
 
 use bytes::Bytes;
-use herdfs_core::proto::{self, Entry, EntryId, Request, Response, Version, VersionId};
+use herdfs_core::proto::{Entry, EntryId, Request, Response, Version, VersionId};
 use herdfs_core::{ChunkId, ChunkRef, SpacePath};
 use reqwest::{RequestBuilder, StatusCode};
 
-use crate::{Average, error::Error, journal::Record, link::Link, lock};
+use crate::{Average, Error, Result, journal::Record, lock};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a connection may stay silent before its request fails and can be retried.
@@ -19,6 +19,8 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const RPC_TIMEOUT: Duration = Duration::from_secs(3);
 /// How often the probe looks whether an offline window has ended.
 const PROBE_EVERY: Duration = Duration::from_secs(1);
+const FIRST_WINDOW: Duration = Duration::from_secs(2);
+const LAST_WINDOW: Duration = Duration::from_secs(30);
 
 pub struct Remote {
     http: reqwest::Client,
@@ -28,8 +30,43 @@ pub struct Remote {
     token: Mutex<String>,
     /// Seconds from sending an authority call to its answer, over recent calls.
     pub round_trip: Average,
-    /// Whether the authority can be reached.
     pub link: Link,
+}
+
+/// Whether the authority can be reached. A silent outage makes every call wait out a timeout,
+/// so after one call times out, calls fail at once for a window of 2 s, doubling to 30 s while
+/// it lasts. A refused connection fails fast already and opens no window. Whatever the cache
+/// holds is still served (C12); a call or probe after the window ends finds out whether the
+/// authority answers again. Holds when the window ends, and how long it was.
+#[derive(Default)]
+pub struct Link(Mutex<Option<(Instant, Duration)>>);
+
+impl Link {
+    /// Fails at once while the authority counts as unreachable.
+    pub fn check(&self) -> Result<()> {
+        match *lock(&self.0) {
+            Some((until, _)) if Instant::now() < until => Err(Error::Offline),
+            _ => Ok(()),
+        }
+    }
+
+    /// Opens or lengthens the window after a call timed out, and closes it after any answer.
+    pub fn record<T>(&self, result: &Result<T>) {
+        let mut state = lock(&self.0);
+        *state = match result {
+            Err(Error::Network(error)) if error.is_timeout() => {
+                let window = state.map_or(FIRST_WINDOW, |(_, window)| (window * 2).min(LAST_WINDOW));
+                Some((Instant::now() + window, window))
+            }
+            Err(Error::Network(_)) => return,
+            _ => None,
+        };
+    }
+
+    /// How long the window has left, while the authority counts as unreachable.
+    pub fn remaining(&self) -> Option<Duration> {
+        lock(&self.0).map(|(until, _)| until.saturating_duration_since(Instant::now()))
+    }
 }
 
 impl Remote {
@@ -40,8 +77,7 @@ impl Remote {
         space: &str,
         token_file: PathBuf,
         resolve: &[(String, IpAddr)],
-    ) -> Result<Self, Error> {
-        let token = read_token(&token_file)?;
+    ) -> Result<Self> {
         let builder = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(READ_TIMEOUT);
@@ -53,33 +89,32 @@ impl Remote {
             http: builder.build()?,
             authority: authority.trim_end_matches('/').to_owned(),
             space: space.to_owned(),
+            token: Mutex::new(read_token(&token_file)?),
             token_file,
-            token: Mutex::new(token),
             round_trip: Average::default(),
             link: Link::default(),
         })
     }
 
-    pub async fn stat(&self, path: SpacePath) -> Result<Entry, Error> {
+    pub async fn stat(&self, path: SpacePath) -> Result<Entry> {
         self.entry(|space| Request::Stat { space, path }).await
     }
 
     /// The entry with this id, at its current path.
-    pub async fn locate(&self, entry: EntryId) -> Result<Entry, Error> {
+    pub async fn locate(&self, entry: EntryId) -> Result<Entry> {
         self.entry(|space| Request::Locate { space, entry }).await
     }
 
-    pub async fn list(&self, path: SpacePath) -> Result<Vec<Entry>, Error> {
+    pub async fn list(&self, path: SpacePath) -> Result<Vec<Entry>> {
         match self.call(|space| Request::List { space, path }).await? {
             Response::Entries { entries } => Ok(entries),
             other => Err(unexpected(&other)),
         }
     }
 
-    /// The entry at `path` and its head version, `None` until its first commit.
     /// The entry at `path`, its head version (`None` until its first commit), and whether
     /// the caller may commit to it.
-    pub async fn open(&self, path: SpacePath) -> Result<(Entry, Option<Version>, bool), Error> {
+    pub async fn open(&self, path: SpacePath) -> Result<(Entry, Option<Version>, bool)> {
         match self.call(|space| Request::Open { space, path }).await? {
             Response::Opened {
                 entry,
@@ -97,7 +132,7 @@ impl Remote {
         entry: EntryId,
         version: VersionId,
         chunks: Vec<u32>,
-    ) -> Result<(Vec<String>, Duration), Error> {
+    ) -> Result<(Vec<String>, Duration)> {
         let request = |space| Request::Grant {
             space,
             entry,
@@ -110,24 +145,19 @@ impl Remote {
         }
     }
 
-    pub async fn create(&self, path: SpacePath, mode: u32) -> Result<Entry, Error> {
+    pub async fn create(&self, path: SpacePath, mode: u32) -> Result<Entry> {
         self.entry(|space| Request::Create { space, path, mode }).await
     }
 
-    pub async fn mkdir(&self, path: SpacePath, mode: u32) -> Result<Entry, Error> {
+    pub async fn mkdir(&self, path: SpacePath, mode: u32) -> Result<Entry> {
         self.entry(|space| Request::Mkdir { space, path, mode }).await
     }
 
-    pub async fn symlink(&self, path: SpacePath, target: String) -> Result<Entry, Error> {
+    pub async fn symlink(&self, path: SpacePath, target: String) -> Result<Entry> {
         self.entry(|space| Request::Symlink { space, path, target }).await
     }
 
-    pub async fn set_attr(
-        &self,
-        path: SpacePath,
-        mode: Option<u32>,
-        mtime_ms: Option<i64>,
-    ) -> Result<Entry, Error> {
+    pub async fn set_attr(&self, path: SpacePath, mode: Option<u32>, mtime_ms: Option<i64>) -> Result<Entry> {
         self.entry(|space| Request::SetAttr {
             space,
             path,
@@ -137,34 +167,25 @@ impl Remote {
         .await
     }
 
-    pub async fn remove(&self, path: SpacePath) -> Result<(), Error> {
+    pub async fn remove(&self, path: SpacePath) -> Result<()> {
         self.call(|space| Request::Remove { space, path }).await.map(drop)
     }
 
-    pub async fn rename(&self, from: SpacePath, to: SpacePath) -> Result<(), Error> {
-        self.call(|space| Request::Rename { space, from, to })
-            .await
-            .map(drop)
+    pub async fn rename(&self, from: SpacePath, to: SpacePath) -> Result<()> {
+        self.call(|space| Request::Rename { space, from, to }).await?;
+        Ok(())
     }
 
     /// Makes `chunks` the entry's head. Unguarded, so the last commit wins (C5).
-    pub async fn commit(&self, record: &Record, chunks: Vec<ChunkRef>) -> Result<Version, Error> {
-        let Record {
-            entry,
-            base,
-            request_id,
-            mtime_ms,
-            ..
-        } = record.clone();
-        let base = base.map(|base| base.id);
+    pub async fn commit(&self, record: &Record, chunks: Vec<ChunkRef>) -> Result<Version> {
         let request = |space| Request::Commit {
             space,
-            entry,
-            request_id,
-            base,
+            entry: record.entry,
+            request_id: record.request_id.clone(),
+            base: record.base.as_ref().map(|base| base.id),
             guarded: false,
             chunks,
-            mtime_ms,
+            mtime_ms: record.mtime_ms,
         };
         match self.call(request).await? {
             Response::Version { version } => Ok(version),
@@ -172,14 +193,14 @@ impl Remote {
         }
     }
 
-    pub async fn put_chunk(&self, id: ChunkId, bytes: Bytes) -> Result<(), Error> {
+    pub async fn put_chunk(&self, id: ChunkId, bytes: Bytes) -> Result<()> {
         let url = format!("{}/v1/spaces/{}/chunks/{id}", self.authority, self.space);
         let upload = |token: &str| self.http.put(&url).bearer_auth(token).body(bytes.clone());
         self.send(upload).await.map(drop)
     }
 
     /// Fetches a chunk from a presigned URL and checks that it is the chunk expected.
-    pub async fn download(&self, url: &str, expected: ChunkRef) -> Result<Vec<u8>, Error> {
+    pub async fn download(&self, url: &str, expected: ChunkRef) -> Result<Vec<u8>> {
         let response = self.http.get(url).send().await?.error_for_status()?;
         let bytes = response.bytes().await?;
         if bytes.len() != expected.len as usize || ChunkId::of(&bytes) != expected.id {
@@ -188,7 +209,7 @@ impl Remote {
         Ok(bytes.into())
     }
 
-    async fn entry(&self, request: impl FnOnce(String) -> Request) -> Result<Entry, Error> {
+    async fn entry(&self, request: impl FnOnce(String) -> Request) -> Result<Entry> {
         match self.call(request).await? {
             Response::Entry { entry } => Ok(entry),
             other => Err(unexpected(&other)),
@@ -196,7 +217,7 @@ impl Remote {
     }
 
     /// Sends the request that `request` builds for this client's space.
-    async fn call(&self, request: impl FnOnce(String) -> Request) -> Result<Response, Error> {
+    async fn call(&self, request: impl FnOnce(String) -> Request) -> Result<Response> {
         let (url, request) = (format!("{}/v1/rpc", self.authority), request(self.space.clone()));
         let rpc = |token: &str| {
             self.http
@@ -223,7 +244,7 @@ impl Remote {
     }
 
     /// Sends unless the authority counts as unreachable, and records whether it answered.
-    async fn send(&self, request: impl Fn(&str) -> RequestBuilder) -> Result<reqwest::Response, Error> {
+    async fn send(&self, request: impl Fn(&str) -> RequestBuilder) -> Result<reqwest::Response> {
         self.link.check()?;
         let response = self.exchange(request).await;
         self.link.record(&response);
@@ -232,7 +253,7 @@ impl Remote {
 
     /// Sends with the current token. On 401 it re-reads the token file and tries once more,
     /// so a refreshed token takes effect without a remount.
-    async fn exchange(&self, request: impl Fn(&str) -> RequestBuilder) -> Result<reqwest::Response, Error> {
+    async fn exchange(&self, request: impl Fn(&str) -> RequestBuilder) -> Result<reqwest::Response> {
         let token = lock(&self.token).clone();
         let mut response = request(&token).send().await?;
         if response.status() == StatusCode::UNAUTHORIZED {
@@ -244,16 +265,18 @@ impl Remote {
         if status.is_success() {
             return Ok(response);
         }
-        let body = response.bytes().await?;
-        let failed = || Error::Protocol(format!("HTTP {status}"));
-        Err(serde_json::from_slice::<proto::Error>(&body).map_or_else(|_| failed(), Error::Api))
+        let refusal = serde_json::from_slice(&response.bytes().await?);
+        Err(refusal.map_or_else(|_| Error::Protocol(format!("HTTP {status}")), Error::Api))
     }
 }
 
-fn read_token(path: &Path) -> Result<String, Error> {
+fn read_token(path: &Path) -> Result<String> {
     Ok(fs::read_to_string(path)?.trim().to_owned())
 }
 
 fn unexpected(response: &Response) -> Error {
     Error::Protocol(format!("{response:?}"))
 }
+
+#[cfg(test)]
+mod tests;

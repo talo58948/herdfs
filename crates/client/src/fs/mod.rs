@@ -17,7 +17,7 @@ use herdfs_core::SpacePath;
 use herdfs_core::proto::{Entry, EntryId, Kind};
 
 use crate::{
-    cache::Cache, error::Error, journal::Journal, lock, lru::Lru, reader::Reader, remote::Remote,
+    Error, Result, cache::Cache, journal::Journal, lock, lru::Lru, reader::Reader, remote::Remote,
     stats::Stats, strategy::Decider,
 };
 
@@ -71,6 +71,7 @@ impl Space {
     ) -> io::Result<Self> {
         // /proc/self belongs to this process's user and group.
         let process = std::fs::metadata("/proc/self")?;
+        let root_path = (INodeNo::ROOT, (SpacePath::root(), 1, Instant::now()));
         Ok(Self {
             remote,
             reader,
@@ -80,10 +81,7 @@ impl Space {
             decider: Mutex::new(decider),
             root,
             owner: (process.uid(), process.gid()),
-            paths: Mutex::new(HashMap::from([(
-                INodeNo::ROOT,
-                (SpacePath::root(), 1, Instant::now()),
-            )])),
+            paths: Mutex::new(HashMap::from([root_path])),
             recent: Mutex::default(),
             opens: Mutex::default(),
             handles: Mutex::default(),
@@ -102,7 +100,7 @@ impl Space {
         EntryId(if ino.0 == 1 { self.root.0 } else { ino.0 - 1 })
     }
 
-    fn path(&self, ino: INodeNo) -> Result<SpacePath, Error> {
+    fn path(&self, ino: INodeNo) -> Result<SpacePath> {
         let path = lock(&self.paths).get(&ino).map(|(path, ..)| path.clone());
         Ok(path.ok_or(Errno::ENOENT)?)
     }
@@ -113,7 +111,7 @@ impl Space {
 
     /// The inode's path, which another client may have moved: once older than TTL, asked of
     /// the authority by entry id (C7). Offline, the path held.
-    async fn located(&self, ino: INodeNo) -> Result<SpacePath, Error> {
+    async fn located(&self, ino: INodeNo) -> Result<SpacePath> {
         let known = lock(&self.paths).get(&ino).cloned();
         let (path, _, confirmed) = known.ok_or(Errno::ENOENT)?;
         if ino == INodeNo::ROOT || confirmed.elapsed() < TTL {
@@ -126,18 +124,17 @@ impl Space {
     }
 
     /// The entry of the inode, wherever it is now.
-    async fn relocate(&self, ino: INodeNo) -> Result<Entry, Error> {
+    async fn relocate(&self, ino: INodeNo) -> Result<Entry> {
         let entry = match self.remote.locate(self.entry_id(ino)).await {
             Err(err) => return Err(self.gone(&self.path(ino)?, err)),
             located => located?,
         };
-        self.remember(&entry);
         self.follow(&entry).await;
         Ok(entry)
     }
 
     /// The path of `name` in the directory `parent`, wherever that is now.
-    async fn located_child(&self, parent: INodeNo, name: &OsStr) -> Result<SpacePath, Error> {
+    async fn located_child(&self, parent: INodeNo, name: &OsStr) -> Result<SpacePath> {
         if name.len() > MAX_NAME {
             return Err(Errno::ENAMETOOLONG.into());
         }
@@ -148,24 +145,21 @@ impl Space {
     /// The entry at `path` and how long the kernel may keep it: for TTL after the fetch, so
     /// opens see commits (C2), else from the authority. Its local changes show through `attr`
     /// (C1). Offline, the last entry seen keeps cached reads and writes working (C12).
-    async fn entry(&self, path: &SpacePath) -> Result<(Entry, Duration), Error> {
+    async fn entry(&self, path: &SpacePath) -> Result<(Entry, Duration)> {
         let cached = lock(&self.recent).get(path);
-        if let Some((fetched, settled, entry)) = &cached {
-            // A local commit since the fetch has made the entry stale (C1).
-            let fresh = *settled == self.journal.settled();
-            if let Some(ttl) = TTL.checked_sub(fetched.elapsed()).filter(|_| fresh) {
-                return Ok((entry.clone(), ttl));
-            }
+        // A local commit since the fetch has made the entry stale (C1).
+        if let Some((fetched, settled, entry)) = &cached
+            && *settled == self.journal.settled()
+            && let Some(ttl) = TTL.checked_sub(fetched.elapsed())
+        {
+            return Ok((entry.clone(), ttl));
         }
-        match self.remote.stat(path.clone()).await {
-            Ok(entry) => {
-                self.remember(&entry);
-                self.follow(&entry).await;
-                Ok((entry, TTL))
-            }
-            Err(err) if err.is_offline() => cached.map(|(.., entry)| (entry, TTL)).ok_or(err),
-            Err(err) => Err(err),
-        }
+        let entry = match self.remote.stat(path.clone()).await {
+            Err(err) if err.is_offline() => return cached.map(|(.., entry)| (entry, TTL)).ok_or(err),
+            stat => stat?,
+        };
+        self.follow(&entry).await;
+        Ok((entry, TTL))
     }
 
     /// Caches the entry, and the path of its inode if the kernel holds it.
@@ -238,10 +232,8 @@ impl Space {
 
     /// The entry's attributes, with size and mtime from its journal copy while it has one.
     fn attr(&self, entry: &Entry) -> FileAttr {
-        let local = self
-            .journal
-            .changes(entry.id)
-            .and_then(|copy| copy.metadata().ok());
+        let local = self.journal.changes(entry.id);
+        let local = local.and_then(|copy| copy.metadata().ok());
         let size = match (&local, entry.kind) {
             (Some(local), _) => local.len(),
             (None, Kind::Symlink) => entry.target.as_ref().map_or(0, |target| target.len() as u64),
