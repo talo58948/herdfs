@@ -45,6 +45,7 @@ mod shared_builds;
 mod slow_links;
 mod slow_uploads;
 mod stalled_reads;
+mod stalled_stores;
 mod synced_opens;
 mod times;
 mod unstored_uploads;
