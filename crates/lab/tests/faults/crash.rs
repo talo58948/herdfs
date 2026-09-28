@@ -4,6 +4,7 @@
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
@@ -11,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, ensure};
 use herdfs_core::chunk;
-use herdfs_lab::Lab;
+use herdfs_lab::{Lab, run};
 
 use crate::{
     VISIBLE_AFTER, assert_history, assert_reads, chunks_of, commit, history, random_bytes, two_clients,
@@ -196,6 +197,31 @@ fn a_reader_sees_a_file_that_grows_whole() -> Result<()> {
         thread::sleep(VISIBLE_AFTER);
         commit(&lab, WRITER, NAME, &small)?;
     }
+    watcher.finish()
+}
+
+/// A shell rewrites an existing file through a duplicated descriptor, as `>` and `dd` do: the
+/// shell opens it truncating, dups it onto stdout and closes the original, which flushes the
+/// empty file before any data arrives. Only the version with the data commits, and a reader on
+/// the other client never sees an empty one.
+// contract: C3
+#[test]
+fn a_rewrite_through_a_dup_d_descriptor_commits_one_version() -> Result<()> {
+    let Some(lab) = two_clients()? else {
+        return Ok(());
+    };
+    let (first, data) = (random_bytes(1 << 20), random_bytes(1 << 20));
+    commit(&lab, WRITER, NAME, &first)?;
+    thread::sleep(VISIBLE_AFTER);
+    let watcher = Watcher::start(&lab, &[&first, &data]);
+    let source = tempfile::NamedTempFile::new()?;
+    fs::write(source.path(), &data)?;
+    let mut shell = Command::new("bash");
+    shell.args(["-c", "cat \"$2\" > \"$1\"", "bash"]);
+    run(shell.arg(lab.mount_path(WRITER).join(NAME)).arg(source.path()))?;
+    wait_committed(&lab, WRITER)?;
+    thread::sleep(VISIBLE_AFTER);
+    assert_history(&lab, NAME, &[&first, &data])?;
     watcher.finish()
 }
 

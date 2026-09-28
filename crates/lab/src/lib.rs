@@ -97,8 +97,15 @@ impl Lab {
         self.toxiproxy.set_links(name, links, false)
     }
 
+    /// Makes client `name`'s links drop everything silently, as a real outage does.
+    pub fn silence(&self, name: &str, links: Links) -> Result<()> {
+        self.toxiproxy.silence(name, links, true)
+    }
+
+    /// Brings back links that were cut or silenced.
     pub fn restore(&self, name: &str, links: Links) -> Result<()> {
-        self.toxiproxy.set_links(name, links, true)
+        self.toxiproxy.set_links(name, links, true)?;
+        self.toxiproxy.silence(name, links, false)
     }
 
     fn client(&self, name: &str) -> &Client {

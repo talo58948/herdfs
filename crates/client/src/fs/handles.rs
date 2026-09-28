@@ -140,6 +140,7 @@ impl Space {
     pub async fn fsync(self: Arc<Self>, fh: u64) -> Result<(), Error> {
         let handle = self.handle(fh)?;
         self.seal(&handle)?;
+        self.journal.urge(handle.entry);
         self.committed(handle.entry).await
     }
 

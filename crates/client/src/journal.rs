@@ -12,10 +12,11 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use herdfs_core::proto::{EntryId, Version, VersionId};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Notify, mpsc, watch};
 
 use crate::lock;
 
@@ -25,6 +26,10 @@ mod working;
 pub use commit::Committer;
 
 const REJECTED: &str = "rejected";
+/// How long a seal waits for a newer one before its commit starts. A rewrite through a dup'd
+/// descriptor (`>`, `dd`) seals the truncated, empty file when the original descriptor closes,
+/// just before the data arrives; the data's seal then replaces it, so no empty version commits (C3).
+const QUIET: Duration = Duration::from_millis(250);
 
 /// A sealed write: what the committer needs, persisted next to the sealed file it names.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +49,8 @@ pub struct Journal {
     wake: mpsc::UnboundedSender<EntryId>,
     /// Counts settled commits, so cached remote state from before one can be told apart.
     settled: AtomicU64,
+    /// Wakes committers waiting out a quiet period when an fsync wants its commit now.
+    urged: Notify,
 }
 
 /// An entry that has open handles or journal copies.
@@ -62,6 +69,8 @@ struct Tracked {
     pending: Option<Record>,
     seals: u64,
     committing: bool,
+    /// Until when the committer waits for a newer seal before committing the pending one.
+    quiet_until: Option<Instant>,
     /// The seal the committer is reading, whose file outlives newer seals until it is done.
     reading: Option<u64>,
     /// The seal the last commit attempt covered, and whether it committed.
@@ -86,12 +95,13 @@ impl Journal {
     pub fn open(dir: PathBuf) -> io::Result<(Self, mpsc::UnboundedReceiver<EntryId>)> {
         fs::create_dir_all(dir.join(REJECTED))?;
         let (wake, woken) = mpsc::unbounded_channel();
-        let (entries, settled) = (Mutex::default(), AtomicU64::default());
+        let (entries, settled, urged) = (Mutex::default(), AtomicU64::default(), Notify::new());
         let journal = Self {
             dir,
             entries,
             wake,
             settled,
+            urged,
         };
         let paths = fs::read_dir(&journal.dir)?.map(|item| Ok(item?.path()));
         let paths: Vec<PathBuf> = paths.collect::<io::Result<_>>()?;
@@ -182,6 +192,7 @@ impl Journal {
         working.sync_all()?;
         let older = tracked.sealed.replace((seal, working)).map(|(older, _)| older);
         (tracked.seals, tracked.working) = (seal, None);
+        tracked.quiet_until = Some(Instant::now() + QUIET);
         let request_id = format!("{:032x}", rand::random::<u128>());
         let (base, mtime_ms) = (tracked.base.clone(), tracked.mtime.take());
         let record = Record {

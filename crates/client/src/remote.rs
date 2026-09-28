@@ -2,18 +2,23 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::{fs, sync::Mutex, time::Duration, time::Instant};
+use std::sync::{Arc, Mutex};
+use std::{fs, time::Duration, time::Instant};
 
 use bytes::Bytes;
 use herdfs_core::proto::{self, Entry, EntryId, Request, Response, Version, VersionId};
 use herdfs_core::{ChunkId, ChunkRef, SpacePath};
 use reqwest::{RequestBuilder, StatusCode};
 
-use crate::{Average, error::Error, journal::Record, lock};
+use crate::{Average, error::Error, journal::Record, link::Link, lock};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a connection may stay silent before its request fails and can be retried.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long an authority call may take in all, so a silent outage shows up fast.
+const RPC_TIMEOUT: Duration = Duration::from_secs(3);
+/// How often the probe looks whether an offline window has ended.
+const PROBE_EVERY: Duration = Duration::from_secs(1);
 
 pub struct Remote {
     http: reqwest::Client,
@@ -23,6 +28,8 @@ pub struct Remote {
     token: Mutex<String>,
     /// Seconds from sending an authority call to its answer, over recent calls.
     pub round_trip: Average,
+    /// Whether the authority can be reached.
+    pub link: Link,
 }
 
 impl Remote {
@@ -49,6 +56,7 @@ impl Remote {
             token_file,
             token: Mutex::new(token),
             round_trip: Average::default(),
+            link: Link::default(),
         })
     }
 
@@ -185,16 +193,41 @@ impl Remote {
     /// Sends the request that `request` builds for this client's space.
     async fn call(&self, request: impl FnOnce(String) -> Request) -> Result<Response, Error> {
         let (url, request) = (format!("{}/v1/rpc", self.authority), request(self.space.clone()));
-        let rpc = |token: &str| self.http.post(&url).bearer_auth(token).json(&request);
+        let rpc = |token: &str| {
+            self.http
+                .post(&url)
+                .bearer_auth(token)
+                .json(&request)
+                .timeout(RPC_TIMEOUT)
+        };
         let started = Instant::now();
         let response = self.send(rpc).await?;
         self.round_trip.add(started.elapsed().as_secs_f64());
         Ok(response.json().await?)
     }
 
+    /// Stats the root when an offline window ends, so the client finds out the authority
+    /// answers again even while nothing else asks it.
+    pub async fn probe(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(self.link.remaining().unwrap_or(PROBE_EVERY)).await;
+            if self.link.remaining() == Some(Duration::ZERO) {
+                let _ = self.stat(SpacePath::root()).await;
+            }
+        }
+    }
+
+    /// Sends unless the authority counts as unreachable, and records whether it answered.
+    async fn send(&self, request: impl Fn(&str) -> RequestBuilder) -> Result<reqwest::Response, Error> {
+        self.link.check()?;
+        let response = self.exchange(request).await;
+        self.link.record(&response);
+        response
+    }
+
     /// Sends with the current token. On 401 it re-reads the token file and tries once more,
     /// so a refreshed token takes effect without a remount.
-    async fn send(&self, request: impl Fn(&str) -> RequestBuilder) -> Result<reqwest::Response, Error> {
+    async fn exchange(&self, request: impl Fn(&str) -> RequestBuilder) -> Result<reqwest::Response, Error> {
         let token = lock(&self.token).clone();
         let mut response = request(&token).send().await?;
         if response.status() == StatusCode::UNAUTHORIZED {

@@ -20,6 +20,9 @@ pub enum Error {
     Protocol(String),
     #[error(transparent)]
     Io(#[from] io::Error),
+    /// The authority counts as unreachable after a recent call failed to reach it.
+    #[error("the authority is unreachable")]
+    Offline,
     /// A local condition with a fixed errno.
     #[error("{0:?}")]
     Errno(Errno),
@@ -47,13 +50,13 @@ impl Error {
             },
             Self::Io(error) => error.raw_os_error().map_or(Errno::EIO, Errno::from_i32),
             Self::Errno(errno) => *errno,
-            Self::Network(_) | Self::Corrupt(_) | Self::Protocol(_) => Errno::EIO,
+            Self::Network(_) | Self::Offline | Self::Corrupt(_) | Self::Protocol(_) => Errno::EIO,
         }
     }
 
     /// True when the authority could not be reached, rather than refusing.
     pub fn is_offline(&self) -> bool {
-        matches!(self, Self::Network(_))
+        matches!(self, Self::Network(_) | Self::Offline)
             || matches!(self, Self::Api(error) if error.code == ErrorCode::Unavailable)
     }
 
