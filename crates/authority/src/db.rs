@@ -22,6 +22,8 @@ DROP TABLE IF EXISTS manifests;
 DROP TABLE IF EXISTS entries;
 ";
 
+// Temporary storage (statement journals of large renames) stays in memory, so
+// the authority never depends on free space outside its database's directory.
 // Ids are AUTOINCREMENT so a removed entry's or version's id is never reused.
 // A version names its chunk list by hash, so fork and restore copy a
 // reference, never the list, and their time does not grow with file size.
@@ -29,6 +31,7 @@ pub(crate) const SCHEMA: &str = "
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = FULL;
 PRAGMA foreign_keys = ON;
+PRAGMA temp_store = MEMORY;
 CREATE TABLE IF NOT EXISTS entries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     space TEXT NOT NULL,
