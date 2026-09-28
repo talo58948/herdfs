@@ -36,7 +36,7 @@ Plugins are separate programs that use a mount like any other program (the agent
 
 ## Retention and collection
 
-The authority keeps each entry's head, plus its last N versions or those younger than T days (`--retain-versions`, `--retain-days`). A collector runs every `--gc-every` (10 min):
+The authority keeps each entry's last N versions, head included, plus any younger than T days (`--retain-versions`, `--retain-days`); the head is never pruned. A collector runs every `--gc-every` (10 min):
 
 1. It prunes versions that fall outside retention.
 2. It deletes chunk lists and upload records nothing retained uses.

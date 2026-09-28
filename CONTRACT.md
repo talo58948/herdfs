@@ -22,7 +22,7 @@ Every test names the lines it checks with a `// contract: C9, S2` comment. Code 
 | C11 | The cache never serves bytes of a different version. A tampered cached chunk fails its hash and is refetched. |
 | C12 | Content writes made offline to existing files are journaled and committed on reconnect, under C5, when the write replaces the file (truncate) or this client holds the file's current bytes. Namespace changes (create, mkdir, rename, remove) need the authority and fail with `EIO` while it is unreachable. |
 | C13 | A fork copies no chunk bytes, includes all commits acknowledged before it, and is isolated from its parent afterwards. Its time grows with entry count only (≤ 1 s per 100k entries). |
-| C14 | Every retained version in an entry's history is readable (subject to S8). Retention keeps the head always, plus the last N versions or those younger than T days (authority settings). Restore creates a new head and keeps history. |
+| C14 | Every retained version in an entry's history is readable (subject to S8). Retention keeps the last N versions (head included) plus any younger than T days (authority settings); the head is never pruned. Restore creates a new head and keeps history. |
 | C15 | The store holds only chunks of retained versions, plus uploads younger than the grace period: storage is bounded by what retention keeps, not by how much was ever written. |
 
 ## Security
