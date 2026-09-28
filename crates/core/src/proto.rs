@@ -184,9 +184,11 @@ pub enum Response {
         version: Option<Version>,
         writable: bool,
     },
+    /// URLs valid for `ttl_ms` from when the reply was sent. Relative, so a
+    /// client's clock skew does not matter.
     Grants {
         urls: Vec<String>,
-        expires_ms: i64,
+        ttl_ms: u64,
     },
     Version {
         version: Version,
