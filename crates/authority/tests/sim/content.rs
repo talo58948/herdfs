@@ -25,6 +25,8 @@ impl Sim {
             .map(|_| self.commit_chunk(who, &space, &base_chunks))
             .collect();
         let guarded = self.rng.chance(30);
+        // Sometimes the writer set the file's mtime, as `cp -p` does.
+        let mtime_ms = self.rng.chance(20).then(|| self.rng.below(1 << 30) as i64);
         let request_id = format!("r{}", self.sent.len());
         let request = Request::Commit {
             space: space.clone(),
@@ -33,6 +35,7 @@ impl Sim {
             base,
             guarded,
             chunks,
+            mtime_ms,
         };
         self.sent.push((who, request.clone()));
         let acked = self.exec(who, &request);
@@ -126,6 +129,7 @@ impl Sim {
                 base,
                 guarded: true,
                 chunks,
+                mtime_ms: None,
             };
             self.sent.push((who, request.clone()));
             match self.exec(who, &request) {
@@ -183,15 +187,15 @@ impl Sim {
                     .filter(|id| id != entry)
                     .collect()
             });
-        let reused = match self.rng.pick(&others) {
-            Some(other) if self.rng.chance(30) => {
-                *entry = other;
-                true
-            }
-            _ => false,
-        };
+        if let Some(other) = self.rng.pick(&others)
+            && self.rng.chance(30)
+        {
+            *entry = other;
+        }
+        // The id is reused on another entry than the one its first commit made a version of.
+        let reused = first.is_some_and(|first| self.model.versions[&first].entry != *entry);
         let got = self.exec(who, &request);
-        if reused && first.is_some() {
+        if reused {
             // contract: C4a, C12 — an id reused on another entry commits nothing and returns no version.
             assert_eq!(got.err(), Some(ErrorCode::Invalid), "{request:?}");
         }
@@ -216,27 +220,27 @@ impl Sim {
     pub fn grant(&mut self) {
         let (who, space) = (self.actor(), self.space());
         let path = self.existing_path(&space);
-        let history = self
-            .model
-            .node(&space, &path)
-            .map(|node| node.history.clone())
-            .unwrap_or_default();
+        let node = self.model.node(&space, &path).ok();
+        let (entry, history) = node.map_or((NO_ENTRY, Vec::new()), |node| (node.id, node.history.clone()));
         let version = match self.rng.chance(80) {
             true => self.rng.pick(&history),
             false => self.rng.pick(&self.versions()),
         };
         let Some(version) = version else { return };
         let count = self.model.versions[&version].chunks.len();
-        let chunks = (0..self.rng.below(3))
-            .map(|_| self.rng.below(count + 1) as u32)
-            .collect();
+        let chunks = match self.rng.chance(2) {
+            true => vec![0; 4097],
+            false => (0..self.rng.below(3))
+                .map(|_| self.rng.below(count + 1) as u32)
+                .collect(),
+        };
         let readable = self.model.perm(&space, &path, &self.actors[who]) >= Some(Perm::Read);
         let granted = self
             .exec(
                 who,
                 &Request::Grant {
                     space,
-                    path,
+                    entry,
                     version,
                     chunks,
                 },

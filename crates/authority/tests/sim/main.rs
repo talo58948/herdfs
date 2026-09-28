@@ -16,6 +16,7 @@ mod choose;
 mod content;
 mod model;
 mod steps;
+mod versions;
 
 use std::{
     panic,
@@ -141,7 +142,8 @@ impl Sim {
     fn step(&mut self) {
         match self.rng.below(100) {
             0..=2 => self.restart(),
-            3..=5 => self.new_space(),
+            3 | 4 => self.new_space(),
+            5 => self.deep_rename(),
             6..=25 => self.make(),
             26..=30 => self.remove(),
             31..=39 => self.rename(),
@@ -163,7 +165,7 @@ impl Sim {
         let principal = self.actors[who].clone();
         let want = self.model.outcome(&principal, request);
         let got = self.authority.handle(&principal, request.clone(), self.now_ms);
-        if let (Request::Commit { .. }, Err(error)) = (request, &got) {
+        if let (Request::Commit { .. } | Request::Grant { .. }, Err(error)) = (request, &got) {
             self.check_refusal(&principal, &error.message);
         }
         let got = got.map_err(|error| error.code);

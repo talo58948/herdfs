@@ -62,11 +62,14 @@ fn without_read_a_path_is_denied_whether_or_not_it_exists() {
 fn revocation_stops_new_grants_at_once() {
     // contract: S4
     let mut fx = Fixture::new();
-    let (_, version) = fx.file("f", b"x");
+    let (file, version) = fx.file("f", b"x");
     fx.set_acl("", "group:eng", Some(Perm::Read));
-    assert!(fx.grant(&carol(), "f", version.id, &[0]).is_ok());
+    assert!(fx.grant(&carol(), file.id, version.id, &[0]).is_ok());
     fx.set_acl("", "group:eng", None);
-    assert_eq!(fx.grant(&carol(), "f", version.id, &[0]), Err(ErrorCode::Denied));
+    assert_eq!(
+        fx.grant(&carol(), file.id, version.id, &[0]),
+        Err(ErrorCode::Denied)
+    );
 }
 
 #[test]
@@ -92,6 +95,7 @@ fn a_refused_commit_by_entry_id_names_no_hidden_path() {
         base: None,
         guarded: false,
         chunks: vec![],
+        mtime_ms: None,
     };
     let refused = fx.authority.handle(&bob(), commit, 0).unwrap_err();
     assert_eq!(refused.code, ErrorCode::Denied);

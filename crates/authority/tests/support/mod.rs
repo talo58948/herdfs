@@ -158,6 +158,7 @@ impl Fixture {
             base,
             guarded,
             chunks,
+            mtime_ms: None,
         };
         match self.call(who, request)? {
             Response::Version { version } => Ok(version),
@@ -191,26 +192,20 @@ impl Fixture {
     pub fn grant(
         &mut self,
         who: &Principal,
-        at: &str,
+        entry: EntryId,
         version: VersionId,
         chunks: &[u32],
     ) -> Result<Vec<ChunkId>, ErrorCode> {
         self.now_ms += 1;
+        let chunks = chunks.to_vec();
         let request = Request::Grant {
             space: SPACE.into(),
-            path: path(at),
+            entry,
             version,
-            chunks: chunks.to_vec(),
+            chunks,
         };
         match self.authority.handle(who, request, self.now_ms) {
-            Ok(Outcome::Sign { chunks, expires_ms }) => {
-                assert_eq!(
-                    expires_ms,
-                    self.now_ms + 5 * 60 * 1000,
-                    "grants live five minutes"
-                );
-                Ok(chunks)
-            }
+            Ok(Outcome::Sign { chunks }) => Ok(chunks),
             Ok(Outcome::Reply(reply)) => panic!("expected grants, got {reply:?}"),
             Err(error) => Err(error.code),
         }

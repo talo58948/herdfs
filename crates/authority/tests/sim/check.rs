@@ -165,14 +165,14 @@ impl Sim {
             .nodes
             .iter()
             .filter(|(path, _)| path.is_within(subtree))
-            .filter_map(|(path, node)| Some((path.clone(), *node.history.last()?)))
+            .filter_map(|(path, node)| Some((path.clone(), node.id, *node.history.last()?)))
             .collect();
         for who in 0..AUDITOR {
-            for (path, version) in &files {
+            for (path, entry, version) in &files {
                 let readable = self.model.perm(space, path, &self.actors[who]) >= Some(Perm::Read);
                 let request = Request::Grant {
                     space: space.into(),
-                    path: path.clone(),
+                    entry: *entry,
                     version: *version,
                     chunks: vec![],
                 };

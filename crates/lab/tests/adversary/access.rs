@@ -22,14 +22,14 @@ fn bob_gets_no_grant_and_no_metadata_for_alices_files() -> Result<()> {
         return Ok(());
     };
     let (secret, plan) = (&scene.secret, &scene.plan);
-    let grant = |path: &SpacePath| Request::Grant {
+    let grant = |entry: EntryId| Request::Grant {
         space: SPACE.into(),
-        path: path.clone(),
+        entry,
         version: secret.version.id,
         chunks: secret.chunk_indices(),
     };
     assert_eq!(
-        scene.attacker.call(&grant(&secret.path))?.status,
+        scene.attacker.call(&grant(secret.version.entry))?.status,
         StatusCode::FORBIDDEN
     );
     let secret_path = secret.path.as_str();
@@ -43,13 +43,13 @@ fn bob_gets_no_grant_and_no_metadata_for_alices_files() -> Result<()> {
         let reply = scene.attacker.rpc(&at_path(op, path))?;
         assert_eq!(reply.status, StatusCode::FORBIDDEN, "{op} /{path}");
     }
-    // A path bob may read lends its permission to none of alice's versions.
+    // An entry bob may read lends its permission to none of alice's versions.
     let restore = Request::Restore {
         space: SPACE.into(),
         path: plan.path.clone(),
         version: secret.version.id,
     };
-    for request in [grant(&plan.path), restore] {
+    for request in [grant(plan.version.entry), restore] {
         let reply = scene.attacker.call(&request)?;
         assert!(!reply.status.is_success(), "{request:?}: {}", reply.status);
     }
@@ -114,7 +114,7 @@ fn bad_tokens_are_refused_with_401() -> Result<()> {
     let (plan, chunk) = (&scene.plan, scene.plan.version.chunks[0]);
     // A grant bob could get with his real token, so only the token can be the reason.
     let grant = json!({
-        "op": "grant", "space": SPACE, "path": plan.path, "version": plan.version.id, "chunks": [0],
+        "op": "grant", "space": SPACE, "entry": plan.version.entry, "version": plan.version.id, "chunks": [0],
     });
     for (name, token) in bad.iter().chain(&crafted) {
         let token = token.as_deref();
@@ -147,9 +147,8 @@ fn dot_dot_symlinks_and_renames_do_not_reach_finance() -> Result<()> {
         "..",
     ];
     for escape in escapes {
-        let grant = json!({"op": "grant", "space": SPACE, "path": escape, "version": 1, "chunks": [0]});
         let by_path = ["open", "stat", "history", "list", "remove"].map(|op| at_path(op, escape));
-        for request in by_path.iter().chain([&grant]) {
+        for request in &by_path {
             let reply = scene.attacker.rpc(request)?;
             assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{request}");
         }

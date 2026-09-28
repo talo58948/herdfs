@@ -94,17 +94,58 @@ fn a_request_id_reused_on_another_entry_is_invalid() {
 }
 
 #[test]
-fn grants_cover_chunks_of_a_version_of_that_entry() {
+fn grants_cover_chunks_of_a_version_of_that_entry_wherever_it_moved() {
     // contract: S2
     let mut fx = Fixture::new();
-    let (_, version) = fx.file("f", b"one");
+    let (file, version) = fx.file("f", b"one");
     let (_, other) = fx.file("g", b"two");
+    fx.rename(&alice(), "f", "moved").unwrap();
+    let granted = fx.grant(&alice(), file.id, version.id, &[0]);
+    assert_eq!(granted, Ok(vec![version.chunks[0].id]));
     assert_eq!(
-        fx.grant(&alice(), "f", version.id, &[0]),
-        Ok(vec![version.chunks[0].id])
+        fx.grant(&alice(), file.id, version.id, &[1]),
+        Err(ErrorCode::Invalid)
     );
-    assert_eq!(fx.grant(&alice(), "f", version.id, &[1]), Err(ErrorCode::Invalid));
-    assert_eq!(fx.grant(&alice(), "f", other.id, &[0]), Err(ErrorCode::NotFound));
+    assert_eq!(
+        fx.grant(&alice(), file.id, version.id, &[0; 4097]),
+        Err(ErrorCode::Invalid)
+    );
+    assert_eq!(
+        fx.grant(&alice(), file.id, other.id, &[0]),
+        Err(ErrorCode::NotFound)
+    );
+}
+
+#[test]
+fn open_says_whether_the_caller_may_commit() {
+    let mut fx = Fixture::new();
+    fx.create(&alice(), "f").unwrap();
+    fx.set_acl("", "user:bob", Some(Perm::Read));
+    let open = || Request::Open {
+        space: SPACE.into(),
+        path: path("f"),
+    };
+    let writable = |reply| matches!(reply, Ok(Response::Opened { writable: true, .. }));
+    assert!(writable(fx.call(&alice(), open())));
+    assert!(!writable(fx.call(&bob(), open())));
+}
+
+#[test]
+fn a_commit_keeps_a_modification_time_its_writer_set() {
+    let mut fx = Fixture::new();
+    let file = fx.create(&alice(), "f").unwrap();
+    let request_id = "r1".into();
+    let commit = Request::Commit {
+        space: SPACE.into(),
+        entry: file.id,
+        request_id,
+        base: None,
+        guarded: false,
+        chunks: vec![],
+        mtime_ms: Some(42),
+    };
+    fx.call(&alice(), commit).unwrap();
+    assert_eq!(fx.stat(&alice(), "f").unwrap().mtime_ms, 42);
 }
 
 #[test]

@@ -117,6 +117,7 @@ fn add_file(lab: &Lab, token: &str, n: usize) -> Result<()> {
         base: None,
         guarded: false,
         chunks: Vec::new(),
+        mtime_ms: None,
     };
     lab.rpc_with(token, &commit)?;
     Ok(())
