@@ -55,8 +55,8 @@ impl Call<'_> {
         mode: u32,
         target: Option<&str>,
     ) -> Result<Response> {
-        self.expect_parent(space, path, parent)?;
         self.require(space, path, Perm::Write)?;
+        self.expect_parent(space, path, parent)?;
         if self.find(space, path)?.is_some() {
             return Err(refuse(ErrorCode::Exists, format!("{path} exists")));
         }
@@ -73,8 +73,8 @@ impl Call<'_> {
     }
 
     pub(crate) fn remove(&self, space: &str, path: &SpacePath, parent: EntryId) -> Result<Response> {
-        self.expect_parent(space, path, parent)?;
         self.require(space, path, Perm::Write)?;
+        self.expect_parent(space, path, parent)?;
         if path.is_root() {
             return Err(refuse(ErrorCode::Invalid, "the root cannot be removed"));
         }
@@ -92,10 +92,10 @@ impl Call<'_> {
         to: &SpacePath,
         to_parent: EntryId,
     ) -> Result<Response> {
-        self.expect_parent(space, from, from_parent)?;
-        self.expect_parent(space, to, to_parent)?;
         self.require(space, from, Perm::Write)?;
         self.require(space, to, Perm::Write)?;
+        self.expect_parent(space, from, from_parent)?;
+        self.expect_parent(space, to, to_parent)?;
         let source = self.entry(space, from)?;
         if from == to {
             return Ok(Response::Done);

@@ -150,14 +150,14 @@ impl Model {
             | Request::Symlink {
                 space, path, parent, ..
             } => {
-                self.expect_parent(space, path, *parent)?;
                 self.require(who, space, path, Perm::Write)?;
+                self.expect_parent(space, path, *parent)?;
                 ensure(self.node(space, path).is_err(), Exists)?;
                 self.parent_dir(space, path)
             }
             Request::Remove { space, path, parent } => {
-                self.expect_parent(space, path, *parent)?;
                 self.require(who, space, path, Perm::Write)?;
+                self.expect_parent(space, path, *parent)?;
                 ensure(!path.is_root(), Invalid)?;
                 let node = self.node(space, path)?;
                 ensure(
@@ -172,6 +172,9 @@ impl Model {
                 to,
                 to_parent,
             } => {
+                // Refusals for access come before any hint of what the parent paths name.
+                self.require(who, space, from, Perm::Write)?;
+                self.require(who, space, to, Perm::Write)?;
                 self.expect_parent(space, from, *from_parent)?;
                 self.expect_parent(space, to, *to_parent)?;
                 self.rename_outcome(who, space, from, to)
