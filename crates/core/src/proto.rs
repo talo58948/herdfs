@@ -136,7 +136,9 @@ pub enum Request {
     },
     /// Makes `chunks` the entry's new head version. Every chunk must be in
     /// `base` or uploaded by the caller. A `guarded` commit fails with
-    /// `Conflict` unless the head is still `base`. Retrying with the same
+    /// `Conflict` unless the head is still `base`; any commit fails with
+    /// `Conflict` if `base` is no longer retained, and the caller retries
+    /// without a base, uploading every chunk. Retrying with the same
     /// `request_id` returns the first result instead of committing again.
     /// `mtime_ms` keeps a modification time the writer set (`cp -p`);
     /// without it the commit time is used.
@@ -159,6 +161,17 @@ pub enum Request {
         space: String,
         path: SpacePath,
         version: VersionId,
+    },
+    /// Deletes every version of the entry at `path` except its head, so
+    /// their bytes are erased by the next collection. Needs write.
+    Purge {
+        space: String,
+        path: SpacePath,
+    },
+    /// Deletes a space with all its entries, versions and grants, so its
+    /// bytes are erased by the next collection. Needs admin on its root.
+    DeleteSpace {
+        space: String,
     },
     /// Sets `principal`'s access on `path` and below; `None` removes it.
     /// Principals are `user:<sub>` or `group:<name>`.
