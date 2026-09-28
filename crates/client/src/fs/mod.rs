@@ -169,6 +169,7 @@ impl Space {
 
     /// Records an entry this client just made, whose reply hands the kernel its inode.
     fn added(&self, entry: &Entry) -> FileAttr {
+        self.stale(&entry.path);
         self.remember(entry);
         self.looked_up(entry)
     }
@@ -185,9 +186,12 @@ impl Space {
         }
     }
 
-    /// Drops the cached entries at or below `path`, which this client just moved or removed.
+    /// Drops the cached entries at or below `path`, which this client just added, moved or
+    /// removed, and its directory's, whose mtime the authority moved with it. The kernel drops
+    /// its own attributes of that directory after the change.
     fn stale(&self, path: &SpacePath) {
-        lock(&self.recent).retain(|known, _| !known.is_within(path));
+        let parent = path.parent();
+        lock(&self.recent).retain(|known, _| !known.is_within(path) && Some(known) != parent.as_ref());
     }
 
     /// The entry's attributes, with size and mtime from its journal copy while it has one.

@@ -13,17 +13,7 @@ use anyhow::Result;
 use crate::lab;
 
 /// The pjdfstest tests each bug fails, keyed by the test below that reproduces it.
-pub const BUGS: &[(&str, &[&str])] = &[(
-    "adding_an_entry_changes_the_directorys_mtime",
-    &[
-        "mkdir::changed_time_fields_success",
-        "open::changed_time_fields_success",
-        "rmdir::changed_time_parent_success",
-        "symlink::changed_parent_time_success",
-        "unlink::update_mtime_ctime_success_folder::regular",
-        "unlink::update_mtime_ctime_success_folder::symlink",
-    ],
-)];
+pub const BUGS: &[(&str, &[&str])] = &[];
 
 /// Past the millisecond resolution of stored times.
 const TICK: Duration = Duration::from_millis(10);
@@ -39,7 +29,6 @@ fn an_overlong_name_fails_with_enametoolong() -> Result<()> {
 }
 
 #[test]
-#[ignore = "BUG: a directory's mtime and ctime stay put when an entry is added or removed"]
 fn adding_an_entry_changes_the_directorys_mtime() -> Result<()> {
     let Some(lab) = lab()? else { return Ok(()) };
     let dir = lab.mount_path("a").join("dir");
