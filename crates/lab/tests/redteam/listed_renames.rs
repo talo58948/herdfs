@@ -40,7 +40,6 @@ fn read_after_a_swap(list: bool) -> Result<Option<Vec<u8>>> {
 // contract: C7, C2 (other clients follow a rename within T_vis; an open that starts T_vis after
 // the save sees it)
 #[test]
-#[ignore = "ROUND13: after a listing, the name another client moved a file from still finds it"]
 fn a_file_saved_with_a_backup_reads_new_after_a_listing() -> Result<()> {
     let Some(read) = read_after_a_swap(true)? else {
         return Ok(());

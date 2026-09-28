@@ -92,7 +92,6 @@ fn failed_saves(stats: bool) -> Result<Option<Vec<String>>> {
 // contract: C1, C4a (docs/architecture.md Write: a file opened for writing gets a local journal
 // copy; on close the client fsyncs it and returns)
 #[test]
-#[ignore = "ROUND13: a stat between the two locks of an open uncounts it; its write fails with EIO"]
 fn saves_in_place_succeed_while_the_file_is_stated() -> Result<()> {
     let Some(failures) = failed_saves(true)? else {
         return Ok(());

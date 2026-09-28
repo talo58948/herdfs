@@ -37,9 +37,10 @@ answer! { ReplyAttr, (FileAttr, Duration), |reply, (attr, ttl)| reply.attr(&ttl,
 answer! { ReplyAttr, FileAttr, |reply, attr| reply.attr(&TTL, &attr) }
 answer! { ReplyData, Vec<u8>, |reply, bytes| reply.data(&bytes) }
 answer! { ReplyEmpty, (), |reply, ()| reply.ok() }
-answer! { ReplyOpen, u64, |reply, fh| reply.opened(FileHandle(fh), FopenFlags::empty()) }
+// Reads stay on the client path so a version switch during a read cannot expose older kernel pages.
+answer! { ReplyOpen, u64, |reply, fh| reply.opened(FileHandle(fh), FopenFlags::FOPEN_DIRECT_IO) }
 answer! { ReplyWrite, u32, |reply, written| reply.written(written) }
 answer! {
     ReplyCreate, (FileAttr, u64),
-    |reply, (attr, fh)| reply.created(&TTL, &attr, GENERATION, FileHandle(fh), FopenFlags::empty())
+    |reply, (attr, fh)| reply.created(&TTL, &attr, GENERATION, FileHandle(fh), FopenFlags::FOPEN_DIRECT_IO)
 }

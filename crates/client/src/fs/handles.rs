@@ -65,7 +65,7 @@ impl Space {
         // Every open for writing asks for write access, over pending changes too (C1, C4a); one
         // for reading needs no head while this client holds changes, which every handle reads.
         if (writable || self.changes(entry).is_none())
-            && let Some(file) = self.head(entry, &path, writable, truncate).await?
+            && let Some(file) = self.head(entry, &path, writable, truncate, true).await?
             && !writable
         {
             upgrade = self.start(&file, &path, pid, &handle);
@@ -188,7 +188,7 @@ impl Space {
         // A short open, which keeps the journal copy while it changes.
         let _short = Handle::new(entry, true, &self.inodes);
         if handle.is_none() {
-            self.head(entry, &self.located(ino).await?, true, size == 0)
+            self.head(entry, &self.located(ino).await?, true, size == 0, true)
                 .await?;
         }
         self.prepare(entry, size == 0).await?;

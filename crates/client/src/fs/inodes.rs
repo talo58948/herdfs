@@ -98,19 +98,20 @@ impl Inodes {
     /// alone, and forgets them once nothing holds them. With `make`, they are made first, and an
     /// inode if unknown, since a write recovered from the journal names only its entry.
     pub fn local<T>(&self, id: EntryId, make: bool, change: impl FnOnce(&mut Local) -> T) -> Option<T> {
-        let inode = {
+        let (table, inode) = {
             let mut table = lock(&self.0);
             let inode = match table.nodes.get(&id) {
                 Some(node) => node.inode.clone(),
                 None if make => table.add(id, None, Instant::now()),
                 None => return None,
             };
-            if make {
-                inode.state().local.get_or_insert_with(Local::default);
-            }
-            inode
+            (table, inode)
         };
         let mut state = inode.state();
+        drop(table);
+        if make {
+            state.local.get_or_insert_with(Local::default);
+        }
         let changed = change(state.local.as_mut()?);
         state.tidy();
         Some(changed)
@@ -159,17 +160,19 @@ impl Inodes {
     pub fn moved(&self, from: &SpacePath, to: &SpacePath) {
         let mut table = lock(&self.0);
         let table = &mut *table;
+        let moved_at = Instant::now();
         if let Some(replaced) = table.by_path.remove(to).and_then(|id| table.nodes.get_mut(&id)) {
             replaced.bound = None;
         }
         let mut rebound = Vec::new();
         for (id, node) in &mut table.nodes {
-            if let Some((path, _)) = &mut node.bound
+            if let Some((path, confirmed)) = &mut node.bound
                 && let Some(moved) = path.rebase(from, to)
             {
                 table.by_path.remove(path);
                 rebound.push((moved.clone(), *id));
                 *path = moved;
+                *confirmed = moved_at;
             }
         }
         table.by_path.extend(rebound);
@@ -202,13 +205,16 @@ impl Table {
     }
 
     fn observe(&mut self, entry: &Entry, asked: Instant, cold: bool) {
-        let (bound, inode) = match self.nodes.get(&entry.id) {
-            Some(node) => (node.bound.is_some(), node.inode.clone()),
+        let (same_path, inode) = match self.nodes.get(&entry.id) {
+            Some(node) => (
+                node.bound.as_ref().is_some_and(|(path, _)| path == &entry.path),
+                node.inode.clone(),
+            ),
             None => (false, self.add(entry.id, Some(entry.clone()), asked)),
         };
         inode.state().observe(entry, asked);
-        // A listing names entries in bulk: it binds new ones, but confirms no binding (C7).
-        if !(cold && bound) {
+        // A listing binds new or relocated entries, but does not refresh an unchanged binding (C7).
+        if !(cold && same_path) {
             self.bind(entry.id, &entry.path, asked);
         }
         if self.idle.contains(&entry.id) {

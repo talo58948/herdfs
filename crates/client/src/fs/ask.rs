@@ -16,11 +16,15 @@ impl Space {
     /// The inode's path, which another client may have moved: once older than TTL or taken by
     /// another entry, asked of the authority by entry id (C7). Offline, the path held.
     pub(super) async fn located(&self, ino: INodeNo) -> Result<SpacePath> {
+        self.located_for(ino, true).await
+    }
+
+    async fn located_for(&self, ino: INodeNo, follow: bool) -> Result<SpacePath> {
         let held = match self.bound(ino)? {
             Some((path, confirmed)) if confirmed.elapsed() < TTL => return Ok(path),
             held => held.map(|(path, _)| path),
         };
-        match self.relocate(ino).await {
+        match self.relocate_for(ino, follow).await {
             Err(err) if err.is_offline() => held.ok_or(err),
             located => Ok(located?.path),
         }
@@ -28,12 +32,19 @@ impl Space {
 
     /// The entry of the inode, wherever it is now.
     pub(super) async fn relocate(&self, ino: INodeNo) -> Result<Entry> {
+        self.relocate_for(ino, true).await
+    }
+
+    async fn relocate_for(&self, ino: INodeNo, follow: bool) -> Result<Entry> {
         let asked = Instant::now();
         let entry = match self.remote.locate(self.entry_id(ino)).await {
             Err(err) => return Err(self.gone(self.path(ino)?.as_ref(), err)),
             located => located?,
         };
-        self.follow(&entry, asked).await;
+        self.inodes.observe(&entry, asked, false);
+        if follow {
+            self.move_on(&entry).await;
+        }
         Ok(entry)
     }
 
@@ -100,7 +111,7 @@ impl Space {
     /// read an older one (C3).
     pub(super) async fn move_on(&self, entry: &Entry) {
         if self.inodes.with(entry.id, |state| state.behind()) == Some(true) {
-            let _ = self.head(entry.id, &entry.path, false, false).await;
+            let _ = self.head(entry.id, &entry.path, false, false, true).await;
         }
     }
 
@@ -109,8 +120,8 @@ impl Space {
         if let Some((file, _)) = self.inodes.with(entry, |state| state.known()).flatten() {
             return Ok(file);
         }
-        let path = self.located(self.ino(entry)).await?;
-        self.head(entry, &path, false, false).await
+        let path = self.located_for(self.ino(entry), false).await?;
+        self.head(entry, &path, false, false, false).await
     }
 
     /// The entry's current head, which its open files then follow. Every open asks, for
@@ -121,6 +132,7 @@ impl Space {
         path: &SpacePath,
         write: bool,
         truncate: bool,
+        wait: bool,
     ) -> Result<Head> {
         let asked = Instant::now();
         let (found, head, writable) = match self.remote.open(path.clone()).await {
@@ -133,7 +145,7 @@ impl Space {
         self.inodes.observe(&found, asked, false);
         self.expect(self.ino(entry), &found)?;
         if self.inodes.with(entry, |state| state.switch((head, writable))) == Some(true) {
-            self.kernel.apply(entry, true).await;
+            self.kernel.apply(entry, wait).await;
         }
         if write && !writable {
             return Err(Errno::EACCES.into());
@@ -155,8 +167,21 @@ impl Space {
             Err(err) if err.is_not_found() => {
                 // Forgotten first, so that following the head does not wait for those pages.
                 self.inodes.with(entry, |state| state.unfollow());
-                let path = self.located(self.ino(entry)).await?;
-                let head = self.head(entry, &path, false, false).await?;
+                let final_error = |err: Error| {
+                    if err.errno() == Errno::ESTALE {
+                        Errno::EIO.into()
+                    } else {
+                        err
+                    }
+                };
+                let path = self
+                    .located_for(self.ino(entry), false)
+                    .await
+                    .map_err(final_error)?;
+                let head = self
+                    .head(entry, &path, false, false, false)
+                    .await
+                    .map_err(final_error)?;
                 self.kernel.apply(entry, false).await;
                 let used = with(head).await;
                 used.map_err(|err| {

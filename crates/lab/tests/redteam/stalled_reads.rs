@@ -150,7 +150,6 @@ fn hung_read(busy: bool) -> Result<Option<Option<String>>> {
 /// where the admin commits once, so both heads name the same version.
 // contract: C3 (an open file follows its latest version between reads, as a local file does)
 #[test]
-#[ignore = "ROUND13: a read that moves an open file on while others commit never returns"]
 fn a_read_that_moves_an_open_file_on_returns_while_others_commit() -> Result<()> {
     let Some(hung) = hung_read(true)? else {
         return Ok(());

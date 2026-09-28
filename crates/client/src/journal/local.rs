@@ -59,7 +59,7 @@ impl Local {
 
     /// Nothing holds it any more: no handle, and nothing left to commit.
     pub fn idle(&self) -> bool {
-        self.handles == 0 && self.pending.is_none() && !self.committing
+        self.handles == 0 && self.working.is_none() && self.pending.is_none() && !self.committing
     }
 
     pub fn opened(&mut self) {
