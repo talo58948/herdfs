@@ -8,7 +8,7 @@
 mod http;
 
 use axum::http::StatusCode;
-use http::{Lab, PUBLIC_S3};
+use http::{Lab, PUBLIC_S3, now_ms};
 use herdfs_core::{ChunkId, chunk::MAX_CHUNK};
 use serde_json::{Value, json};
 
@@ -72,8 +72,15 @@ async fn an_uploaded_chunk_is_committable_and_granted_on_the_public_endpoint() {
     let chunks = json!([{"id": id.to_string(), "len": bytes.len()}]);
     let commit = json!({"op": "commit", "space": "team", "entry": file["entry"]["id"], "request_id": "r1",
         "base": null, "guarded": false, "chunks": chunks});
+    let before_ms = now_ms();
     let (status, version) = lab.rpc(&alice, &commit).await;
     assert_eq!(status, StatusCode::OK, "{version}");
+    // The server stamps versions with the wall clock.
+    let created_ms = version["version"]["created_ms"].as_i64().unwrap();
+    assert!(
+        (before_ms..=now_ms()).contains(&created_ms),
+        "created at {created_ms}"
+    );
 
     let grant = json!({"op": "grant", "space": "team", "entry": file["entry"]["id"],
         "version": version["version"]["id"], "chunks": [0]});

@@ -190,13 +190,21 @@ fn a_forks_time_does_not_grow_with_the_size_of_its_files() {
             fx.commit(&alice(), *entry, &request_id, None, false, chunks)
                 .unwrap();
         }
-        let fork = Request::Fork {
-            space: SPACE.into(),
-            name: name.into(),
-        };
-        let started = std::time::Instant::now();
-        fx.call(&alice(), fork).unwrap();
-        started.elapsed()
+        // The fastest of three forks, so one slow disk flush on a busy host does not decide it.
+        let forks = (0..3).map(|n| {
+            let name = format!("{name}-{n}");
+            let started = std::time::Instant::now();
+            fx.call(
+                &alice(),
+                Request::Fork {
+                    space: SPACE.into(),
+                    name,
+                },
+            )
+            .unwrap();
+            started.elapsed()
+        });
+        forks.min().unwrap()
     };
     let small = fork_after(&mut fx, &[chunk], "small");
     let large = fork_after(&mut fx, &vec![chunk; CHUNKS_PER_FILE], "large");
