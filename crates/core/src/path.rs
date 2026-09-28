@@ -124,6 +124,13 @@ mod tests {
     }
 
     #[test]
+    fn a_path_reads_back_as_written_and_shows_with_a_leading_slash() {
+        let p = path("a/b");
+        assert_eq!((p.as_str(), p.to_string()), ("a/b", "/a/b".to_owned()));
+        assert_eq!(SpacePath::root().to_string(), "/");
+    }
+
+    #[test]
     fn parent_name_and_join() {
         let p = path("a/b/c");
         assert_eq!(p.name(), "c");

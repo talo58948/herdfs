@@ -138,4 +138,47 @@ mod tests {
         assert_eq!(id.to_string().parse::<ChunkId>().unwrap(), id);
         assert!("zz".parse::<ChunkId>().is_err());
     }
+
+    #[test]
+    fn ids_travel_as_hex_strings_and_garbage_is_refused() {
+        let id = ChunkId::of(b"hello");
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, format!("\"{}\"", blake3::hash(b"hello").to_hex()));
+        assert_eq!(serde_json::from_str::<ChunkId>(&json).unwrap(), id);
+        assert!(serde_json::from_str::<ChunkId>("\"zz\"").is_err());
+        assert!(ChunkId::try_from(String::new()).is_err());
+        assert_eq!(format!("{id:?}"), format!("ChunkId({id})"));
+    }
+
+    #[test]
+    fn total_len_sums_the_chunk_lengths() {
+        let chunk = |len| ChunkRef {
+            id: ChunkId::of(b"x"),
+            len,
+        };
+        assert_eq!(total_len(&[chunk(3), chunk(5)]), 8);
+        assert_eq!(total_len(&[]), 0);
+    }
+
+    #[test]
+    fn chunks_are_between_256_kib_and_4_mib_and_average_about_1_mib() {
+        let data = pseudo_random(64 * 1024 * 1024, 3);
+        let lens: Vec<usize> = split(&data[..]).map(|chunk| chunk.unwrap().1.len()).collect();
+        let (last, rest) = lens.split_last().unwrap();
+        assert!(
+            rest.iter()
+                .all(|len| (256 * 1024..=4 * 1024 * 1024).contains(len)),
+            "{lens:?}"
+        );
+        assert!(*last <= 4 * 1024 * 1024);
+        assert!(
+            rest.iter().any(|len| *len > 2 * 1024 * 1024),
+            "none past twice the average"
+        );
+        let mean = data.len() / lens.len();
+        assert!(
+            (768 * 1024..=1536 * 1024).contains(&mean),
+            "mean {mean} of {lens:?}"
+        );
+    }
 }

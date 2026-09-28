@@ -7,6 +7,7 @@
 
 mod support;
 
+use herdfs_authority::{Authority, Outcome};
 use herdfs_core::{
     ChunkRef,
     proto::{ErrorCode, Perm, Request, Response},
@@ -106,6 +107,7 @@ fn grants_cover_chunks_of_a_version_of_that_entry_wherever_it_moved() {
         fx.grant(&alice(), file.id, version.id, &[1]),
         Err(ErrorCode::Invalid)
     );
+    assert!(fx.grant(&alice(), file.id, version.id, &[0; 4096]).is_ok());
     assert_eq!(
         fx.grant(&alice(), file.id, version.id, &[0; 4097]),
         Err(ErrorCode::Invalid)
@@ -200,4 +202,39 @@ fn a_fork_copies_heads_and_is_isolated() {
     };
     assert_eq!(copy.chunks, v1.chunks);
     assert_ne!((copy.id, copy.entry), (v1.id, file.id));
+}
+
+#[test]
+fn an_older_database_is_recreated_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("authority.db");
+    let old = rusqlite::Connection::open(&db).unwrap();
+    old.execute_batch(
+        "CREATE TABLE versions (id INTEGER PRIMARY KEY, chunks TEXT); PRAGMA user_version = 1;",
+    )
+    .unwrap();
+    drop(old);
+    let mut authority = Authority::open(&db).unwrap();
+    let mut call = |request| authority.handle(&alice(), request, 1).map_err(|error| error.code);
+    call(Request::CreateSpace { space: SPACE.into() }).unwrap();
+    let create = Request::Create {
+        space: SPACE.into(),
+        path: path("f"),
+        mode: 0o644,
+    };
+    let Ok(Outcome::Reply(Response::Entry { entry })) = call(create) else {
+        panic!("alice creates /f")
+    };
+    let (request_id, chunks) = ("r1".into(), vec![]);
+    let commit = Request::Commit {
+        space: SPACE.into(),
+        entry: entry.id,
+        request_id,
+        base: None,
+        guarded: false,
+        chunks,
+        mtime_ms: None,
+    };
+    // The old versions table has no manifest column, so only a recreated one takes the commit.
+    assert!(call(commit).is_ok());
 }
