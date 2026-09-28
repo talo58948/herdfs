@@ -12,6 +12,10 @@ use reqwest::{RequestBuilder, StatusCode, header::CONTENT_TYPE};
 
 use crate::{Average, Error, Result, journal::Record, lock};
 
+mod link;
+
+pub use link::Link;
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a connection may stay silent before its request fails and can be retried.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -25,8 +29,6 @@ const BACKGROUND_TIMEOUT: Duration = Duration::from_secs(10);
 const SLOWEST_UPLOAD: usize = 16 << 10;
 /// How often the probe looks whether an offline window has ended.
 const PROBE_EVERY: Duration = Duration::from_secs(1);
-const FIRST_WINDOW: Duration = Duration::from_secs(2);
-const LAST_WINDOW: Duration = Duration::from_secs(30);
 
 pub struct Remote {
     http: reqwest::Client,
@@ -37,42 +39,6 @@ pub struct Remote {
     /// Seconds from sending an authority call to its answer, over recent calls.
     pub round_trip: Average,
     pub link: Link,
-}
-
-/// Whether the authority can be reached. A silent outage makes every call wait out a timeout,
-/// so after one call times out, calls fail at once for a window of 2 s, doubling to 30 s while
-/// it lasts. A refused connection fails fast already and opens no window. Whatever the cache
-/// holds is still served (C12); a call or probe after the window ends finds out whether the
-/// authority answers again. Holds when the window ends, and how long it was.
-#[derive(Default)]
-pub struct Link(Mutex<Option<(Instant, Duration)>>);
-
-impl Link {
-    /// Fails at once while the authority counts as unreachable.
-    pub fn check(&self) -> Result<()> {
-        match *lock(&self.0) {
-            Some((until, _)) if Instant::now() < until => Err(Error::Offline),
-            _ => Ok(()),
-        }
-    }
-
-    /// Opens or lengthens the window after a call timed out, and closes it after any answer.
-    pub fn record<T>(&self, result: &Result<T>) {
-        let mut state = lock(&self.0);
-        let window = state.map_or(FIRST_WINDOW, |(_, window)| (window * 2).min(LAST_WINDOW));
-        let grown = Some((Instant::now() + window, window));
-        *state = match result {
-            Err(Error::TimedOut) => grown,
-            Err(Error::Network(error)) if error.is_timeout() => grown,
-            Err(Error::Network(_)) => return,
-            _ => None,
-        };
-    }
-
-    /// How long the window has left, while the authority counts as unreachable.
-    pub fn remaining(&self) -> Option<Duration> {
-        lock(&self.0).map(|(until, _)| until.saturating_duration_since(Instant::now()))
-    }
 }
 
 impl Remote {
@@ -296,6 +262,3 @@ fn read_token(path: &Path) -> Result<String> {
 fn unexpected(response: &Response) -> Error {
     Error::Protocol(format!("{response:?}"))
 }
-
-#[cfg(test)]
-mod tests;

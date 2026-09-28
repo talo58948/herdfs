@@ -5,10 +5,11 @@ mod answer;
 mod fuse;
 mod handles;
 mod namespace;
+mod paths;
 
 use std::sync::{Arc, Mutex, OnceLock, atomic::AtomicU64};
-use std::time::{Duration, Instant, UNIX_EPOCH};
-use std::{collections::HashMap, ffi::OsStr, io, os::unix::fs::MetadataExt};
+use std::time::{Duration, Instant};
+use std::{collections::HashMap, fs::File, io, os::unix::fs::MetadataExt};
 
 pub use fuse::Fuse;
 use fuser::{Errno, FileAttr, FileType, INodeNo, Notifier};
@@ -17,8 +18,8 @@ use herdfs_core::SpacePath;
 use herdfs_core::proto::{Entry, EntryId, Kind};
 
 use crate::{
-    Error, Result, cache::Cache, journal::Journal, lock, lru::Lru, reader::Reader, remote::Remote,
-    stats::Stats, strategy::Decider,
+    Result, cache::Cache, journal::Journal, lock, lru::Lru, reader::Reader, remote::Remote, stats::Stats,
+    strategy::Decider,
 };
 
 /// How long the kernel and this client may reuse an attribute or listing (T_vis, C2).
@@ -35,6 +36,9 @@ type Listing = Vec<(INodeNo, FileType, String)>;
 /// An inode's path, its lookup count, which `forget` lowers, and when the authority last
 /// confirmed the path: `None` once in doubt.
 type Known = (SpacePath, u64, Option<Instant>);
+/// When a call to the authority was sent, and the count of settled commits then: what it
+/// answers is current as of both.
+type Asked = (Instant, u64);
 
 pub struct Space {
     remote: Arc<Remote>,
@@ -122,142 +126,14 @@ impl Space {
         }
     }
 
-    /// The inode's path, which another client may have moved: once older than TTL, asked of
-    /// the authority by entry id (C7). Offline, the path held.
-    async fn located(&self, ino: INodeNo) -> Result<SpacePath> {
-        let known = lock(&self.paths).get(&ino).cloned();
-        let (path, _, confirmed) = known.ok_or(Errno::ENOENT)?;
-        if ino == INodeNo::ROOT || confirmed.is_some_and(|confirmed| confirmed.elapsed() < TTL) {
-            return Ok(path);
-        }
-        match self.relocate(ino).await {
-            Err(err) if err.is_offline() => Ok(path),
-            located => Ok(located?.path),
-        }
-    }
-
-    /// The entry of the inode, wherever it is now.
-    async fn relocate(&self, ino: INodeNo) -> Result<Entry> {
-        let entry = match self.remote.locate(self.entry_id(ino)).await {
-            Err(err) => return Err(self.gone(&self.path(ino)?, err)),
-            located => located?,
-        };
-        self.follow(&entry).await;
-        Ok(entry)
-    }
-
-    /// The path of `name` in the directory `parent`, wherever that is now.
-    async fn located_child(&self, parent: INodeNo, name: &OsStr) -> Result<SpacePath> {
-        if name.len() > MAX_NAME {
-            return Err(Errno::ENAMETOOLONG.into());
-        }
-        let (name, parent) = (name.to_str().ok_or(Errno::EINVAL)?, self.located(parent).await?);
-        Ok(parent.join(name).map_err(|_| Errno::EINVAL)?)
-    }
-
-    /// The entry at `path` and when it was fetched: from the cache for TTL after that, so opens
-    /// see commits (C2), else from the authority. Its local changes show through `attr` (C1).
-    /// Offline, the last entry seen keeps cached reads and writes working (C12).
-    async fn entry(&self, path: &SpacePath) -> Result<(Entry, Instant)> {
-        let cached = lock(&self.recent).get(path);
-        // A local commit since the fetch has made the entry stale (C1), as has a newer word from
-        // the authority on its inode, such as its path after a rename (C3, C7).
-        let confirmed = |entry: &Entry| {
-            lock(&self.paths)
-                .get(&self.ino(entry.id))
-                .and_then(|known| known.2)
-        };
-        if let Some((fetched, settled, entry)) = &cached
-            && *settled == self.journal.settled()
-            && fetched.elapsed() < TTL
-            && confirmed(entry) <= Some(*fetched)
-        {
-            return Ok((entry.clone(), *fetched));
-        }
-        let entry = match self.remote.stat(path.clone()).await {
-            Err(err) if err.is_offline() => return cached.map(|(at, _, entry)| (entry, at)).ok_or(err),
-            stat => stat?,
-        };
-        self.follow(&entry).await;
-        Ok((entry, Instant::now()))
-    }
-
-    /// Caches the entry, and the path of its inode if the kernel holds it.
-    fn remember(&self, entry: &Entry) {
-        if let Some(known) = lock(&self.paths).get_mut(&self.ino(entry.id)) {
-            (known.0, known.2) = (entry.path.clone(), Some(Instant::now()));
-        }
-        let mut recent = lock(&self.recent);
-        let cached = (Instant::now(), self.journal.settled(), entry.clone());
-        recent.insert(entry.path.clone(), 1, cached);
-        recent.evict(RECENT, |_| false);
-    }
-
-    /// Caches an entry a listing asked for at `asked` as the next to go unless a lookup uses it,
-    /// so a big listing does not push out the entries in use (C12).
-    fn listed(&self, entry: &Entry, asked: Instant) {
-        let mut recent = lock(&self.recent);
-        let cached = (asked, self.journal.settled(), entry.clone());
-        recent.insert_cold(entry.path.clone(), 1, cached);
-        recent.evict(RECENT, |_| false);
-    }
-
-    /// ESTALE for an entry the authority no longer finds where it was looked for. The entry
-    /// cached there goes, so the lookup the kernel then makes asks the authority (C7).
-    fn gone(&self, path: &SpacePath, err: Error) -> Error {
-        if !err.is_not_found() {
-            return err;
-        }
-        lock(&self.recent).remove(path);
-        Errno::ESTALE.into()
-    }
-
-    /// Counts a reply that hands the kernel a reference to the entry's inode, and returns its
-    /// attributes for that reply. The entry, fetched at `fetched`, gives the inode its path
-    /// unless the authority confirmed another since (C7).
-    fn looked_up(&self, entry: &Entry, fetched: Instant) -> FileAttr {
-        let mut paths = lock(&self.paths);
-        let known = paths
-            .entry(self.ino(entry.id))
-            .or_insert((entry.path.clone(), 0, None));
-        if known.2.is_none_or(|confirmed| confirmed < fetched) {
-            (known.0, known.2) = (entry.path.clone(), Some(fetched));
-        }
-        known.1 += 1;
-        drop(paths);
-        self.attr(entry)
-    }
-
-    /// Records an entry this client just made, whose reply hands the kernel its inode.
-    fn added(&self, entry: &Entry) -> FileAttr {
-        self.stale(&entry.path);
-        self.remember(entry);
-        self.looked_up(entry, Instant::now())
-    }
-
-    /// Drops the kernel's `lookups` references to `ino`, and its path with the last one.
-    pub fn forget(&self, ino: INodeNo, lookups: u64) {
-        let mut paths = lock(&self.paths);
-        let Some((_, count, _)) = paths.get_mut(&ino) else {
-            return;
-        };
-        *count = count.saturating_sub(lookups);
-        if *count == 0 && ino != INodeNo::ROOT {
-            paths.remove(&ino);
-        }
-    }
-
-    /// Drops the cached entries at or below `path`, which this client just added, moved or
-    /// removed, and its directory's, whose mtime the authority moved with it. The kernel drops
-    /// its own attributes of that directory after the change.
-    fn stale(&self, path: &SpacePath) {
-        let parent = path.parent();
-        lock(&self.recent).purge(|known| known.is_within(path) || Some(known) == parent.as_ref());
-    }
-
     /// The entry's attributes, with size and mtime from its journal copy while it has one.
-    fn attr(&self, entry: &Entry) -> FileAttr {
-        let local = self.journal.changes(entry.id);
+    /// When a call that a reply depends on is sent: before it, so that a commit settling during
+    /// the call makes its answer stale (C1).
+    fn asked(&self) -> Asked {
+        (Instant::now(), self.journal.settled())
+    }
+
+    fn attr(&self, entry: &Entry, local: Option<&File>) -> FileAttr {
         let local = local.and_then(|copy| copy.metadata().ok());
         let size = match (&local, entry.kind) {
             (Some(local), _) => local.len(),
@@ -266,8 +142,7 @@ impl Space {
         };
         // The journal copy's time as its commit will keep it, to the millisecond.
         let written = local.and_then(|local| local.modified().ok()).map(crate::unix_ms);
-        let mtime =
-            UNIX_EPOCH + Duration::from_millis(written.unwrap_or(entry.mtime_ms).try_into().unwrap_or(0));
+        let mtime = crate::from_unix_ms(written.unwrap_or(entry.mtime_ms));
         let kind = match entry.kind {
             Kind::File => FileType::RegularFile,
             Kind::Dir => FileType::Directory,

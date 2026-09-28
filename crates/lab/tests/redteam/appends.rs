@@ -67,7 +67,6 @@ fn append_lines(path: &Path) -> Result<()> {
 /// Loggers, shell `>>` and git's reflogs append this way.
 // contract: C1
 #[test]
-#[ignore = "REDTEAM7: an O_APPEND write after an fsync overwrites fsynced lines while another process fstats the file"]
 fn appends_after_an_fsync_never_overwrite_earlier_lines() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
