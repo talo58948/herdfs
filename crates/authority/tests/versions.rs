@@ -216,10 +216,15 @@ fn an_older_database_is_recreated_on_open() {
     drop(old);
     let mut authority = Authority::open(&db).unwrap();
     let mut call = |request| authority.handle(&alice(), request, 1).map_err(|error| error.code);
-    call(Request::CreateSpace { space: SPACE.into() }).unwrap();
+    let Ok(Outcome::Reply(Response::Entry { entry: root })) =
+        call(Request::CreateSpace { space: SPACE.into() })
+    else {
+        panic!("alice creates the space")
+    };
     let create = Request::Create {
         space: SPACE.into(),
         path: path("f"),
+        parent: root.id,
         mode: 0o644,
     };
     let Ok(Outcome::Reply(Response::Entry { entry })) = call(create) else {

@@ -158,7 +158,9 @@ fn dot_dot_symlinks_and_renames_do_not_reach_finance() -> Result<()> {
     let link = scene.bob_mount("eng/q3-link");
     symlink("../finance/q3.xlsx", &link)?;
     assert_eq!(errno(fs::read(&link)), EACCES);
-    let planted = json!({"op": "symlink", "space": SPACE, "path": "finance/link", "target": "../eng"});
+    let finance = parent_id(&scene, "finance/link")?;
+    let planted = json!({"op": "symlink", "space": SPACE, "path": "finance/link",
+        "parent": finance, "target": "../eng"});
     assert_eq!(scene.attacker.rpc(&planted)?.status, StatusCode::FORBIDDEN);
 
     // A rename needs write on both sides, so nothing crosses the boundary either way.
@@ -170,7 +172,9 @@ fn dot_dot_symlinks_and_renames_do_not_reach_finance() -> Result<()> {
         ("eng", "eng2"),
     ];
     for (from, to) in crossings {
-        let rename = json!({"op": "rename", "space": SPACE, "from": from, "to": to});
+        let (from_parent, to_parent) = (parent_id(&scene, from)?, parent_id(&scene, to)?);
+        let rename = json!({"op": "rename", "space": SPACE, "from": from,
+            "from_parent": from_parent, "to": to, "to_parent": to_parent});
         let reply = scene.attacker.rpc(&rename)?;
         assert_eq!(reply.status, StatusCode::FORBIDDEN, "{from} -> {to}");
     }
@@ -190,6 +194,18 @@ fn dot_dot_symlinks_and_renames_do_not_reach_finance() -> Result<()> {
         "alice's file is untouched"
     );
     scene.assert_no_leak()
+}
+
+fn parent_id(scene: &Scene, child: &str) -> Result<EntryId> {
+    let child = SpacePath::try_from(child)?;
+    let stat = Request::Stat {
+        space: SPACE.into(),
+        path: child.parent().unwrap_or_default(),
+    };
+    let Response::Entry { entry } = scene.lab.rpc(ALICE, &stat)? else {
+        bail!("stat answers with the entry")
+    };
+    Ok(entry.id)
 }
 
 // contract: C13, S2
@@ -221,8 +237,10 @@ fn bob_cannot_start_a_session_on_another_host() -> Result<()> {
     assert!(host.is_dir(), "bob may look into /.agents");
     assert_eq!(errno(fs::create_dir(host.join("t1"))), EACCES);
     assert_eq!(errno(fs::write(host.join("prompt"), "rm -rf /")), EACCES);
+    let parent = parent_id(&scene, ".agents/C/t1")?;
     for op in ["mkdir", "create"] {
-        let request = json!({"op": op, "space": SPACE, "path": ".agents/C/t1", "mode": 0o755});
+        let request =
+            json!({"op": op, "space": SPACE, "path": ".agents/C/t1", "parent": parent, "mode": 0o755});
         assert_eq!(
             scene.attacker.rpc(&request)?.status,
             StatusCode::FORBIDDEN,

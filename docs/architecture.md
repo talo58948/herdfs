@@ -32,7 +32,7 @@ Plugins are separate programs that use a mount like any other program (the agent
 
 **Open files follow the latest version** (NFS-style close-to-open). Every `open` and `create` uses direct I/O, so the kernel caches no file content; the mount allows direct-I/O mappings on kernels that support them. An `open` asks for the current head; when a later `getattr` or `open` on this client sees a newer head, the client switches the inode to it, and every handle reads that version from its next read. Attributes remain cached for T_vis and are invalidated when the inode switches versions. Per-handle snapshots were tried first and fought the kernel's per-inode page cache and `mmap`.
 
-**Paths follow renames.** Operations name entries by path, but the client knows every inode's entry id. A cached inode path older than T_vis is refreshed with `Locate` (by entry id) before use.
+**Paths follow renames.** Operations name entries by path, but the client knows every inode's entry id. A cached inode path older than T_vis is refreshed with `Locate` (by entry id) before use. Namespace mutations also name the expected parent entry ids, which the authority checks atomically with the mutation so a renamed-and-reused path cannot capture the operation.
 
 ## Retention and collection
 

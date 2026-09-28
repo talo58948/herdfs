@@ -17,8 +17,7 @@ async fn only_a_caller_who_may_upload_causes_a_store_write() {
     // contract: S6, S1
     let lab = Lab::start().await;
     let alice = lab.user("alice");
-    lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
-        .await;
+    lab.create_space(&alice, "team").await;
     let bytes = b"chunk bytes".to_vec();
     let id = ChunkId::of(&bytes);
     let refused = [
@@ -57,8 +56,7 @@ async fn an_uploaded_chunk_is_committable_and_granted_on_the_public_endpoint() {
     // contract: S6, S2, S1
     let lab = Lab::start().await;
     let alice = lab.user("alice");
-    lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
-        .await;
+    let root = lab.create_space(&alice, "team").await;
     let bytes = b"chunk bytes".to_vec();
     let id = ChunkId::of(&bytes);
     let key = format!("herdfs/chunks/{id}");
@@ -70,7 +68,7 @@ async fn an_uploaded_chunk_is_committable_and_granted_on_the_public_endpoint() {
     let (_, file) = lab
         .rpc(
             &alice,
-            &json!({"op": "create", "space": "team", "path": "f", "mode": 420}),
+            &json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420}),
         )
         .await;
     let chunks = json!([{"id": id.to_string(), "len": bytes.len()}]);
@@ -101,9 +99,8 @@ async fn an_uploaded_chunk_is_committable_and_granted_on_the_public_endpoint() {
 async fn errors_carry_their_code_and_status() {
     let lab = Lab::start().await;
     let (alice, bob) = (lab.user("alice"), lab.user("bob"));
-    lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
-        .await;
-    let create = json!({"op": "create", "space": "team", "path": "f", "mode": 420});
+    let root = lab.create_space(&alice, "team").await;
+    let create = json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420});
     let stat = |space: &str, path: &str| json!({"op": "stat", "space": space, "path": path});
     let cases = [
         (&alice, create.clone(), StatusCode::OK, Value::Null),
@@ -123,7 +120,7 @@ async fn errors_carry_their_code_and_status() {
         (&bob, stat("team", "f"), StatusCode::FORBIDDEN, json!("denied")),
         (
             &alice,
-            json!({"op": "remove", "space": "team", "path": ""}),
+            json!({"op": "remove", "space": "team", "path": "", "parent": root}),
             StatusCode::BAD_REQUEST,
             json!("invalid"),
         ),

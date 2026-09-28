@@ -32,13 +32,15 @@ fn collect_after_clock_change(backward: bool) -> (usize, usize) {
     let db = dir.path().join("authority.db");
     let mut authority = Authority::open(&db).unwrap();
     let start_ms = if backward { 0 } else { FORWARD_MS };
-    call(
+    let Response::Entry { entry: root } = call(
         &mut authority,
         Request::CreateSpace {
             space: "clock".into(),
         },
         FORWARD_MS,
-    );
+    ) else {
+        panic!("create space answers with its root")
+    };
     drop(authority);
 
     let mut authority = Authority::open(&db).unwrap();
@@ -50,6 +52,7 @@ fn collect_after_clock_change(backward: bool) -> (usize, usize) {
             Request::Create {
                 space: "clock".into(),
                 path,
+                parent: root.id,
                 mode: 0o644,
             },
             wall_ms,

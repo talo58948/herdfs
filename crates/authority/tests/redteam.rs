@@ -142,9 +142,8 @@ fn a_rename_leaves_every_path_below_it_usable() {
 async fn a_commit_of_a_large_file_is_accepted() {
     let lab = Lab::start().await;
     let alice = lab.user("alice");
-    lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
-        .await;
-    let create = json!({"op": "create", "space": "team", "path": "f", "mode": 420});
+    let root = lab.create_space(&alice, "team").await;
+    let create = json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420});
     let (_, created) = lab.rpc(&alice, &create).await;
     let chunk = vec![7; 1 << 20];
     let id = herdfs_core::ChunkId::of(&chunk);
@@ -232,9 +231,8 @@ fn a_forks_time_does_not_grow_with_the_size_of_its_files() {
 async fn a_commit_of_a_file_over_350_gib_is_accepted() {
     let lab = Lab::start().await;
     let alice = lab.user("alice");
-    lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
-        .await;
-    let create = json!({"op": "create", "space": "team", "path": "f", "mode": 420});
+    let root = lab.create_space(&alice, "team").await;
+    let create = json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420});
     let (_, created) = lab.rpc(&alice, &create).await;
     let chunk = vec![7; 1 << 20];
     let id = herdfs_core::ChunkId::of(&chunk);

@@ -31,9 +31,12 @@ impl Space {
         pid: u32,
     ) -> Result<(FileAttr, u64)> {
         let exclusive = flags & libc::O_EXCL != 0;
+        let parent_id = self.entry_id(parent);
         let (paths, created) = self
             .namespace(&[(parent, &name)], |paths| {
-                let created = self.remote.create(paths[0].clone(), mode & PERMISSIONS);
+                let created = self
+                    .remote
+                    .create(paths[0].clone(), parent_id, mode & PERMISSIONS);
                 async {
                     match created.await {
                         Err(Error::Api(error)) if error.code == ErrorCode::Exists && !exclusive => Ok(None),
@@ -130,9 +133,10 @@ impl Space {
     }
 
     pub async fn mkdir(self: Arc<Self>, parent: INodeNo, name: OsString, mode: u32) -> Result<FileAttr> {
+        let parent_id = self.entry_id(parent);
         let (_, entry) = self
             .namespace(&[(parent, &name)], |paths| {
-                self.remote.mkdir(paths[0].clone(), mode & PERMISSIONS)
+                self.remote.mkdir(paths[0].clone(), parent_id, mode & PERMISSIONS)
             })
             .await?;
         Ok(self.added(&entry))
@@ -145,9 +149,10 @@ impl Space {
         target: PathBuf,
     ) -> Result<FileAttr> {
         let target = target.into_os_string().into_string().map_err(|_| Errno::EINVAL)?;
+        let parent_id = self.entry_id(parent);
         let (_, entry) = self
             .namespace(&[(parent, &name)], |paths| {
-                self.remote.symlink(paths[0].clone(), target.clone())
+                self.remote.symlink(paths[0].clone(), parent_id, target.clone())
             })
             .await?;
         Ok(self.added(&entry))
@@ -155,8 +160,11 @@ impl Space {
 
     /// Unlinks a file or symlink, or removes an empty directory.
     pub async fn remove(self: Arc<Self>, parent: INodeNo, name: OsString) -> Result<()> {
+        let parent_id = self.entry_id(parent);
         let (paths, removed) = self
-            .namespace(&[(parent, &name)], |paths| self.remote.remove(paths[0].clone()))
+            .namespace(&[(parent, &name)], |paths| {
+                self.remote.remove(paths[0].clone(), parent_id)
+            })
             .await?;
         let path = &paths[0];
         // The removed entry's changes are moot: deletion wins (C10), for it alone (C4a).
@@ -173,11 +181,13 @@ impl Space {
     pub async fn rename(self: Arc<Self>, from: (INodeNo, OsString), to: (INodeNo, OsString)) -> Result<()> {
         let from_child = (from.0, from.1.as_os_str());
         let to_child = (to.0, to.1.as_os_str());
+        let parents = (self.entry_id(from.0), self.entry_id(to.0));
         let from = self.located_child(from.0, &from.1).await?;
         self.settle(&from).await?;
         let (paths, ()) = self
             .namespace(&[from_child, to_child], |paths| {
-                self.remote.rename(paths[0].clone(), paths[1].clone())
+                self.remote
+                    .rename(paths[0].clone(), parents.0, paths[1].clone(), parents.1)
             })
             .await?;
         let (from, to) = (&paths[0], &paths[1]);

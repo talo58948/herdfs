@@ -47,8 +47,7 @@ async fn stall_store(lab: &Lab) -> tokio::sync::OwnedSemaphorePermit {
 async fn bytes_stored_for_an_upload_revoked_in_flight_are_swept() {
     let lab = Lab::start().await;
     let (alice, bob) = (lab.user("alice"), lab.user("bob"));
-    lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
-        .await;
+    let root = lab.create_space(&alice, "team").await;
     set_acl(&lab, &alice, "user:bob", Some("write")).await;
 
     let bytes = b"revoked in flight".to_vec();
@@ -83,7 +82,7 @@ async fn bytes_stored_for_an_upload_revoked_in_flight_are_swept() {
     let (_, file) = lab
         .rpc(
             &bob,
-            &json!({"op": "create", "space": "team", "path": "f", "mode": 420}),
+            &json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420}),
         )
         .await;
     let chunk = json!({"id": ChunkId::of(&bytes).to_string(), "len": bytes.len()});
@@ -114,8 +113,7 @@ async fn bytes_stored_for_an_upload_revoked_in_flight_are_swept() {
 async fn a_stalled_upload_with_write_kept_commits_and_stays() {
     let lab = Lab::start().await;
     let (alice, bob) = (lab.user("alice"), lab.user("bob"));
-    lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
-        .await;
+    let root = lab.create_space(&alice, "team").await;
     set_acl(&lab, &alice, "user:bob", Some("write")).await;
 
     let bytes = b"kept in flight".to_vec();
@@ -142,7 +140,7 @@ async fn a_stalled_upload_with_write_kept_commits_and_stays() {
     let (_, file) = lab
         .rpc(
             &bob,
-            &json!({"op": "create", "space": "team", "path": "f", "mode": 420}),
+            &json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420}),
         )
         .await;
     let chunk = json!({"id": ChunkId::of(&bytes).to_string(), "len": bytes.len()});
@@ -164,12 +162,11 @@ async fn a_stalled_upload_with_write_kept_commits_and_stays() {
 async fn a_url_granted_just_before_its_version_leaves_retention_keeps_its_chunk() {
     let lab = Lab::start().await;
     let alice = lab.user("alice");
-    lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
-        .await;
+    let root = lab.create_space(&alice, "team").await;
     let (_, file) = lab
         .rpc(
             &alice,
-            &json!({"op": "create", "space": "team", "path": "f", "mode": 420}),
+            &json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420}),
         )
         .await;
     let commit = |request_id: &str, bytes: &[u8]| {

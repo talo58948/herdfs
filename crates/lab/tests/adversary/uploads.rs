@@ -24,7 +24,15 @@ fn bob_cannot_commit_alices_chunks_without_uploading_them() -> Result<()> {
         return Ok(());
     };
     let (secret, plan) = (&scene.secret, &scene.plan);
-    let create = json!({"op": "create", "space": SPACE, "path": "eng/claim", "mode": 0o644});
+    let stat = Request::Stat {
+        space: SPACE.into(),
+        path: SpacePath::try_from("eng")?,
+    };
+    let Response::Entry { entry: eng } = scene.lab.rpc(ALICE, &stat)? else {
+        bail!("stat answers with the entry")
+    };
+    let create =
+        json!({"op": "create", "space": SPACE, "path": "eng/claim", "parent": eng.id, "mode": 0o644});
     let created = scene.attacker.rpc(&create)?;
     let Response::Entry { entry: claim } = serde_json::from_slice(&created.body)? else {
         bail!("create answers with the entry");

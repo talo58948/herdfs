@@ -141,15 +141,23 @@ impl Model {
                 let count = self.versions[version].chunks.len();
                 ensure(chunks.iter().all(|&index| (index as usize) < count), Invalid)
             }
-            Request::Create { space, path, .. }
-            | Request::Mkdir { space, path, .. }
-            | Request::Symlink { space, path, .. } => {
+            Request::Create {
+                space, path, parent, ..
+            }
+            | Request::Mkdir {
+                space, path, parent, ..
+            }
+            | Request::Symlink {
+                space, path, parent, ..
+            } => {
                 self.require(who, space, path, Perm::Write)?;
+                self.expect_parent(space, path, *parent)?;
                 ensure(self.node(space, path).is_err(), Exists)?;
                 self.parent_dir(space, path)
             }
-            Request::Remove { space, path } => {
+            Request::Remove { space, path, parent } => {
                 self.require(who, space, path, Perm::Write)?;
+                self.expect_parent(space, path, *parent)?;
                 ensure(!path.is_root(), Invalid)?;
                 let node = self.node(space, path)?;
                 ensure(
@@ -157,7 +165,20 @@ impl Model {
                     NotEmpty,
                 )
             }
-            Request::Rename { space, from, to } => self.rename_outcome(who, space, from, to),
+            Request::Rename {
+                space,
+                from,
+                from_parent,
+                to,
+                to_parent,
+            } => {
+                // Refusals for access come before any hint of what the parent paths name.
+                self.require(who, space, from, Perm::Write)?;
+                self.require(who, space, to, Perm::Write)?;
+                self.expect_parent(space, from, *from_parent)?;
+                self.expect_parent(space, to, *to_parent)?;
+                self.rename_outcome(who, space, from, to)
+            }
             Request::SetAttr { space, path, .. } => {
                 self.require(who, space, path, Perm::Write)?;
                 self.node(space, path).map(drop)
@@ -211,6 +232,14 @@ impl Model {
             Kind::Dir => Ok(()),
             _ => Err(ErrorCode::NotDir),
         }
+    }
+
+    fn expect_parent(&self, space: &str, path: &SpacePath, expected: EntryId) -> Outcome {
+        let parent = path.parent().unwrap_or_default();
+        ensure(
+            self.node(space, &parent).map(|node| node.id) == Ok(expected),
+            ErrorCode::NotFound,
+        )
     }
 
     fn rename_outcome(&self, who: &Principal, space: &str, from: &SpacePath, to: &SpacePath) -> Outcome {

@@ -30,16 +30,23 @@ impl Sim {
     pub fn deep_rename(&mut self) {
         let space = self.space();
         let (top, long) = (SpacePath::try_from("z").unwrap(), "d".repeat(255));
-        let mkdir = |path: &SpacePath| Request::Mkdir {
+        let mut deepest = top.clone();
+        let mut mkdir = Request::Mkdir {
             space: space.clone(),
-            path: path.clone(),
+            path: deepest.clone(),
+            parent: self.parent(&space, &deepest),
             mode: 0o755,
         };
-        let mut deepest = top.clone();
-        self.send(0, &mkdir(&deepest));
+        self.send(0, &mkdir);
         for _ in 0..15 {
             deepest = deepest.join(&long).unwrap();
-            self.send(0, &mkdir(&deepest));
+            mkdir = Request::Mkdir {
+                space: space.clone(),
+                path: deepest.clone(),
+                parent: self.parent(&space, &deepest),
+                mode: 0o755,
+            };
+            self.send(0, &mkdir);
         }
         // 1 + 15 * 256 + 201 = 4042 bytes.
         let file = deepest.join(&"f".repeat(200)).unwrap();
@@ -47,6 +54,7 @@ impl Sim {
             0,
             &Request::Create {
                 space: space.clone(),
+                parent: self.parent(&space, &file),
                 path: file,
                 mode: 0o644,
             },
@@ -61,7 +69,9 @@ impl Sim {
         let rename = Request::Rename {
             space: space.clone(),
             from: top.clone(),
+            from_parent: self.parent(&space, &top),
             to: to.clone(),
+            to_parent: self.parent(&space, &to),
         };
         self.send(0, &rename);
         // Take the chain down again, deepest first: every later check would walk it.
@@ -73,11 +83,13 @@ impl Sim {
         let mut chain: Vec<_> = chain.cloned().collect();
         chain.sort_by_key(|path| std::cmp::Reverse(path.as_str().len()));
         for path in chain {
+            let parent = self.parent(&space, &path);
             self.send(
                 0,
                 &Request::Remove {
                     space: space.clone(),
                     path,
+                    parent,
                 },
             );
         }
@@ -88,20 +100,24 @@ impl Sim {
         let who = if self.rng.chance(40) { 0 } else { self.actor() };
         let space = self.space();
         let path = self.path(&space);
+        let parent = self.parent(&space, &path);
         let request = match self.rng.below(20) {
             0..=9 => Request::Create {
                 space,
                 path,
+                parent,
                 mode: 0o644,
             },
             10..=16 => Request::Mkdir {
                 space,
                 path,
+                parent,
                 mode: 0o755,
             },
             _ => Request::Symlink {
                 space,
                 path,
+                parent,
                 target: "../elsewhere".into(),
             },
         };
@@ -111,7 +127,8 @@ impl Sim {
     pub fn remove(&mut self) {
         let (who, space) = (self.actor(), self.space());
         let path = self.existing_path(&space);
-        self.send(who, &Request::Remove { space, path });
+        let parent = self.parent(&space, &path);
+        self.send(who, &Request::Remove { space, path, parent });
     }
 
     pub fn rename(&mut self) {
@@ -124,11 +141,18 @@ impl Sim {
         let request = Request::Rename {
             space: space.clone(),
             from: from.clone(),
+            from_parent: self.parent(&space, &from),
             to: to.clone(),
+            to_parent: self.parent(&space, &to),
         };
         if self.exec(who, &request).is_ok() && from != to {
             self.check_rename(&space, &from, &to, &moved);
         }
+    }
+
+    fn parent(&self, space: &str, child: &SpacePath) -> herdfs_core::proto::EntryId {
+        let parent = child.parent().unwrap_or_default();
+        self.model.node(space, &parent).map_or(NO_ENTRY, |node| node.id)
     }
 
     pub fn set_attr(&mut self) {

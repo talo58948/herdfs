@@ -78,7 +78,26 @@ pub fn set_acl(lab: &Lab, at: &str, principal: &str, perm: Option<Perm>) -> Resu
 /// Makes directory `at` in [`SPACE`] as the admin.
 pub fn mkdir(lab: &Lab, at: &str) -> Result<()> {
     let (space, path, mode) = (SPACE.into(), path(at)?, 0o755);
-    lab.rpc(ADMIN, &Request::Mkdir { space, path, mode })?;
+    let parent_path = path.parent().unwrap_or_default();
+    let Response::Entry { entry: parent } = lab.rpc(
+        ADMIN,
+        &Request::Stat {
+            space: SPACE.into(),
+            path: parent_path,
+        },
+    )?
+    else {
+        bail!("Stat answered something else")
+    };
+    lab.rpc(
+        ADMIN,
+        &Request::Mkdir {
+            space,
+            path,
+            parent: parent.id,
+            mode,
+        },
+    )?;
     Ok(())
 }
 

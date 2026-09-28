@@ -27,16 +27,11 @@ fn key(bytes: &[u8]) -> String {
 
 async fn delete_chunk_space(lab: &Lab, bytes: &[u8]) {
     let alice = lab.user("alice");
-    assert_eq!(
-        lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
-            .await
-            .0,
-        StatusCode::OK
-    );
+    let root = lab.create_space(&alice, "team").await;
     let (_, file) = lab
         .rpc(
             &alice,
-            &json!({"op": "create", "space": "team", "path": "f", "mode": 420}),
+            &json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420}),
         )
         .await;
     let id = ChunkId::of(bytes);

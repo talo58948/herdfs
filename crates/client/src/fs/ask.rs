@@ -183,8 +183,11 @@ impl Space {
         };
         self.inodes.observe(&found, asked, false);
         self.expect(self.ino(entry), &found)?;
-        if self.inodes.with(entry, |state| state.switch((head, writable))) == Some(true) {
-            self.follow_pins(entry);
+        let switched = self.switch_version(entry, |state| {
+            let switched = state.switch((head, writable));
+            Some((switched, switched))
+        });
+        if switched == Some(true) {
             self.kernel.invalidate_attrs(entry);
         }
         if mode.writes() && !writable {

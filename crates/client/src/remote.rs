@@ -117,16 +117,34 @@ impl Remote {
         }
     }
 
-    pub async fn create(&self, path: SpacePath, mode: u32) -> Result<Entry> {
-        self.entry(|space| Request::Create { space, path, mode }).await
+    pub async fn create(&self, path: SpacePath, parent: EntryId, mode: u32) -> Result<Entry> {
+        self.entry(|space| Request::Create {
+            space,
+            path,
+            parent,
+            mode,
+        })
+        .await
     }
 
-    pub async fn mkdir(&self, path: SpacePath, mode: u32) -> Result<Entry> {
-        self.entry(|space| Request::Mkdir { space, path, mode }).await
+    pub async fn mkdir(&self, path: SpacePath, parent: EntryId, mode: u32) -> Result<Entry> {
+        self.entry(|space| Request::Mkdir {
+            space,
+            path,
+            parent,
+            mode,
+        })
+        .await
     }
 
-    pub async fn symlink(&self, path: SpacePath, target: String) -> Result<Entry> {
-        self.entry(|space| Request::Symlink { space, path, target }).await
+    pub async fn symlink(&self, path: SpacePath, parent: EntryId, target: String) -> Result<Entry> {
+        self.entry(|space| Request::Symlink {
+            space,
+            path,
+            parent,
+            target,
+        })
+        .await
     }
 
     pub async fn set_attr(&self, path: SpacePath, mode: Option<u32>, mtime_ms: Option<i64>) -> Result<Entry> {
@@ -140,12 +158,25 @@ impl Remote {
     }
 
     /// Removes the entry at `path`, and answers with it.
-    pub async fn remove(&self, path: SpacePath) -> Result<Entry> {
-        self.entry(|space| Request::Remove { space, path }).await
+    pub async fn remove(&self, path: SpacePath, parent: EntryId) -> Result<Entry> {
+        self.entry(|space| Request::Remove { space, path, parent }).await
     }
 
-    pub async fn rename(&self, from: SpacePath, to: SpacePath) -> Result<()> {
-        self.call(|space| Request::Rename { space, from, to }).await?;
+    pub async fn rename(
+        &self,
+        from: SpacePath,
+        from_parent: EntryId,
+        to: SpacePath,
+        to_parent: EntryId,
+    ) -> Result<()> {
+        self.call(|space| Request::Rename {
+            space,
+            from,
+            from_parent,
+            to,
+            to_parent,
+        })
+        .await?;
         Ok(())
     }
 

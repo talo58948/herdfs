@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, ensure};
 
-use crate::{VISIBLE_AFTER, assert_history, assert_reads, random_bytes, two_clients, wait_committed};
+use crate::{VISIBLE_AFTER, assert_history, assert_reads, random_bytes, two_clients};
 
 /// The clients of `two_clients`, both writing.
 const CLIENTS: [&str; 2] = ["a", "b"];
@@ -74,7 +74,7 @@ fn f2_commits_survive_authority_crashes_around_them() -> Result<()> {
     eprintln!("{} files closed, {acknowledged} acknowledged", written.len());
     ensure!(acknowledged > 0, "no commit was acknowledged");
     for client in CLIENTS {
-        wait_committed(&lab, client)?;
+        lab.wait_committed(client)?;
     }
     thread::sleep(VISIBLE_AFTER);
     // Every closed file ends as one whole version, readable on the other client; for the
