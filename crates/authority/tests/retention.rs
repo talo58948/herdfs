@@ -74,3 +74,22 @@ fn deleting_a_space_needs_admin_and_frees_its_name() {
     fx.call(&bob(), Request::CreateSpace { space: SPACE.into() })
         .unwrap();
 }
+
+#[test]
+fn a_commit_replayed_after_its_version_left_retention_answers_with_the_head() {
+    // contract: C4a, C5
+    let mut fx = Fixture::new();
+    let (file, _) = fx.file("f", b"one");
+    fx.commit(&alice(), file.id, "mine", None, false, &[]).unwrap();
+    let newer = fx.commit(&alice(), file.id, "newer", None, false, &[]).unwrap();
+    // Fixture times are about 1,000 ms; the request ids are kept for the grace.
+    let head_only = Policy {
+        versions: 1,
+        max_age_ms: 0,
+        grace_ms: 1_000_000,
+    };
+    assert_eq!(fx.authority.collect(10_000, &head_only).unwrap().pruned, 2);
+    let replayed = fx.commit(&alice(), file.id, "mine", None, false, &[]);
+    assert_eq!(replayed, Ok(newer.clone()), "the replay commits nothing");
+    assert_eq!(fx.history(&alice(), "f").unwrap(), [newer]);
+}

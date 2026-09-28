@@ -28,10 +28,20 @@ impl Model {
             panic!("Commit answered {reply:?}")
         };
         let key = (who.user.clone(), request_id.clone());
-        if let Some(first) = self.commits.get(&key) {
-            // contract: C4a, C12 — a retried commit answers with its first version and adds none.
+        if let Some((_, first, _)) = self.commits.get(&key) {
+            // Once its version left retention or was purged, the head answers.
+            let node = self
+                .node_by_id(space, *entry)
+                .expect("a request id's entry exists")
+                .1;
+            let answer = if node.history.contains(first) {
+                first
+            } else {
+                node.history.last().expect("a head")
+            };
+            // contract: C4a, C5, C12 — a retried commit answers without committing again.
             assert_eq!(
-                *version, self.versions[first],
+                *version, self.versions[answer],
                 "retry of {request_id} made a new version"
             );
             return;
@@ -47,7 +57,7 @@ impl Model {
         };
         assert_eq!(*version, expected);
         self.add_version(space, version.clone(), mtime_ms.unwrap_or(now_ms));
-        self.commits.insert(key, version.id);
+        self.commits.insert(key, (*entry, version.id, now_ms));
         self.acked.insert(version.id, (space.clone(), *entry));
         if *guarded {
             *self.guarded_wins.entry((*entry, *base)).or_default() += 1;
@@ -131,8 +141,14 @@ impl Model {
     ) -> Outcome {
         self.space(space)?;
         let retry = (who.user.clone(), request_id.to_owned());
-        if let Some(first) = self.commits.get(&retry) {
-            return ensure(self.versions[first].entry == entry, ErrorCode::Invalid);
+        if let Some((first, version, _)) = self.commits.get(&retry) {
+            ensure(*first == entry, ErrorCode::Invalid)?;
+            let (path, node) = self.node_by_id(space, entry).ok_or(ErrorCode::NotFound)?;
+            // A replay after its version went answers with the head, to a reader only.
+            return match node.history.contains(version) {
+                true => Ok(()),
+                false => self.require(who, space, path, Perm::Read),
+            };
         }
         let (path, node) = self.node_by_id(space, entry).ok_or(ErrorCode::NotFound)?;
         self.require(who, space, path, Perm::Write)?;

@@ -186,30 +186,35 @@ fn a_forks_time_does_not_grow_with_the_size_of_its_files() {
     let entries: Vec<_> = (0..FORKED_FILES)
         .map(|file| fx.create(&alice(), &format!("f{file}")).unwrap().id)
         .collect();
-    let fork_after = |fx: &mut Fixture, chunks: &[ChunkRef], name: &str| {
+    let commit_all = |fx: &mut Fixture, chunks: &[ChunkRef], name: &str| {
         for (file, entry) in entries.iter().enumerate() {
             let request_id = format!("{name}-{file}");
             fx.commit(&alice(), *entry, &request_id, None, false, chunks)
                 .unwrap();
         }
-        // The fastest of three forks, so one slow disk flush on a busy host does not decide it.
-        let forks = (0..3).map(|n| {
-            let name = format!("{name}-{n}");
-            let started = std::time::Instant::now();
-            fx.call(
-                &alice(),
-                Request::Fork {
-                    space: SPACE.into(),
-                    name,
-                },
-            )
-            .unwrap();
-            started.elapsed()
-        });
-        forks.min().unwrap()
     };
-    let small = fork_after(&mut fx, &[chunk], "small");
-    let large = fork_after(&mut fx, &vec![chunk; CHUNKS_PER_FILE], "large");
+    let fork = |fx: &mut Fixture, space: &str, name: String| {
+        let started = std::time::Instant::now();
+        fx.call(
+            &alice(),
+            Request::Fork {
+                space: space.into(),
+                name,
+            },
+        )
+        .unwrap();
+        started.elapsed()
+    };
+    // A fork of the one-chunk state is the small space; then the same files grow large.
+    commit_all(&mut fx, &[chunk], "small");
+    fork(&mut fx, SPACE, "small".into());
+    commit_all(&mut fx, &vec![chunk; CHUNKS_PER_FILE], "large");
+    // Alternate the two and keep the fastest of each, so both see the same load on a busy host.
+    let (mut small, mut large) = (Duration::MAX, Duration::MAX);
+    for n in 0..3 {
+        small = small.min(fork(&mut fx, "small", format!("small-{n}")));
+        large = large.min(fork(&mut fx, SPACE, format!("large-{n}")));
+    }
     // Ten times, with a floor for a fork too quick to time well.
     let bound = (small * 10).max(Duration::from_millis(100));
     assert!(

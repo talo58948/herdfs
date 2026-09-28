@@ -62,7 +62,7 @@ fn a_late_grant_shows_the_head_but_not_earlier_history() -> Result<()> {
         let refusal = lab
             .rpc(BOB, &request)
             .expect_err("bob may not reach history before his grant");
-        assert_eq!(refusal.code, ErrorCode::Denied, "{request:?}");
+        assert_eq!(refusal.code, ErrorCode::NotFound, "{request:?}");
         let named = refusal.message.contains("plans") || refusal.message.contains("q4");
         assert!(!named, "the refusal names the path: {refusal}");
     }
@@ -75,7 +75,7 @@ fn a_late_grant_shows_the_head_but_not_earlier_history() -> Result<()> {
         "the old head left with the new one"
     );
     let refusal = lab.rpc(BOB, &grant(&second)).expect_err("no longer the head");
-    assert_eq!(refusal.code, ErrorCode::Denied);
+    assert_eq!(refusal.code, ErrorCode::NotFound);
     let all = [first, second, third];
     assert_eq!(history(&lab, ADMIN, path)?, all, "an admin sees everything");
     assert_eq!(

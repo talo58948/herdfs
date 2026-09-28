@@ -58,6 +58,10 @@ impl Model {
         self.uploads
             .retain(|_, (_, at_ms)| *at_ms >= now_ms - policy.grace_ms);
         self.forget(&pruned);
+        let forgotten = now_ms
+            .saturating_sub(policy.max_age_ms)
+            .saturating_sub(policy.grace_ms);
+        self.commits.retain(|_, (.., at_ms)| *at_ms >= forgotten);
         pruned.len()
     }
 

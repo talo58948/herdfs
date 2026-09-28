@@ -11,7 +11,7 @@ use crate::{Call, Result, refuse};
 
 /// Bumped when the schema changes. v0 keeps no data worth migrating, so an
 /// older database is recreated.
-pub(crate) const SCHEMA_VERSION: i64 = 3;
+pub(crate) const SCHEMA_VERSION: i64 = 4;
 
 pub(crate) const DROP_ALL: &str = "
 DROP TABLE IF EXISTS commits;
@@ -25,6 +25,8 @@ DROP TABLE IF EXISTS entries;
 // Temporary storage (statement journals of large renames) stays in memory, so
 // the authority never depends on free space outside its database's directory.
 // Ids are AUTOINCREMENT so a removed entry's or version's id is never reused.
+// Request ids outlive their versions, so a commit replayed after retention or
+// a purge removed its version is still known; collection drops them later.
 // A version names its chunk list by hash, so fork and restore copy a
 // reference, never the list, and their time does not grow with file size.
 pub(crate) const SCHEMA: &str = "
@@ -74,10 +76,12 @@ CREATE TABLE IF NOT EXISTS uploads (
 CREATE TABLE IF NOT EXISTS commits (
     principal TEXT NOT NULL,
     request_id TEXT NOT NULL,
-    version INTEGER NOT NULL REFERENCES versions (id) ON DELETE CASCADE,
+    entry INTEGER NOT NULL REFERENCES entries (id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    at_ms INTEGER NOT NULL,
     PRIMARY KEY (principal, request_id)
 );
-CREATE INDEX IF NOT EXISTS commits_by_version ON commits (version);
+CREATE INDEX IF NOT EXISTS commits_by_entry ON commits (entry);
 ";
 
 const ENTRY: &str = "SELECT e.id, e.path, e.kind, e.mode, e.mtime_ms, e.head, coalesce(v.size, 0), e.target
