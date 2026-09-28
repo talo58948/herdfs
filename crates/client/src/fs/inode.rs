@@ -68,11 +68,7 @@ impl State {
 
     /// The entry with the journal copy of this client's changes, if any: what a reply shows.
     pub fn view(&self) -> Option<(Entry, Option<Arc<File>>)> {
-        Some((self.entry.clone()?, self.copy()))
-    }
-
-    pub fn copy(&self) -> Option<Arc<File>> {
-        self.local.as_ref().and_then(Local::copy)
+        Some((self.entry.clone()?, self.local.as_ref().and_then(Local::copy)))
     }
 
     /// The version the entry's open files read, if known, and whether this client may write it.

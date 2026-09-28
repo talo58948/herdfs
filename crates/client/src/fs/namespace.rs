@@ -55,7 +55,7 @@ impl Space {
         let path = self.located(ino).await?;
         // Answered from the entry held, which offline lets a truncation go on (C12), and found
         // before anything is journaled, so a failure changes nothing.
-        let (entry, _, local) = self.entry(&path).await?;
+        let (entry, ..) = self.entry(&path).await?;
         self.expect(ino, &entry)?;
         if let Some(size) = change.size {
             self.truncate(ino, size, change.fh).await?;
@@ -72,18 +72,16 @@ impl Space {
             // A commit already under way would stamp its own time over this one.
             self.committed(entry_id).await?;
         }
-        if mode.is_none() && mtime_ms.is_none() {
-            // A truncation has made the journal copy to show since.
-            let (entry, local) = match change.size {
-                Some(_) => self.view(entry),
-                None => (entry, local),
-            };
-            return Ok(self.attr(&entry, local.as_deref()));
-        }
-        let asked = Instant::now();
-        let entry = self.remote.set_attr(path, mode, mtime_ms).await?;
-        self.inodes.observe(&entry, asked, false);
-        self.expect(ino, &entry)?;
+        let entry = if mode.is_some() || mtime_ms.is_some() {
+            let asked = Instant::now();
+            let entry = self.remote.set_attr(path, mode, mtime_ms).await?;
+            self.inodes.observe(&entry, asked, false);
+            self.expect(ino, &entry)?;
+            entry
+        } else {
+            entry
+        };
+        // The inode as it stands now, with any journal copy the truncation made (C1).
         let (entry, local) = self.view(entry);
         Ok(self.attr(&entry, local.as_deref()))
     }
