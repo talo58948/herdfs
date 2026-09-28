@@ -37,7 +37,7 @@ Every test names the lines it checks with a `// contract: C9, S2` comment. Code 
 | S6 | Whether bytes exist anywhere in the store is not observable through the protocol: uploads always happen and get identical answers, and commits may reference only chunks from a readable base or uploaded by the committer. Known residual: the store's write latency can differ for bytes it already holds (measured median +4 ms of 52 ms on MinIO), which the R4 timing test bounds. |
 
 | S7 | Deleting a file, purging its history, deleting a space, or a version leaving retention erases the bytes only it referenced from the store within grace + interval: the objects are deleted and a read with the store's own credentials returns 404. Chunks still referenced by a retained version anywhere stay. Physical media erasure after that is the store's: MinIO empties its trash about 5 minutes later; S3 follows its own deletion policy. |
-| S8 | A principal can read an entry's current head, and older versions only if they were created after it gained read access there (admins of the space see all). Granting access later does not reveal earlier history. |
+| S8 | A principal can read an entry's current head, and older versions only if they were created after it gained read access at the entry's current path (admins of the space see all). Granting access later does not reveal earlier history, and no request (grant, restore, commit base) lets a principal use or confirm a version it cannot see. History follows the path: moving an entry is its mover's disclosure decision. A group grant counts from when the group was granted, since membership belongs to the identity provider. |
 
 ## Strategy and plugins
 
