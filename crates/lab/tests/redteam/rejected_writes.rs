@@ -86,7 +86,6 @@ fn read_after_a_settled_write(revoke: bool) -> Result<Option<[&'static str; 2]>>
 /// [`an_open_file_reads_the_head_after_its_clients_write_commits`], where the commit succeeds.
 // contract: C3
 #[test]
-#[ignore = "ROUND10: a refused write leaves its journal copy's pages to open files"]
 fn an_open_file_reads_the_head_after_its_clients_write_is_refused() -> Result<()> {
     let Some(read) = read_after_a_settled_write(true)? else {
         return Ok(());

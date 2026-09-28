@@ -117,6 +117,12 @@ impl Space {
         let _ = self.notifier.set(notifier);
     }
 
+    /// Drops the kernel's pages and attributes of the entry, whose bytes a settled commit may
+    /// have made other than those its journal copy served (C3), without waiting for it.
+    pub fn forget_pages(&self, entry: EntryId) {
+        let _ = self.invalidate(entry);
+    }
+
     /// Starts dropping the kernel's pages of the entry, which a newer version replaced. A reply
     /// that switched the version waits for it, so no later read sees the old one (C3): the kernel
     /// waits for the pages a read in progress holds, which other tasks answer. A read or write,

@@ -123,7 +123,6 @@ fn read_after_a_retried_commit(purge: bool) -> Result<Option<[&'static str; 2]>>
 /// on to b's save.
 // contract: C3
 #[test]
-#[ignore = "ROUND10: a retried commit answered with another head leaves the journal copy's pages"]
 fn an_open_file_reads_the_head_after_a_retried_commit_of_a_purged_version() -> Result<()> {
     let Some(read) = read_after_a_retried_commit(true)? else {
         return Ok(());
