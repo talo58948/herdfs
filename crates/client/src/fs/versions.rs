@@ -53,19 +53,25 @@ impl Space {
     /// a newer head it names, so every handle reads it from its next read (C3).
     pub(super) async fn follow(&self, entry: &Entry, asked: Asked) {
         self.remember(entry, asked);
+        self.move_on(entry).await;
+    }
+
+    /// Switches an inode that open files read to a newer head `entry` names, fetched or cached,
+    /// so every handle reads it from its next read (C3).
+    pub(super) async fn move_on(&self, entry: &Entry) {
         let current = self.reader.current(entry.id);
         let current = current.map(|file| file.map(|file| file.version.id));
-        let (open, changed) = (self.journal.is_open(&entry.id), current != Some(entry.head));
-        if open && changed && self.journal.changes(entry.id).is_none() {
+        let (open, newer) = (self.journal.is_open(&entry.id), current < Some(entry.head));
+        if open && newer && self.journal.changes(entry.id).is_none() {
             let _ = self.head(entry.id, &entry.path, false, false).await;
         }
     }
 
     /// The entry's current head, which its open files then follow. Every open asks, for
     /// close-to-open consistency (C2), and one for writing needs write access. Offline, the
-    /// head followed, with the access it came with, lets writes and cached reads go on, and a
-    /// truncating write needs none, since its unguarded commit is right on an unknown base too
-    /// (C5, C12).
+    /// head followed, with the access it came with, lets writes and cached reads go on; a
+    /// truncating write needs none, since its unguarded commit is right on an unknown base too,
+    /// nor does one over pending changes, which hold the bytes (C5, C12).
     pub(super) async fn head(
         &self,
         entry: EntryId,
@@ -79,7 +85,7 @@ impl Space {
                 return match self.reader.known(entry) {
                     Some((_, false)) if write => Err(Errno::EACCES.into()),
                     Some((file, _)) => Ok(file),
-                    None if truncate => Ok(None),
+                    None if truncate || self.journal.changes(entry).is_some() => Ok(None),
                     None => Err(err),
                 };
             }

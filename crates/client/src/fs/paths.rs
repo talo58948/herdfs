@@ -55,7 +55,11 @@ impl Space {
         loop {
             let asked = self.asked();
             let found = match self.cached(path, asked.1) {
-                Some(cached) => Ok(cached),
+                // A listing caches entries it never followed.
+                Some(cached) => {
+                    self.move_on(&cached.0).await;
+                    Ok(cached)
+                }
                 None => self.fetch(path, asked).await,
             };
             let (entry, fetched) = match found {

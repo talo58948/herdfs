@@ -1,7 +1,7 @@
 //! Open files: reads through the journal copy or the entry's current version, writes into the
 //! journal.
 
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::{ffi::OsString, fs::File, io, os::unix::fs::FileExt};
 
@@ -12,7 +12,8 @@ use herdfs_core::proto::{EntryId, ErrorCode};
 use super::{PERMISSIONS, Space};
 use tempfile::NamedTempFile;
 
-use crate::{Error, Result, journal::Registration, lock, reader::Head};
+use crate::journal::{Journal, Registration};
+use crate::{Error, Result, lock, reader::Head};
 
 pub struct Handle {
     pub entry: EntryId,
@@ -21,20 +22,23 @@ pub struct Handle {
     dirty: AtomicBool,
     /// Truncated at open and not sealed since, which only the last close seals.
     truncated: AtomicBool,
+    /// The entry's latest seal at this handle's open or last successful fsync.
+    synced: AtomicU64,
     /// Chunks this handle pinned, which release unpins.
     pub pinned: Mutex<Vec<ChunkId>>,
     _registration: Registration,
 }
 
 impl Handle {
-    fn new(entry: EntryId, writable: bool, registration: Registration) -> Self {
+    fn new(entry: EntryId, writable: bool, journal: &Arc<Journal>) -> Self {
         Self {
             entry,
             writable,
             dirty: AtomicBool::new(false),
             truncated: AtomicBool::new(false),
+            synced: AtomicU64::new(journal.seals(entry).0),
             pinned: Mutex::default(),
-            _registration: registration,
+            _registration: journal.opened(entry),
         }
     }
 }
@@ -45,10 +49,11 @@ impl Space {
         let path = self.located(ino).await?;
         let writable = flags.acc_mode() != OpenAccMode::O_RDONLY;
         let truncate = writable && flags.0 & libc::O_TRUNC != 0;
-        let handle = Handle::new(entry, writable, self.journal.opened(entry));
+        let handle = Handle::new(entry, writable, &self.journal);
         let mut upgrade = None;
-        // While this client holds changes, every handle reads them, so no head is needed (C1).
-        if self.journal.changes(entry).is_none()
+        // Every open for writing asks for write access, over pending changes too (C1, C4a); one
+        // for reading needs no head while this client holds changes, which every handle reads.
+        if (writable || self.journal.changes(entry).is_none())
             && let Some(file) = self.head(entry, &path, writable, truncate).await?
             && !writable
         {
@@ -86,7 +91,7 @@ impl Space {
         };
         self.reader
             .follow(entry.id, (None, true), |entry| self.journal.is_open(entry));
-        let fh = self.register(Handle::new(entry.id, true, self.journal.opened(entry.id)));
+        let fh = self.register(Handle::new(entry.id, true, &self.journal));
         Ok((self.added(&entry), fh))
     }
 
@@ -139,7 +144,14 @@ impl Space {
         let handle = self.handle(fh)?;
         self.seal(&handle, true)?;
         self.journal.urge(handle.entry);
-        self.committed(handle.entry).await
+        self.committed(handle.entry).await?;
+        // A commit refused since this handle's last fsync or open may hold its writes, and a
+        // local disk reports a failed writeback to every descriptor open then (C2).
+        let (sealed, refused) = self.journal.seals(handle.entry);
+        if refused > handle.synced.swap(sealed, Relaxed) {
+            return Err(Errno::EIO.into());
+        }
+        Ok(())
     }
 
     /// Waits for the commit of the entry's pending write, if any. EIO if that attempt fails.
@@ -159,7 +171,7 @@ impl Space {
         let handle = handle.filter(|handle| handle.writable);
         let entry = self.entry_id(ino);
         let _registration = self.journal.opened(entry);
-        if handle.is_none() && self.journal.changes(entry).is_none() {
+        if handle.is_none() {
             self.head(entry, &self.located(ino).await?, true, size == 0)
                 .await?;
         }

@@ -60,7 +60,6 @@ fn read_after_a_stat(list: bool) -> Result<Option<&'static str>> {
 // contract: C3 (docs/architecture.md: once a getattr sees a newer head, every handle on the inode
 // reads the new version from its next read)
 #[test]
-#[ignore = "ROUND11: a stat answered from a listing reports a new version, open files keep the old"]
 fn an_open_file_reads_the_version_its_stat_reported_after_a_listing() -> Result<()> {
     let Some(read) = read_after_a_stat(true)? else {
         return Ok(());
