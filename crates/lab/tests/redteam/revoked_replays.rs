@@ -54,13 +54,11 @@ fn set_alice(lab: &Lab, perm: Option<Perm>) -> Result<()> {
 
 /// Repro: alice closes a rewrite and opens the file while it is pending. The authority commits
 /// the rewrite, but its reply is still crossing alice's slow link when that link is cut. Access is
-/// then revoked before the journal retries. The retry is denied, even though the commit already
-/// landed, and the client records it as a failed writeback, so `fsync` reports EIO. Three revoked
-/// trials reproduce; the same lost reply without revocation is the passing control.
+/// then revoked before the journal retries. The replay must confirm the retained commit so the
+/// client drops its journal copy and `fsync` succeeds. Three revoked trials run beside a control.
 // contract: C4a, S8 (docs/architecture.md: fsync returns EIO if the commit fails)
 #[test]
-#[ignore = "ROUND15: denied replay makes fsync reject a commit that already landed"]
-fn fsync_accepts_a_commit_whose_replay_is_denied_after_revocation() -> Result<()> {
+fn fsync_accepts_a_commit_replayed_after_revocation() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");
         return Ok(());

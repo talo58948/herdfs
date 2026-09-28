@@ -24,28 +24,29 @@ impl Model {
         else {
             unreachable!("only a Commit is folded in as one")
         };
-        let Response::Version { version } = reply else {
-            panic!("Commit answered {reply:?}")
-        };
         let key = (who.user.clone(), request_id.clone());
         if let Some((_, first, _)) = self.commits.get(&key) {
-            // Once its version left retention or was purged, the head answers.
-            let node = self
+            let (path, node) = self
                 .node_by_id(space, *entry)
-                .expect("a request id's entry exists")
-                .1;
-            let answer = if node.history.contains(first) {
-                first
+                .expect("a request id's entry exists");
+            let expected = if node.history.contains(first) {
+                Response::Version {
+                    version: self.versions[first].clone(),
+                }
+            } else if self.perm(space, path, who) >= Some(Perm::Read) {
+                Response::Version {
+                    version: self.versions[node.history.last().expect("a head")].clone(),
+                }
             } else {
-                node.history.last().expect("a head")
+                Response::Done
             };
             // contract: C4a, C5, C12 — a retried commit answers without committing again.
-            assert_eq!(
-                *version, self.versions[answer],
-                "retry of {request_id} made a new version"
-            );
+            assert_eq!(*reply, expected, "retry of {request_id} made a new version");
             return;
         }
+        let Response::Version { version } = reply else {
+            panic!("new Commit answered {reply:?}")
+        };
         let (size, author) = (total_len(chunks), who.user.clone());
         let expected = Version {
             id: version.id,
@@ -141,18 +142,10 @@ impl Model {
     ) -> Outcome {
         self.space(space)?;
         let retry = (who.user.clone(), request_id.to_owned());
-        if let Some((first, version, _)) = self.commits.get(&retry) {
+        if let Some((first, _, _)) = self.commits.get(&retry) {
             ensure(*first == entry, ErrorCode::Invalid)?;
-            let (path, node) = self.node_by_id(space, entry).ok_or(ErrorCode::NotFound)?;
-            self.require(who, space, path, Perm::Read)?;
-            // A replay after its version went answers with the head, to a reader only.
-            return match node.history.contains(version) {
-                true => ensure(
-                    self.visible(space, path, node, *version, who),
-                    ErrorCode::NotFound,
-                ),
-                false => Ok(()),
-            };
+            self.node_by_id(space, entry).ok_or(ErrorCode::NotFound)?;
+            return Ok(());
         }
         let (path, node) = self.node_by_id(space, entry).ok_or(ErrorCode::NotFound)?;
         self.require(who, space, path, Perm::Write)?;

@@ -150,7 +150,7 @@ impl Remote {
     }
 
     /// Makes `chunks` the entry's head. Unguarded, so the last commit wins (C5).
-    pub async fn commit(&self, record: &Record, chunks: Vec<ChunkRef>) -> Result<Version> {
+    pub async fn commit(&self, record: &Record, chunks: Vec<ChunkRef>) -> Result<Option<Version>> {
         let request = |space| Request::Commit {
             space,
             entry: record.entry,
@@ -161,7 +161,8 @@ impl Remote {
             mtime_ms: record.mtime_ms,
         };
         match self.call(request).await? {
-            Response::Version { version } => Ok(version),
+            Response::Version { version } => Ok(Some(version)),
+            Response::Done => Ok(None),
             other => Err(unexpected(&other)),
         }
     }

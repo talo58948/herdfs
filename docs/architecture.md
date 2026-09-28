@@ -44,7 +44,7 @@ The authority keeps each entry's last N versions, head included, plus any younge
 
 The grace period must exceed the grant TTL and the upload-to-commit window, so in-flight uploads and outstanding URLs never race the sweep. `Purge` and `DeleteSpace` make history and whole spaces eligible at once. Chunks are shared across files, spaces and forks, so the live set is global.
 
-Access to history follows S8: each ACL row records when it was granted, and a principal sees versions older than its earliest current read grant on that path only if it is an admin.
+Access to history follows S8: each ACL row records the highest committed version ID when it was granted, and a principal sees only later versions plus the head unless it is an admin.
 
 ## Limits
 

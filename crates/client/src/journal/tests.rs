@@ -168,7 +168,7 @@ fn a_sealed_copy_never_changes_under_the_committer() {
     mount.closed();
     assert_eq!(fs::read(&first.sealed).unwrap(), b"first");
 
-    mount.committer.finish(&first, Outcome::Committed(base()));
+    mount.committer.finish(&first, Outcome::Committed(Some(base())));
     assert!(!first.sealed.exists(), "a newer seal replaced it");
     let second = mount.committer.take(ENTRY).unwrap();
     assert_eq!(fs::read(&second.sealed).unwrap(), b"second");
@@ -190,7 +190,7 @@ fn changes_shadow_reads_until_committed_then_the_commit_does() {
         id: VersionId(4),
         ..base()
     };
-    mount.committer.finish(&job, Outcome::Committed(version));
+    mount.committer.finish(&job, Outcome::Committed(Some(version)));
     assert!(mount.changes().is_none(), "nothing left to shadow the authority");
     assert!(mount.committer.take(ENTRY).is_none());
     mount.closed();
@@ -200,6 +200,23 @@ fn changes_shadow_reads_until_committed_then_the_commit_does() {
         1,
         "only rejected/ is left"
     );
+}
+
+// contract: C4a, S8
+#[test]
+fn a_commit_confirmed_without_a_version_drops_its_journal_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mount, _woken) = sealed(dir.path(), b"committed");
+    let job = mount.committer.take(ENTRY).unwrap();
+    let attempts = mount.local(|local, _| local.pending().unwrap().1);
+
+    mount.committer.finish(&job, Outcome::Committed(None));
+
+    assert_eq!(*attempts.borrow(), (job.record.seal, true));
+    assert!(mount.changes().is_none());
+    assert!(mount.committer.take(ENTRY).is_none());
+    assert!(!dir.path().join("7.json").exists());
+    assert!(!job.sealed.exists());
 }
 
 // contract: C12
@@ -315,7 +332,7 @@ fn remote_state_from_before_a_settled_commit_is_never_paired_with_the_journal_af
         size: 8,
         ..base()
     };
-    mount.committer.finish(&job, Outcome::Committed(committed));
+    mount.committer.finish(&job, Outcome::Committed(Some(committed)));
     inodes.observe(&entry, before, false);
     let (settled, local) = view();
     assert_eq!(

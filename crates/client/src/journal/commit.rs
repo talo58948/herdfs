@@ -30,7 +30,7 @@ pub struct Job {
 }
 
 pub enum Outcome {
-    Committed(Version),
+    Committed(Option<Version>),
     Rejected,
     /// The entry is gone, and its write with it: deletion wins, as on a local disk (C10).
     Dropped,
@@ -107,7 +107,7 @@ impl Committer {
 
     /// Chunks the sealed copy, caching each chunk and uploading those the record's base lacks
     /// without asking whether the store already has them (S6), and commits.
-    async fn attempt(&self, sealed: &Path, record: Record) -> Result<Version> {
+    async fn attempt(&self, sealed: &Path, record: Record) -> Result<Option<Version>> {
         let base = record.base.iter().flat_map(|base| &base.chunks);
         let base: HashSet<ChunkId> = base.map(|chunk| chunk.id).collect();
         let sealed = File::open(sealed)?;
@@ -117,6 +117,7 @@ impl Committer {
             let _ = chunk::split(sealed).try_for_each(|chunk| sender.blocking_send(chunk));
         });
         let (mut refs, mut uploaded) = (Vec::new(), HashSet::new());
+        let mut upload_error = None;
         while let Some(chunk) = chunks.recv().await {
             let (chunk, bytes) = chunk?;
             // Reading the file back then needs no download of what was just uploaded.
@@ -125,14 +126,28 @@ impl Committer {
             {
                 tracing::warn!(%err, "could not cache a chunk");
             }
-            if !base.contains(&chunk.id) && uploaded.insert(chunk.id) {
-                self.remote.put_chunk(chunk.id, Bytes::from(bytes)).await?;
+            if upload_error.is_none()
+                && !base.contains(&chunk.id)
+                && uploaded.insert(chunk.id)
+                && let Err(error) = self.remote.put_chunk(chunk.id, Bytes::from(bytes)).await
+            {
+                upload_error = Some(error);
             }
             refs.push(chunk);
         }
         // A splitter that died early would otherwise commit a truncated file.
         splitter.await.map_err(io::Error::other)?;
-        self.remote.commit(&record, refs).await
+        // A lost answer may have landed before revocation made a retry's uploads fail.
+        let committed = self.remote.commit(&record, refs).await;
+        match (upload_error, committed) {
+            (_, Ok(version)) => Ok(version),
+            (Some(upload), Err(Error::Api(commit)))
+                if commit.code == ErrorCode::Invalid && !upload.is_final() =>
+            {
+                Err(upload)
+            }
+            (_, Err(error)) => Err(error),
+        }
     }
 }
 
@@ -190,17 +205,17 @@ impl Committer {
             local.reading = None;
             let settled = !matches!(outcome, Outcome::Retrying);
             local.settles += u64::from(settled);
-            let committed = match outcome {
-                Outcome::Committed(version) => Some(version),
+            let (committed, version) = match outcome {
+                Outcome::Committed(version) => (true, version),
                 Outcome::Rejected => {
                     self.journal.reject(job);
                     local.refused = local.settles;
-                    None
+                    (false, None)
                 }
-                Outcome::Dropped | Outcome::Retrying => None,
+                Outcome::Dropped | Outcome::Retrying => (false, None),
             };
-            local.attempts.send_replace((seal, committed.is_some()));
-            if let Some(version) = &committed {
+            local.attempts.send_replace((seal, committed));
+            if let Some(version) = &version {
                 local.base = Some(version.clone());
             }
             let latest = local.pending.as_ref().map(|(record, _)| record.seal) == Some(seal);
@@ -214,7 +229,7 @@ impl Committer {
                 let _ = fs::remove_file(&job.sealed);
             }
             if settled {
-                state.settle(committed.as_ref(), job.record.mtime_ms);
+                state.settle(version.as_ref(), job.record.mtime_ms);
             }
             Some(())
         });

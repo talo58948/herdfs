@@ -9,12 +9,12 @@ use herdfs_core::{
 use crate::model::{Model, Node, Outcome, ensure};
 
 impl Model {
-    /// `who`'s rows in `space`: path, perm and grant time.
+    /// `who`'s rows in `space`: path, perm and grant sequence.
     fn rows<'a>(
         &'a self,
         space: &str,
         who: &'a Principal,
-    ) -> impl Iterator<Item = (&'a SpacePath, Perm, i64)> {
+    ) -> impl Iterator<Item = (&'a SpacePath, Perm, u64)> {
         let mine = move |principal: &String| {
             *principal == who.user
                 || who
@@ -39,14 +39,14 @@ impl Model {
             .max()
     }
 
-    /// S8: when `who` could first read `path`; admins of the root see all history.
-    pub fn readable_since(&self, space: &str, path: &SpacePath, who: &Principal) -> i64 {
+    /// S8: the sequence after which `who` could first read `path`; root admins see all history.
+    pub fn readable_after(&self, space: &str, path: &SpacePath, who: &Principal) -> u64 {
         let mut rows = self.rows(space, who);
         if rows.any(|(at, perm, _)| at.is_root() && perm == Perm::Admin) {
-            return i64::MIN;
+            return 0;
         }
         let applying = self.rows(space, who).filter(|(at, ..)| path.is_within(at));
-        applying.map(|(.., granted)| granted).min().unwrap_or(i64::MAX)
+        applying.map(|(.., granted)| granted).min().unwrap_or(u64::MAX)
     }
 
     /// Whether `who` may see `version` of the node at `path`: its head, or one made since access began.
@@ -58,8 +58,7 @@ impl Model {
         version: VersionId,
         who: &Principal,
     ) -> bool {
-        node.history.last() == Some(&version)
-            || self.versions[&version].created_ms >= self.readable_since(space, path, who)
+        node.history.last() == Some(&version) || version.0 > self.readable_after(space, path, who)
     }
 
     pub fn require(&self, who: &Principal, space: &str, path: &SpacePath, need: Perm) -> Outcome {
