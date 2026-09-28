@@ -1,13 +1,13 @@
 //! Namespace operations: lookups, attributes, directories and renames.
 
 use std::sync::{Arc, atomic::Ordering::Relaxed};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::{ffi::OsString, path::PathBuf};
 
 use fuser::{Errno, FileAttr, INodeNo, ReplyDirectory};
-use herdfs_core::{SpacePath, proto::EntryId};
+use herdfs_core::SpacePath;
 
-use super::{Known, PERMISSIONS, Space, TTL};
+use super::{PERMISSIONS, Space, TTL};
 use crate::{Result, lock};
 
 pub struct AttrChange {
@@ -21,28 +21,30 @@ pub struct AttrChange {
 
 impl Space {
     pub async fn lookup(self: Arc<Self>, parent: INodeNo, name: OsString) -> Result<(FileAttr, Duration)> {
-        let (entry, fetched, local) = self.entry(&self.located_child(parent, &name).await?).await?;
-        let attr = self.looked_up(&entry, fetched, local.as_deref());
-        Ok((attr, TTL.saturating_sub(fetched.elapsed())))
+        let (entry, asked, local) = self.entry(&self.located_child(parent, &name).await?).await?;
+        let attr = self.looked_up(&entry, asked, local.as_deref());
+        Ok((attr, TTL.saturating_sub(asked.0.elapsed())))
     }
 
     /// The inode's attributes. If its path names another entry or none, the entry has moved,
     /// or is gone and its name may now be another's, which ESTALE sends the kernel to look up
     /// (C7).
     pub async fn getattr(self: Arc<Self>, ino: INodeNo) -> Result<(FileAttr, Duration)> {
-        let (entry, fetched, local) = match self.entry(&self.path(ino)?).await {
-            Ok(found) if self.ino(found.0.id) == ino => found,
+        let found = match self.path(ino)? {
+            Some(path) => self.entry(&path).await.map(Some),
+            None => Ok(None),
+        };
+        let (entry, asked, local) = match found {
+            Ok(Some(found)) if self.ino(found.0.id) == ino => found,
             Err(err) if !err.is_not_found() => return Err(err),
             _ => {
-                let entry = self.relocate(ino).await?;
+                let (asked, entry) = (self.asked(), self.relocate(ino).await?);
                 let local = self.journal.changes(entry.id);
-                (entry, Instant::now(), local)
+                (entry, asked, local)
             }
         };
-        Ok((
-            self.attr(&entry, local.as_deref()),
-            TTL.saturating_sub(fetched.elapsed()),
-        ))
+        let attr = self.attr(&entry, local.as_deref());
+        Ok((attr, TTL.saturating_sub(asked.0.elapsed())))
     }
 
     pub async fn setattr(self: Arc<Self>, ino: INodeNo, change: AttrChange) -> Result<FileAttr> {
@@ -54,6 +56,7 @@ impl Space {
         // Answered from the entry held, which offline lets a truncation go on (C12), and found
         // before anything is journaled, so a failure changes nothing.
         let (entry, _, local) = self.entry(&path).await?;
+        self.expect(ino, &entry)?;
         if let Some(size) = change.size {
             self.truncate(ino, size, change.fh).await?;
         }
@@ -76,12 +79,14 @@ impl Space {
         }
         let asked = self.asked();
         let entry = self.remote.set_attr(path, mode, mtime_ms).await?;
-        self.remember(&entry, asked);
+        self.inodes.observe(&entry, asked, false);
+        self.expect(ino, &entry)?;
         Ok(self.attr(&entry, self.journal.changes(entry.id).as_deref()))
     }
 
     pub async fn readlink(self: Arc<Self>, ino: INodeNo) -> Result<Vec<u8>> {
         let (entry, ..) = self.entry(&self.located(ino).await?).await?;
+        self.expect(ino, &entry)?;
         Ok(entry.target.ok_or(Errno::EINVAL)?.into_bytes())
     }
 
@@ -109,12 +114,10 @@ impl Space {
         let removed = self.remote.remove(path.clone()).await?;
         // The removed entry's changes are moot: deletion wins (C10), for it alone (C4a).
         self.journal.discard(removed.id);
-        self.stale(&path);
-        let mut paths = lock(&self.paths);
-        paths.remove(&self.ino(removed.id));
-        // Any other inode held at that path had moved away: `Locate` tells where (C7).
-        let moved = paths.values_mut().filter(|(known, ..)| *known == path);
-        moved.for_each(|(.., confirmed)| *confirmed = None);
+        self.inodes.stale(&path);
+        // Another entry held at that path had moved away: `Locate` tells where (C7).
+        self.inodes.unbind(&path);
+        self.inodes.removed(removed.id);
         Ok(())
     }
 
@@ -124,16 +127,9 @@ impl Space {
         let to = self.located_child(to.0, &to.1).await?;
         self.settle(&from).await?;
         self.remote.rename(from.clone(), to.clone()).await?;
-        self.stale(&from);
-        self.stale(&to);
-        for (known, _, confirmed) in lock(&self.paths).values_mut() {
-            // Replaced, unless another client had moved it away: `Locate` tells (C7).
-            if *known == to {
-                *confirmed = None;
-            } else if let Some(moved) = known.rebase(&from, &to) {
-                *known = moved;
-            }
-        }
+        self.inodes.stale(&from);
+        self.inodes.stale(&to);
+        self.inodes.moved(&from, &to);
         Ok(())
     }
 
@@ -141,9 +137,7 @@ impl Space {
     /// so that other clients see the old bytes there or the new, whole (C3, C7): rsync, git and
     /// editors rename a file they closed over the one it replaces.
     async fn settle(&self, path: &SpacePath) -> Result<()> {
-        let within =
-            |(ino, (known, ..)): (&INodeNo, &Known)| known.is_within(path).then(|| self.entry_id(*ino));
-        let entries: Vec<EntryId> = lock(&self.paths).iter().filter_map(within).collect();
+        let entries = self.inodes.within(path);
         for &entry in &entries {
             tokio::task::block_in_place(|| self.journal.seal(entry))?;
             self.journal.urge(entry);
@@ -160,7 +154,7 @@ impl Space {
         let asked = self.asked();
         let entries = self.remote.list(path).await?;
         let listed = |entry| {
-            self.listed(entry, asked);
+            self.inodes.observe(entry, asked, true);
             let attr = self.attr(entry, None);
             (attr.ino, attr.kind, entry.path.name().to_owned())
         };

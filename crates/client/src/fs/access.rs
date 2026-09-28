@@ -6,13 +6,16 @@ use std::time::{Duration, Instant};
 use herdfs_core::SpacePath;
 use herdfs_core::proto::EntryId;
 
-use super::{RECENT, Space, handles::Handle};
+use super::{Space, handles::Handle};
 use crate::lock;
 use crate::strategy::{OpenContext, Strategy, Upgrade};
 use crate::version::OpenVersion;
 
 /// Opens of a file by one program count as repeated while each comes this soon after the last.
 const REOPENED_WITHIN: Duration = Duration::from_secs(300);
+
+/// How many (entry, process name) pairs of recent opens to keep.
+const OPENS: u64 = 4096;
 
 impl Space {
     /// Decides the access strategy for this open of `file` (P1), and begins it.
@@ -51,7 +54,7 @@ impl Space {
             .filter(|(_, last)| last.elapsed() <= REOPENED_WITHIN);
         let count = before.map_or(0, |(count, _)| count);
         opens.insert(key, 1, (count + 1, Instant::now()));
-        opens.evict(RECENT, |_| false);
+        opens.evict(OPENS, |_| false);
         count
     }
 

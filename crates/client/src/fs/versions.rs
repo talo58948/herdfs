@@ -52,7 +52,7 @@ impl Space {
     /// Remembers an entry the authority returned, and switches an inode that open files read to
     /// a newer head it names, so every handle reads it from its next read (C3).
     pub(super) async fn follow(&self, entry: &Entry, asked: Asked) {
-        self.remember(entry, asked);
+        self.inodes.observe(entry, asked, false);
         self.move_on(entry).await;
     }
 
@@ -89,9 +89,9 @@ impl Space {
                     None => Err(err),
                 };
             }
-            opened => opened.map_err(|err| self.gone(path, err))?,
+            opened => opened.map_err(|err| self.gone(Some(path), err))?,
         };
-        self.remember(&found, asked);
+        self.inodes.observe(&found, asked, false);
         // The name now holds another entry, which the kernel looks up again (C7).
         if found.id != entry {
             return Err(Errno::ESTALE.into());
