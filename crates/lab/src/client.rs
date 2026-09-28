@@ -48,6 +48,7 @@ impl Strategy {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct ClientSpec {
     pub(crate) name: String,
     pub(crate) user: String,

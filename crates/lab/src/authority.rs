@@ -32,6 +32,10 @@ impl Authority {
         self.process = None;
     }
 
+    pub(crate) fn pid(&self) -> Option<u32> {
+        self.process.as_ref().map(Proc::id)
+    }
+
     /// Starts the authority on its database in `dir`, after killing a running one, and waits
     /// until `/v1/health` answers.
     pub(crate) fn restart(&mut self, dir: &Path, store_port: u16, issuer: &Issuer) -> Result<()> {
