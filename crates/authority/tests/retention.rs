@@ -21,7 +21,8 @@ fn history_from_before_a_grant_stays_hidden() {
     fx.set_acl("f", "user:bob", Some(Perm::Read));
     let v3 = fx.commit(&alice(), file.id, "r3", None, false, &[]).unwrap();
     assert_eq!(fx.history(&bob(), "f").unwrap(), std::slice::from_ref(&v3));
-    assert_eq!(fx.grant(&bob(), file.id, v1.id, &[0]), Err(ErrorCode::Denied));
+    // A hidden version answers as an unknown one would.
+    assert_eq!(fx.grant(&bob(), file.id, v1.id, &[0]), Err(ErrorCode::NotFound));
     // A perm change keeps the grant time; admins of the root see everything.
     fx.set_acl("f", "user:bob", Some(Perm::Write));
     assert_eq!(fx.history(&bob(), "f").unwrap(), std::slice::from_ref(&v3));
