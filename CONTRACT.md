@@ -9,7 +9,7 @@ Every test names the lines it checks with a `// contract: C9, S2` comment. Code 
 | ID | Promise |
 |---|---|
 | C1 | Read-your-writes on the same client after `close` or `fsync`. |
-| C2 | Close-to-open: an `open` on B that starts T_vis after A's commit sees that version or a newer one. |
+| C2 | Close-to-open: an `open` on B that starts T_vis after A's commit sees that version or a newer one. A close starts the commit; `fsync` waits for it. A file's mtime is the time of its last write, as on a local disk, so a tool on B that compares times (make) must run after A's `fsync`, not merely after its close. |
 | C3 | Each commit is one immutable version. A read never returns bytes of a partially committed version. An open file follows its latest version between reads, as a local file does when another program rewrites it; one large `read` may span that switch, so every byte comes from some committed version. |
 | C4a | After `close` returns, data survives a client crash (journal) and commits after restart. |
 | C4b | After commit, data survives a crash of any component. |
