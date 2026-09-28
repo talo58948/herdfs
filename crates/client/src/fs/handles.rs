@@ -5,13 +5,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::{ffi::OsString, fs::File, io, os::unix::fs::FileExt};
 
-use fuser::{Errno, FileAttr, INodeNo, OpenAccMode, OpenFlags};
+use fuser::{Errno, FileAttr, INodeNo, OpenFlags};
 use herdfs_core::ChunkId;
 use herdfs_core::proto::{EntryId, ErrorCode};
 
 use tempfile::NamedTempFile;
 
-use super::{Inodes, PERMISSIONS, Space};
+use super::{Inodes, OpenMode, PERMISSIONS, Space};
 use crate::journal::Local;
 use crate::{Error, Result, lock, reader::Head};
 
@@ -58,14 +58,14 @@ impl Space {
     pub async fn open(self: Arc<Self>, ino: INodeNo, flags: OpenFlags, pid: u32) -> Result<u64> {
         let entry = self.entry_id(ino);
         let path = self.located(ino).await?;
-        let writable = flags.acc_mode() != OpenAccMode::O_RDONLY;
-        let truncate = writable && flags.0 & libc::O_TRUNC != 0;
+        let mode = OpenMode::for_open(flags);
+        let (writable, truncate) = (mode.writes(), mode.truncates());
         let handle = Handle::new(entry, writable, &self.inodes);
         let mut upgrade = None;
         // Every open for writing asks for write access, over pending changes too (C1, C4a); one
         // for reading needs no head while this client holds changes, which every handle reads.
         if (writable || self.changes(entry).is_none())
-            && let Some(file) = self.head(entry, &path, writable, truncate, true).await?
+            && let Some(file) = self.head(entry, &path, mode).await?
             && !writable
         {
             upgrade = self.start(&file, &path, pid, &handle);
@@ -188,8 +188,8 @@ impl Space {
         // A short open, which keeps the journal copy while it changes.
         let _short = Handle::new(entry, true, &self.inodes);
         if handle.is_none() {
-            self.head(entry, &self.located(ino).await?, true, size == 0, true)
-                .await?;
+            let mode = OpenMode::for_set_len(size);
+            self.head(entry, &self.located(ino).await?, mode).await?;
         }
         self.prepare(entry, size == 0).await?;
         self.local(entry, |local| local.set_len(&self.journal, entry, size))?;

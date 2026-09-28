@@ -1,5 +1,4 @@
-//! The kernel's side of the mount: the inode number of each entry, and the one way to drop what
-//! the kernel cached of an inode (C3).
+//! The kernel's side of the mount: inode numbers and cached attributes.
 
 use std::sync::OnceLock;
 
@@ -31,19 +30,14 @@ impl Kernel {
         let _ = self.notifier.set(notifier);
     }
 
-    /// Drops the kernel's pages and attributes of the entry's inode, whose bytes changed under
-    /// it. With `wait`, returns once they are gone: a reply that switched the version waits, so
-    /// no later read sees the old one (C3), and the kernel waits for the pages a read in progress
-    /// holds, which other tasks answer. A read or a write, which hold pages themselves, and the
-    /// committer let it run.
-    pub async fn apply(&self, entry: EntryId, wait: bool) {
-        let Some(notifier) = self.notifier.get().cloned() else {
+    /// Drops attributes cached before the entry switched versions. Direct I/O leaves no file
+    /// content in the kernel to invalidate.
+    pub fn invalidate_attrs(&self, entry: EntryId) {
+        let Some(notifier) = self.notifier.get() else {
             return;
         };
         let ino = self.ino(entry);
-        let dropping = tokio::task::spawn_blocking(move || notifier.inval_inode(ino, 0, 0));
-        if wait {
-            let _ = dropping.await;
-        }
+        // A negative offset asks Linux to invalidate attributes without touching mapped pages.
+        let _ = notifier.inval_inode(ino, -1, 0);
     }
 }

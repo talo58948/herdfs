@@ -16,6 +16,7 @@ mod listed_heads;
 mod listed_renames;
 mod lock_files;
 mod locks;
+mod mapped;
 mod moved_removes;
 mod mtime;
 mod offline;
