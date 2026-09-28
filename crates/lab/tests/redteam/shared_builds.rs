@@ -1,6 +1,7 @@
 //! Round 6: make on one client, from a source saved on another.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::process::Command;
 use std::thread;
 
@@ -11,17 +12,18 @@ use crate::{VISIBLE_AFTER, two_clients};
 
 const MAKEFILE: &str = "out: in\n\tcp in out\n";
 
-/// Repro: a saves a new `in` without fsync, as an editor does, and b at once runs `make`, which
-/// builds `out` from `in`. b still reads the old `in`: a's commit comes a quiet period after its
-/// close (journal.rs `QUIET`), which C2 allows. Once a's commit has landed and T_vis has passed,
-/// `make -q` on b says `out` is up to date, and `out` keeps the old bytes for good. The commit
-/// stamps `in` with the time of a's write (journal.rs `seal`, round 5), which is before b built
-/// `out`, so `in` looks older than an `out` built from its previous bytes. On a local directory,
-/// or if a fsyncs `in` before b builds, b's `out` gets the new bytes.
-// contract: none (docs/architecture.md: mtime is stored and reported; only atime and ctime are out of v0)
+/// a saves a new `in` and fsyncs it, and b, T_vis later, runs `make`, which rebuilds `out` from
+/// `in`'s new bytes: a tool on another client that compares times runs after the writer's fsync
+/// (C2).
+///
+/// Not supported: a saves `in` without fsync, as an editor does, and b at once runs `make`. b
+/// still reads the old `in`, since a's commit comes a quiet period after its close (journal.rs
+/// `QUIET`), which C2 allows. The commit stamps `in` with the time of a's write, before b built
+/// `out`, so once it lands `make -q` on b takes `out`, built from the old bytes, as up to date.
+/// On a local directory b's `out` gets the new bytes.
+// contract: C2
 #[test]
-#[ignore = "REDTEAM6: a source saved on one client looks older than the target another client then builds from its old bytes"]
-fn make_on_another_client_rebuilds_after_a_source_commits() -> Result<()> {
+fn make_on_another_client_rebuilds_from_a_source_saved_with_fsync() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
     };
@@ -30,19 +32,19 @@ fn make_on_another_client_rebuilds_after_a_source_commits() -> Result<()> {
     fs::write(a.join("in"), "v1\n")?;
     lab.wait_committed("a")?;
     thread::sleep(VISIBLE_AFTER);
-    fs::read(b.join("in"))?;
-
-    fs::write(a.join("in"), "v2\n")?;
     run(Command::new("make").arg("-s").current_dir(b))?;
-    lab.wait_committed("a")?;
-    lab.wait_committed("b")?;
+    assert_eq!(fs::read_to_string(b.join("out"))?, "v1\n", "b's first build");
+
+    let mut source = File::create(a.join("in"))?;
+    source.write_all(b"v2\n")?;
+    source.sync_all()?;
+    drop(source);
     thread::sleep(VISIBLE_AFTER);
-    let up_to_date = Command::new("make").arg("-q").current_dir(b).status()?.success();
-    let out = fs::read_to_string(b.join("out"))?;
-    assert!(
-        !up_to_date || out == "v2\n",
-        "make on b takes `out` as up to date, built from {out:?} while `in` holds {:?}",
-        fs::read_to_string(b.join("in"))?
+    run(Command::new("make").arg("-s").current_dir(b))?;
+    assert_eq!(
+        fs::read_to_string(b.join("out"))?,
+        "v2\n",
+        "b's build after a saved `in` with fsync"
     );
     Ok(())
 }

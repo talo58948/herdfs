@@ -36,7 +36,6 @@ fn lock_taken_elsewhere(lock: &Path) -> Result<bool> {
 /// with "index file smaller than expected" while a commits.
 // contract: C3, C7 (a rename replaces a file whole; a read never returns a version not committed)
 #[test]
-#[ignore = "REDTEAM6: a failed O_EXCL open of a renamed lock file makes the file it replaced read as empty"]
 fn a_lock_renamed_over_a_file_never_makes_it_read_empty() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());

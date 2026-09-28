@@ -160,10 +160,17 @@ impl Space {
     /// Offline, the last entry seen keeps cached reads and writes working (C12).
     async fn entry(&self, path: &SpacePath) -> Result<(Entry, Instant)> {
         let cached = lock(&self.recent).get(path);
-        // A local commit since the fetch has made the entry stale (C1).
+        // A local commit since the fetch has made the entry stale (C1), as has a newer word from
+        // the authority on its inode, such as its path after a rename (C3, C7).
+        let confirmed = |entry: &Entry| {
+            lock(&self.paths)
+                .get(&self.ino(entry.id))
+                .and_then(|known| known.2)
+        };
         if let Some((fetched, settled, entry)) = &cached
             && *settled == self.journal.settled()
             && fetched.elapsed() < TTL
+            && confirmed(entry) <= Some(*fetched)
         {
             return Ok((entry.clone(), *fetched));
         }
@@ -257,8 +264,10 @@ impl Space {
             (None, Kind::Symlink) => entry.target.as_ref().map_or(0, |target| target.len() as u64),
             (None, _) => entry.size,
         };
-        let committed = UNIX_EPOCH + Duration::from_millis(entry.mtime_ms.try_into().unwrap_or(0));
-        let mtime = local.and_then(|local| local.modified().ok()).unwrap_or(committed);
+        // The journal copy's time as its commit will keep it, to the millisecond.
+        let written = local.and_then(|local| local.modified().ok()).map(crate::unix_ms);
+        let mtime =
+            UNIX_EPOCH + Duration::from_millis(written.unwrap_or(entry.mtime_ms).try_into().unwrap_or(0));
         let kind = match entry.kind {
             Kind::File => FileType::RegularFile,
             Kind::Dir => FileType::Directory,
