@@ -17,7 +17,6 @@ const ROUNDS: usize = 20;
 /// later one `Exists`, which reaches the program as EEXIST, so that save never commits.
 // contract: C5
 #[test]
-#[ignore = "REDTEAM: concurrent O_CREAT of one new name on two clients fails one with EEXIST"]
 fn concurrent_creates_of_one_name_both_save() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());

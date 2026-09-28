@@ -38,7 +38,10 @@ pub const BUGS: &[(&str, &[&str])] = &[
             "unlink::update_mtime_ctime_success_folder::symlink",
         ],
     ),
-    ("chmod_changes_ctime", &["chmod::update_ctime::dir"]),
+    (
+        "chmod_changes_ctime",
+        &["chmod::update_ctime::dir", "chmod::update_ctime::regular"],
+    ),
     (
         "an_unlinked_open_file_stays_usable",
         &["unlink::open_file_not_freed"],

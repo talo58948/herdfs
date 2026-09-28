@@ -17,7 +17,6 @@ use crate::{VISIBLE_AFTER, assert_bytes, save, two_clients};
 /// handle is open, pending write or not.
 // contract: C2
 #[test]
-#[ignore = "REDTEAM: while b has a file open for writing, unwritten, other opens on b read the old head"]
 fn an_idle_writer_does_not_hide_a_newer_commit() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
@@ -38,7 +37,6 @@ fn an_idle_writer_does_not_hide_a_newer_commit() -> Result<()> {
 /// refused, the write set aside under `journal/rejected/`, and bob then reads the old bytes.
 // contract: C1, C4a
 #[test]
-#[ignore = "REDTEAM: a write bob may not make succeeds through close and is then silently dropped"]
 fn a_write_without_write_access_fails_instead_of_vanishing() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());

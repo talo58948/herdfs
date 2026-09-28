@@ -15,7 +15,6 @@ use crate::{VISIBLE_AFTER, two_clients};
 /// starts then stamps the authority's clock over it.
 // contract: none (docs/architecture.md: mtime is stored and reported; only atime and ctime are out of v0)
 #[test]
-#[ignore = "REDTEAM: cp -p loses the mtime: the commit after close overwrites a futimens set before it"]
 fn cp_p_keeps_the_source_mtime() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());

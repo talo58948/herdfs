@@ -15,7 +15,6 @@ const PAGE: usize = 4096;
 /// page cache, which is per inode, with v1 pages, and the second handle is served those.
 // contract: C2, C3
 #[test]
-#[ignore = "REDTEAM: a later open reads the older version's pages another open on its client cached"]
 fn an_open_after_a_commit_never_reads_the_older_version() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
@@ -45,7 +44,6 @@ fn an_open_after_a_commit_never_reads_the_older_version() -> Result<()> {
 /// longer holds the entry, so the read fails although the entry and its version still exist.
 // contract: C7, C14
 #[test]
-#[ignore = "REDTEAM: an open file renamed on another client fails reads of uncached ranges"]
 fn an_open_file_stays_readable_after_another_client_renames_it() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
