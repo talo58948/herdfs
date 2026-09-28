@@ -34,6 +34,18 @@ Plugins are separate programs that use a mount like any other program (the agent
 
 **Paths follow renames.** Operations name entries by path, but the client knows every inode's entry id. A cached inode path older than T_vis is refreshed with `Locate` (by entry id) before use.
 
+## Retention and collection
+
+The authority keeps each entry's head, plus its last N versions or those younger than T days (`--retain-versions`, `--retain-days`). A collector runs every `--gc-every` (10 min):
+
+1. It prunes versions that fall outside retention.
+2. It deletes chunk lists and upload records nothing retained uses.
+3. It sweeps the bucket: a chunk object that no retained version references, and that is older than `--gc-grace` (1 h), is deleted.
+
+The grace period must exceed the grant TTL and the upload-to-commit window, so in-flight uploads and outstanding URLs never race the sweep. `Purge` and `DeleteSpace` make history and whole spaces eligible at once. Chunks are shared across files, spaces and forks, so the live set is global.
+
+Access to history follows S8: each ACL row records when it was granted, and a principal sees versions older than its earliest current read grant on that path only if it is an admin.
+
 ## Limits
 
 - Largest file: about 350 GiB (a commit's chunk list must fit the 32 MiB RPC body).
@@ -85,4 +97,4 @@ Client observability: `getfattr -n user.herdfs.stats MOUNT` returns JSON counter
 
 ## Deliberately out of v0
 
-Hard links; access times (atime is reported as mtime) and a separate ctime (reported as mtime); using a file after it is unlinked while open (fails with `ENOENT`); cross-host `flock`/`fcntl` locks (locks coordinate processes on one client only, not across clients; so a database such as SQLite must not be written from two clients at once); shared-writable `mmap` coherence across hosts; device and special files; macOS and Windows; per-uid mapping inside one mount; an S3-compatible API on herdfs; remote execution as a read-path strategy; chunk garbage collection (every version stays readable, so storage grows with every commit); FS-level guarded writes. Each of these fails cleanly (`ENOTSUP`/`EPERM`), is simply absent, or, for locks, is scoped to one client as stated.
+Hard links; access times (atime is reported as mtime) and a separate ctime (reported as mtime); using a file after it is unlinked while open (fails with `ENOENT`); cross-host `flock`/`fcntl` locks (locks coordinate processes on one client only, not across clients; so a database such as SQLite must not be written from two clients at once); shared-writable `mmap` coherence across hosts; device and special files; macOS and Windows; per-uid mapping inside one mount; an S3-compatible API on herdfs; remote execution as a read-path strategy;  FS-level guarded writes. Each of these fails cleanly (`ENOTSUP`/`EPERM`), is simply absent, or, for locks, is scoped to one client as stated.

@@ -2,7 +2,7 @@
 
 Every test names the lines it checks with a `// contract: C9, S2` comment. Code that serves no line here does not belong in v0.
 
-"Commit" means the authority has acknowledged a new version. Parameters: T_vis = 1 s, grant TTL = 5 min, Jev timeout = 2 s.
+"Commit" means the authority has acknowledged a new version. Parameters: T_vis = 1 s, grant TTL = 60 s, Jev timeout = 2 s, collection grace = 1 h, collection interval = 10 min.
 
 ## Data and consistency
 
@@ -22,7 +22,8 @@ Every test names the lines it checks with a `// contract: C9, S2` comment. Code 
 | C11 | The cache never serves bytes of a different version. A tampered cached chunk fails its hash and is refetched. |
 | C12 | Content writes made offline to existing files are journaled and committed on reconnect, under C5, when the write replaces the file (truncate) or this client holds the file's current bytes. Namespace changes (create, mkdir, rename, remove) need the authority and fail with `EIO` while it is unreachable. |
 | C13 | A fork copies no chunk bytes, includes all commits acknowledged before it, and is isolated from its parent afterwards. Its time grows with entry count only (≤ 1 s per 100k entries). |
-| C14 | Any version in an entry's history is readable. Restore creates a new head and keeps history. |
+| C14 | Every retained version in an entry's history is readable (subject to S8). Retention keeps the head always, plus the last N versions or those younger than T days (authority settings). Restore creates a new head and keeps history. |
+| C15 | The store holds only chunks of retained versions, plus uploads younger than the grace period: storage is bounded by what retention keeps, not by how much was ever written. |
 
 ## Security
 
@@ -31,9 +32,12 @@ Every test names the lines it checks with a `// contract: C9, S2` comment. Code 
 | S1 | Clients hold no object-store credentials. The authority is the only enforcement point. |
 | S2 | A grant needs read permission at grant time, expires within the TTL, and covers only chunks of a version of that entry. |
 | S3 | Root on a client gets no bytes beyond what that client's principal was granted. |
-| S4 | Revocation stops new grants immediately; outstanding grants die within the TTL. |
+| S4 | Revocation stops new grants immediately; outstanding grants die within the grant TTL (60 s). |
 | S5 | Tokens are checked for signature, `iss`, `aud` and `exp` (no leeway beyond 5 s); `alg=none` and unknown keys are rejected; a key the issuer withdraws stops being accepted within 5 minutes. |
 | S6 | Whether bytes exist anywhere in the store is not observable through the protocol: uploads always happen and get identical answers, and commits may reference only chunks from a readable base or uploaded by the committer. Known residual: the store's write latency can differ for bytes it already holds (measured median +4 ms of 52 ms on MinIO), which the R4 timing test bounds. |
+
+| S7 | Deleting a file, purging its history, deleting a space, or a version leaving retention erases the bytes only it referenced from the store within grace + interval. Chunks still referenced by a retained version anywhere stay. |
+| S8 | A principal can read an entry's current head, and older versions only if they were created after it gained read access there (admins of the space see all). Granting access later does not reveal earlier history. |
 
 ## Strategy and plugins
 
