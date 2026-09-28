@@ -4,6 +4,7 @@ use herdfs_core::{ChunkId, ChunkRef};
 
 use super::commit::Outcome;
 use super::*;
+use herdfs_core::proto::VersionId;
 
 const ENTRY: EntryId = EntryId(7);
 
@@ -103,13 +104,11 @@ fn changes_shadow_reads_until_committed_then_the_commit_does() {
         id: VersionId(4),
         ..base()
     };
-    journal.finish(&job, Outcome::Committed(version.clone()));
+    journal.finish(&job, Outcome::Committed(version));
     assert!(
         journal.changes(ENTRY).is_none(),
         "nothing left to shadow the authority"
     );
-    assert_eq!(journal.base_after(ENTRY, Some(VersionId(3))), Some(version));
-    assert_eq!(journal.base_after(ENTRY, Some(VersionId(4))), None);
     assert!(journal.next(ENTRY).is_none());
     drop(reader);
     assert_eq!(journal.pending_count(), 0);

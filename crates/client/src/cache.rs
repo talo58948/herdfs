@@ -1,13 +1,13 @@
 //! The on-disk chunk cache. Files are named by chunk id and verified on every read, so the
 //! cache never serves bytes other than the chunk asked for (C11).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::{fs, io, path::PathBuf};
 
 use herdfs_core::{ChunkId, ChunkRef, chunk::total_len};
 
-use crate::lock;
+use crate::{lock, lru::Lru};
 
 pub struct Cache {
     dir: PathBuf,
@@ -17,62 +17,9 @@ pub struct Cache {
 
 #[derive(Default)]
 struct Index {
-    chunks: Lru<()>,
+    chunks: Lru<ChunkId, ()>,
     /// Open counts of chunks that must not be evicted.
     pins: HashMap<ChunkId, usize>,
-}
-
-/// Chunks in order of last use, each with its length and a `T`.
-#[derive(Default)]
-pub struct Lru<T> {
-    chunks: HashMap<ChunkId, (u64, u64, T)>,
-    by_use: BTreeMap<u64, ChunkId>,
-    bytes: u64,
-    clock: u64,
-}
-
-impl<T: Clone> Lru<T> {
-    pub fn insert(&mut self, id: ChunkId, len: u64, value: T) {
-        self.remove(&id);
-        self.clock += 1;
-        self.chunks.insert(id, (len, self.clock, value));
-        self.by_use.insert(self.clock, id);
-        self.bytes += len;
-    }
-
-    /// The chunk's value, marking it used.
-    pub fn get(&mut self, id: &ChunkId) -> Option<T> {
-        let (len, _, value) = self.chunks.get(id)?.clone();
-        self.insert(*id, len, value.clone());
-        Some(value)
-    }
-
-    pub fn remove(&mut self, id: &ChunkId) {
-        if let Some((len, used, _)) = self.chunks.remove(id) {
-            self.by_use.remove(&used);
-            self.bytes -= len;
-        }
-    }
-
-    fn contains(&self, id: &ChunkId) -> bool {
-        self.chunks.contains_key(id)
-    }
-
-    /// Drops the least recently used chunks, except those `keep` names, until the total
-    /// fits `capacity`. Returns the dropped ids.
-    pub fn evict(&mut self, capacity: u64, keep: impl Fn(&ChunkId) -> bool) -> Vec<ChunkId> {
-        let mut excess = self.bytes.saturating_sub(capacity);
-        let mut dropped = Vec::new();
-        for id in self.by_use.values().filter(|id| !keep(id)) {
-            if excess == 0 {
-                break;
-            }
-            excess = excess.saturating_sub(self.chunks.get(id).map_or(0, |chunk| chunk.0));
-            dropped.push(*id);
-        }
-        dropped.iter().for_each(|id| self.remove(id));
-        dropped
-    }
 }
 
 impl Cache {

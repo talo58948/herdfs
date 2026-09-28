@@ -60,6 +60,10 @@ impl Error {
             || matches!(self, Self::Api(error) if error.code == ErrorCode::Unavailable)
     }
 
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::Api(error) if error.code == ErrorCode::NotFound)
+    }
+
     /// True when the authority refused for good, so retrying cannot help.
     pub fn is_final(&self) -> bool {
         matches!(self, Self::Api(error)

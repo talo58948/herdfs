@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use herdfs_core::SpacePath;
 use herdfs_core::proto::EntryId;
 
-use super::{RECENT_LIMIT, Space, handles::Handle};
+use super::{RECENT, Space, handles::Handle};
 use crate::lock;
 use crate::reader::OpenVersion;
 use crate::strategy::{OpenContext, Strategy, Upgrade};
@@ -15,10 +15,10 @@ use crate::strategy::{OpenContext, Strategy, Upgrade};
 const REOPENED_WITHIN: Duration = Duration::from_secs(300);
 
 impl Space {
-    /// Decides the access strategy for this open (P1), begins it, and gives the handle its file.
+    /// Decides the access strategy for this open of `file` (P1), and begins it.
     pub(super) fn start(
         &self,
-        file: OpenVersion,
+        file: &Arc<OpenVersion>,
         path: &SpacePath,
         pid: u32,
         handle: &Handle,
@@ -37,9 +37,7 @@ impl Space {
         let (strategy, upgrade) = lock(&self.decider).decide(&context);
         self.stats.decided(strategy);
         tracing::debug!(%path, ?strategy, ?context, "access strategy");
-        let file = Arc::new(file);
-        self.begin(strategy, &file, handle);
-        *lock(&handle.content) = Some(file);
+        self.begin(strategy, file, handle);
         upgrade
     }
 
@@ -47,17 +45,14 @@ impl Space {
     /// counting this open for the next.
     fn opened(&self, entry: EntryId, comm: &str) -> u32 {
         let mut opens = lock(&self.opens);
-        if opens.len() > RECENT_LIMIT {
-            opens.clear();
-        }
-        let (count, last) = opens
-            .entry((entry, comm.to_owned()))
-            .or_insert((0, Instant::now()));
-        if last.elapsed() > REOPENED_WITHIN {
-            *count = 0;
-        }
-        (*count, *last) = (*count + 1, Instant::now());
-        *count - 1
+        let key = (entry, comm.to_owned());
+        let before = opens
+            .get(&key)
+            .filter(|(_, last)| last.elapsed() <= REOPENED_WITHIN);
+        let count = before.map_or(0, |(count, _)| count);
+        opens.insert(key, 1, (count + 1, Instant::now()));
+        opens.evict(RECENT, |_| false);
+        count
     }
 
     /// Pins every chunk for Pin, and prefetches them in the background for Fetch and Pin.
@@ -82,7 +77,7 @@ impl Space {
         // Pinning under the handles lock: release either comes later and unpins, or came first.
         if let Ok(strategy) = upgrade.await
             && let Some(handle) = lock(&self.handles).get(&fh)
-            && let Some(file) = lock(&handle.content).clone()
+            && let Some(file) = self.reader.current(handle.entry).flatten()
         {
             self.begin(strategy, &file, handle);
         }

@@ -64,6 +64,11 @@ impl Remote {
         self.entry(|space| Request::Stat { space, path }).await
     }
 
+    /// The entry with this id, at its current path.
+    pub async fn locate(&self, entry: EntryId) -> Result<Entry, Error> {
+        self.entry(|space| Request::Locate { space, entry }).await
+    }
+
     pub async fn list(&self, path: SpacePath) -> Result<Vec<Entry>, Error> {
         match self.call(|space| Request::List { space, path }).await? {
             Response::Entries { entries } => Ok(entries),

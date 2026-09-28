@@ -14,11 +14,11 @@ pub use fuse::Fuse;
 use fuser::{Errno, FileAttr, FileType, INodeNo, Notifier};
 use handles::Handle;
 use herdfs_core::SpacePath;
-use herdfs_core::proto::{Entry, EntryId, Kind, Version};
+use herdfs_core::proto::{Entry, EntryId, Kind};
 
 use crate::{
-    cache::Cache, error::Error, journal::Journal, lock, reader::Reader, remote::Remote, stats::Stats,
-    strategy::Decider,
+    cache::Cache, error::Error, journal::Journal, lock, lru::Lru, reader::Reader, remote::Remote,
+    stats::Stats, strategy::Decider,
 };
 
 /// How long the kernel and this client may reuse an attribute or listing (T_vis, C2).
@@ -27,8 +27,8 @@ const TTL: Duration = Duration::from_secs(1);
 const PERMISSIONS: u32 = 0o7777;
 /// The longest name POSIX filesystems take, in bytes.
 const MAX_NAME: usize = 255;
-/// Past this many cached entries, expired ones are dropped.
-const RECENT_LIMIT: usize = 4096;
+/// How many fetched entries to keep, for lookups within TTL and while offline.
+const RECENT: u64 = 4096;
 
 /// A directory's entries as readdir reports them.
 type Listing = Vec<(INodeNo, FileType, String)>;
@@ -43,15 +43,14 @@ pub struct Space {
     root: EntryId,
     /// The mounting user and group, shown as the owner of every entry.
     owner: (u32, u32),
-    /// The path of each inode the kernel holds, with its lookup count, which `forget` lowers.
-    paths: Mutex<HashMap<INodeNo, (SpacePath, u64)>>,
+    /// The path of each inode the kernel holds, with its lookup count, which `forget` lowers,
+    /// and when the authority last confirmed the path.
+    paths: Mutex<HashMap<INodeNo, (SpacePath, u64, Instant)>>,
     /// Entries fetched from the authority, by path, with when and in which journal
     /// generation (count of settled commits) they were fetched.
-    recent: Mutex<HashMap<SpacePath, (Instant, u64, Entry)>>,
-    /// The last head `Open` returned for each entry, for opens while offline (C12).
-    heads: Mutex<HashMap<EntryId, Option<Version>>>,
+    recent: Mutex<Lru<SpacePath, (Instant, u64, Entry)>>,
     /// Opens by entry and process name: how many in a row, and when the last was.
-    opens: Mutex<HashMap<(EntryId, String), (u32, Instant)>>,
+    opens: Mutex<Lru<(EntryId, String), (u32, Instant)>>,
     handles: Mutex<HashMap<u64, Arc<Handle>>>,
     /// Directory listings taken at opendir, by handle.
     listings: Mutex<HashMap<u64, Listing>>,
@@ -63,6 +62,7 @@ pub struct Space {
 impl Space {
     pub fn new(
         remote: Arc<Remote>,
+        reader: Arc<Reader>,
         cache: Arc<Cache>,
         journal: Arc<Journal>,
         stats: Arc<Stats>,
@@ -72,17 +72,19 @@ impl Space {
         // /proc/self belongs to this process's user and group.
         let process = std::fs::metadata("/proc/self")?;
         Ok(Self {
-            reader: Arc::new(Reader::new(remote.clone(), cache.clone(), stats.clone())),
             remote,
+            reader,
             cache,
             journal,
             stats,
             decider: Mutex::new(decider),
             root,
             owner: (process.uid(), process.gid()),
-            paths: Mutex::new(HashMap::from([(INodeNo::ROOT, (SpacePath::root(), 1))])),
+            paths: Mutex::new(HashMap::from([(
+                INodeNo::ROOT,
+                (SpacePath::root(), 1, Instant::now()),
+            )])),
             recent: Mutex::default(),
-            heads: Mutex::default(),
             opens: Mutex::default(),
             handles: Mutex::default(),
             listings: Mutex::default(),
@@ -101,7 +103,7 @@ impl Space {
     }
 
     fn path(&self, ino: INodeNo) -> Result<SpacePath, Error> {
-        let path = lock(&self.paths).get(&ino).map(|(path, _)| path.clone());
+        let path = lock(&self.paths).get(&ino).map(|(path, ..)| path.clone());
         Ok(path.ok_or(Errno::ENOENT)?)
     }
 
@@ -109,24 +111,46 @@ impl Space {
         let _ = self.notifier.set(notifier);
     }
 
-    fn child(&self, parent: INodeNo, name: &OsStr) -> Result<SpacePath, Error> {
+    /// The inode's path, which another client may have moved: once older than TTL, asked of
+    /// the authority by entry id (C7). Offline, the path held.
+    async fn located(&self, ino: INodeNo) -> Result<SpacePath, Error> {
+        let known = lock(&self.paths).get(&ino).cloned();
+        let (path, _, confirmed) = known.ok_or(Errno::ENOENT)?;
+        if ino == INodeNo::ROOT || confirmed.elapsed() < TTL {
+            return Ok(path);
+        }
+        match self.relocate(ino).await {
+            Err(err) if err.is_offline() => Ok(path),
+            located => Ok(located?.path),
+        }
+    }
+
+    /// The entry of the inode, wherever it is now.
+    async fn relocate(&self, ino: INodeNo) -> Result<Entry, Error> {
+        let entry = match self.remote.locate(self.entry_id(ino)).await {
+            Err(err) => return Err(self.gone(&self.path(ino)?, err)),
+            located => located?,
+        };
+        self.remember(&entry);
+        self.follow(&entry).await;
+        Ok(entry)
+    }
+
+    /// The path of `name` in the directory `parent`, wherever that is now.
+    async fn located_child(&self, parent: INodeNo, name: &OsStr) -> Result<SpacePath, Error> {
         if name.len() > MAX_NAME {
             return Err(Errno::ENAMETOOLONG.into());
         }
-        let name = name.to_str().ok_or(Errno::EINVAL)?;
-        Ok(self.path(parent)?.join(name).map_err(|_| Errno::EINVAL)?)
+        let (name, parent) = (name.to_str().ok_or(Errno::EINVAL)?, self.located(parent).await?);
+        Ok(parent.join(name).map_err(|_| Errno::EINVAL)?)
     }
 
-    /// The entry at `path` and how long the kernel may keep it: from the cache while a local
-    /// write is pending or for TTL after the fetch, so opens see commits (C2), else from the
-    /// authority.
+    /// The entry at `path` and how long the kernel may keep it: for TTL after the fetch, so
+    /// opens see commits (C2), else from the authority. Its local changes show through `attr`
+    /// (C1). Offline, the last entry seen keeps cached reads and writes working (C12).
     async fn entry(&self, path: &SpacePath) -> Result<(Entry, Duration), Error> {
-        let cached = lock(&self.recent).get(path).cloned();
+        let cached = lock(&self.recent).get(path);
         if let Some((fetched, settled, entry)) = &cached {
-            // A pending local write shadows the authority, even offline (C1, C12).
-            if self.journal.changes(entry.id).is_some() {
-                return Ok((entry.clone(), TTL));
-            }
             // A local commit since the fetch has made the entry stale (C1).
             let fresh = *settled == self.journal.settled();
             if let Some(ttl) = TTL.checked_sub(fetched.elapsed()).filter(|_| fresh) {
@@ -136,32 +160,50 @@ impl Space {
         match self.remote.stat(path.clone()).await {
             Ok(entry) => {
                 self.remember(&entry);
+                self.follow(&entry).await;
                 Ok((entry, TTL))
             }
-            // Offline, the last entry seen keeps writes to existing files working (C12).
             Err(err) if err.is_offline() => cached.map(|(.., entry)| (entry, TTL)).ok_or(err),
             Err(err) => Err(err),
         }
     }
 
-    /// Caches the entry and updates the path of its inode if the kernel holds it.
+    /// Caches the entry, and the path of its inode if the kernel holds it.
     fn remember(&self, entry: &Entry) {
         if let Some(known) = lock(&self.paths).get_mut(&self.ino(entry.id)) {
-            known.0 = entry.path.clone();
+            (known.0, known.2) = (entry.path.clone(), Instant::now());
         }
         let mut recent = lock(&self.recent);
-        if recent.len() > RECENT_LIMIT {
-            recent.retain(|_, (fetched, ..)| fetched.elapsed() < TTL);
-        }
         let cached = (Instant::now(), self.journal.settled(), entry.clone());
-        recent.insert(entry.path.clone(), cached);
+        recent.insert(entry.path.clone(), 1, cached);
+        recent.evict(RECENT, |_| false);
+    }
+
+    /// Caches an entry a listing fetched as the next to go unless a lookup uses it, so a big
+    /// listing does not push out the entries in use (C12).
+    fn listed(&self, entry: &Entry) {
+        let mut recent = lock(&self.recent);
+        let cached = (Instant::now(), self.journal.settled(), entry.clone());
+        recent.insert_cold(entry.path.clone(), 1, cached);
+        recent.evict(RECENT, |_| false);
+    }
+
+    /// ESTALE for an entry the authority no longer finds where it was looked for. The entry
+    /// cached there goes, so the lookup the kernel then makes asks the authority (C7).
+    fn gone(&self, path: &SpacePath, err: Error) -> Error {
+        if !err.is_not_found() {
+            return err;
+        }
+        lock(&self.recent).remove(path);
+        Errno::ESTALE.into()
     }
 
     /// Counts a reply that hands the kernel a reference to the entry's inode, and returns
     /// its attributes for that reply.
     fn looked_up(&self, entry: &Entry) -> FileAttr {
         let mut paths = lock(&self.paths);
-        let known = paths.entry(self.ino(entry.id)).or_default();
+        let known = paths.entry(self.ino(entry.id));
+        let known = known.or_insert_with(|| (entry.path.clone(), 0, Instant::now()));
         (known.0, known.1) = (entry.path.clone(), known.1 + 1);
         drop(paths);
         self.attr(entry)
@@ -177,7 +219,7 @@ impl Space {
     /// Drops the kernel's `lookups` references to `ino`, and its path with the last one.
     pub fn forget(&self, ino: INodeNo, lookups: u64) {
         let mut paths = lock(&self.paths);
-        let Some((_, count)) = paths.get_mut(&ino) else {
+        let Some((_, count, _)) = paths.get_mut(&ino) else {
             return;
         };
         *count = count.saturating_sub(lookups);
@@ -191,7 +233,7 @@ impl Space {
     /// its own attributes of that directory after the change.
     fn stale(&self, path: &SpacePath) {
         let parent = path.parent();
-        lock(&self.recent).retain(|known, _| !known.is_within(path) && Some(known) != parent.as_ref());
+        lock(&self.recent).purge(|known| known.is_within(path) || Some(known) == parent.as_ref());
     }
 
     /// The entry's attributes, with size and mtime from its journal copy while it has one.

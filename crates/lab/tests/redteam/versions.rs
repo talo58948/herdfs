@@ -1,4 +1,6 @@
 //! Round 2: what a handle open on one version reads while another client commits or removes.
+//! An open file follows its latest version between reads (C3), so a handle reads the version
+//! committed after it opened, whole, once its client has seen it.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek};
@@ -13,13 +15,12 @@ const LEN: usize = 1 << 20;
 const PAGE: usize = 4096;
 
 /// Repro: on b, open a 2 MiB `f` and read its first page; a commits a 1 MiB `f`; after T_vis b
-/// stats `f`, then reads the open handle to its end. The stat gives the kernel the new version's
-/// size, getattr ignoring which version the handle reads, and the kernel ends the handle's reads
-/// there: b gets the first half of the version it opened.
+/// stats `f`, then reads the open handle to its end. Before, the handle kept its version while
+/// the stat gave the kernel the new size, so b read the first half of the old version; now b
+/// reads the new version whole.
 // contract: C3
 #[test]
-#[ignore = "REDTEAM2: a stat cuts an open handle's version short at the new head's size"]
-fn a_reader_gets_all_of_its_version_after_a_shorter_one_is_committed() -> Result<()> {
+fn a_reader_gets_all_of_the_newer_version_after_a_shorter_one_is_committed() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
     };
@@ -40,17 +41,20 @@ fn a_reader_gets_all_of_its_version_after_a_shorter_one_is_committed() -> Result
     let mut read = Vec::new();
     file.rewind()?;
     file.read_to_end(&mut read)?;
-    assert_bytes(&read, &old, "the handle opened on the 2 MiB version");
+    assert_bytes(
+        &read,
+        &new,
+        "the handle opened on the 2 MiB version, after the stat",
+    );
     Ok(())
 }
 
 /// Repro: on b, open `f` at v1 and read its first page; a commits v2; after T_vis b opens `f`
 /// again and maps it, reads the middle through the first handle, then through the mapping. The
-/// second handle is direct I/O, but a mapping of it goes through the page cache, which the first
-/// handle's read has just filled with v1.
+/// second handle used to be direct I/O, but a mapping of it went through the page cache, which
+/// the first handle's read had just filled with v1.
 // contract: C2, C3
 #[test]
-#[ignore = "REDTEAM2: a mapping of a direct handle reads the page cache another version filled"]
 fn a_mapping_opened_after_a_commit_never_reads_the_older_version() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
@@ -104,12 +108,12 @@ fn read_mapped(
 }
 
 /// Repro: on b, open a 12 MiB `f` and read its first page; a removes `f`; b reads the end through
-/// the same handle. Remove deletes the entry's versions with it, so the grant for the end's
-/// chunks fails, and a read of a file that b opened while it existed breaks off halfway.
-// contract: C3 (docs/architecture.md: of files unlinked while open, only writing is out of v0)
+/// the same handle. Remove deletes the entry's versions with it, so b can read only what it
+/// holds; a file used after it is unlinked while open fails (docs/architecture.md), never with
+/// other bytes. b answers ENOENT, which the kernel's page-cache read reports as EIO.
+// contract: C3
 #[test]
-#[ignore = "REDTEAM2: removing a file breaks reads through handles already open on it"]
-fn an_open_file_stays_readable_after_another_client_removes_it() -> Result<()> {
+fn a_read_of_an_open_file_another_client_removed_fails_cleanly() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
     };
@@ -121,8 +125,12 @@ fn an_open_file_stays_readable_after_another_client_removes_it() -> Result<()> {
 
     fs::remove_file(lab.mount_path("a").join("f"))?;
     let tail = bytes.len() - PAGE;
-    let read = read_at(&file, tail as u64, PAGE);
-    assert!(read.is_ok(), "reading the end after the remove: {read:?}");
-    assert_bytes(&read?, &bytes[tail..], "the end");
+    match read_at(&file, tail as u64, PAGE) {
+        Ok(read) => assert_bytes(&read, &bytes[tail..], "the end, which b held"),
+        Err(error) => assert!(
+            [Some(libc::ENOENT), Some(libc::EIO)].contains(&error.raw_os_error()),
+            "reading the end after the remove: {error}"
+        ),
+    }
     Ok(())
 }

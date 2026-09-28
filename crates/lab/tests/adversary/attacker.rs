@@ -15,6 +15,10 @@ use tempfile::TempDir;
 
 use crate::BOB;
 
+/// Tries of a store GET: the loaded lab host sometimes drops a pooled connection before it
+/// answers, and a GET is safe to repeat.
+const GET_TRIES: usize = 3;
+
 /// Root on bob's host, calling the authority and the store directly with bob's token. Every
 /// answer is kept in `loot`, which the sweeps search.
 pub(crate) struct Attacker {
@@ -67,8 +71,14 @@ impl Attacker {
         self.send(authorized(self.http.put(url).body(bytes.to_vec()), token))
     }
 
-    /// A GET on the store, such as a presigned URL.
+    /// A GET on the store, such as a presigned URL, tried again while it gets no answer.
     pub(crate) fn get(&self, url: &str) -> Result<Reply> {
+        for _ in 1..GET_TRIES {
+            match self.send(self.http.get(url)) {
+                Err(error) if error.is::<reqwest::Error>() => continue,
+                reply => return reply,
+            }
+        }
         self.send(self.http.get(url))
     }
 

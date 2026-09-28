@@ -38,7 +38,6 @@ fn append_offline(lab: &Lab, name: &str, line: &[u8], expected: &[u8]) -> Result
 /// when an open fetched one, and creating the file fetched none: the append fails with EIO.
 // contract: C12
 #[test]
-#[ignore = "REDTEAM2: a client cannot append offline to a file it created and saved itself"]
 fn an_offline_append_to_a_file_this_client_saved_is_committed() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
@@ -53,7 +52,6 @@ fn an_offline_append_to_a_file_this_client_saved_is_committed() -> Result<()> {
 /// `log`'s current bytes.
 // contract: C12
 #[test]
-#[ignore = "REDTEAM2: listing a big directory makes offline appends to files b holds fail"]
 fn an_offline_append_after_listing_a_big_directory_is_committed() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());

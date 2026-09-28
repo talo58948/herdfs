@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, watch};
 
 use super::{Journal, REJECTED, Record, write_record};
 use crate::stats::{Stats, bump};
-use crate::{cache::Cache, error::Error, lock, remote::Remote};
+use crate::{cache::Cache, error::Error, lock, reader::Reader, remote::Remote};
 
 const FIRST_RETRY: Duration = Duration::from_secs(1);
 const LAST_RETRY: Duration = Duration::from_secs(30);
@@ -35,6 +35,7 @@ pub enum Outcome {
 pub struct Committer {
     pub journal: Arc<Journal>,
     pub remote: Arc<Remote>,
+    pub reader: Arc<Reader>,
     pub cache: Arc<Cache>,
     pub stats: Arc<Stats>,
 }
@@ -55,6 +56,9 @@ impl Committer {
             let outcome = match self.attempt(&job).await {
                 Ok(version) => {
                     bump(&self.stats.commits, 1);
+                    // Reads go on to the committed version once the journal drops the copy, as
+                    // do offline opens and appends (C1, C12).
+                    self.reader.follow(entry, Some(version.clone()));
                     delay = FIRST_RETRY;
                     Outcome::Committed(version)
                 }
