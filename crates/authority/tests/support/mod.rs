@@ -136,7 +136,10 @@ impl Fixture {
             len: u32::try_from(bytes.len()).unwrap(),
         };
         self.now_ms += 1;
-        let recorded = self.authority.record_upload(who, SPACE, chunk, self.now_ms);
+        let request_id = chunk.id.to_string();
+        let recorded = self
+            .authority
+            .record_upload(who, SPACE, &request_id, chunk, self.now_ms);
         recorded.map_err(|error| error.code)?;
         Ok(chunk)
     }

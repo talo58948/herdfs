@@ -167,8 +167,9 @@ impl Remote {
         }
     }
 
-    pub async fn put_chunk(&self, id: ChunkId, bytes: Bytes) -> Result<()> {
-        let url = format!("{}/v1/spaces/{}/chunks/{id}", self.authority, self.space);
+    pub async fn put_chunk(&self, request_id: &str, id: ChunkId, bytes: Bytes) -> Result<()> {
+        let (authority, space) = (&self.authority, &self.space);
+        let url = format!("{authority}/v1/spaces/{space}/commits/{request_id}/chunks/{id}");
         let upload = |token: &str| self.http.put(&url).bearer_auth(token).body(bytes.clone());
         self.send(upload, Some(bytes.len())).await.map(drop)
     }

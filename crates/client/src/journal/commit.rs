@@ -129,7 +129,10 @@ impl Committer {
             if upload_error.is_none()
                 && !base.contains(&chunk.id)
                 && uploaded.insert(chunk.id)
-                && let Err(error) = self.remote.put_chunk(chunk.id, Bytes::from(bytes)).await
+                && let Err(error) = self
+                    .remote
+                    .put_chunk(&record.request_id, chunk.id, Bytes::from(bytes))
+                    .await
             {
                 upload_error = Some(error);
             }

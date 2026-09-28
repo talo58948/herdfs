@@ -1,8 +1,8 @@
 //! The authority protocol. Each call is one JSON [`Request`] sent to
 //! `POST /v1/rpc` with a bearer token, answered by a [`Response`] or, with a
-//! non-2xx status, an [`Error`]. Chunk bytes are uploaded with
-//! `PUT /v1/spaces/{space}/chunks/{id}` and downloaded from presigned URLs,
-//! so they never travel inside RPC bodies.
+//! non-2xx status, an [`Error`]. Chunk bytes are uploaded for the commit that
+//! will name them with `PUT /v1/spaces/{space}/commits/{request_id}/chunks/{id}`
+//! and downloaded from presigned URLs, so they never travel inside RPC bodies.
 
 use serde::{Deserialize, Serialize};
 

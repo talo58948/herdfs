@@ -7,7 +7,9 @@
 
 mod support;
 
+use herdfs_authority::Policy;
 use herdfs_core::proto::{ErrorCode, Perm, Request, Response, VersionId};
+use herdfs_core::{ChunkId, ChunkRef};
 use support::{Fixture, SPACE, alice, bob, carol, path, user};
 
 /// The ids of `versions`, in order.
@@ -153,7 +155,7 @@ fn a_grant_in_a_fork_hides_the_versions_the_fork_copied() {
 /// removed, `NotFound`.
 // contract: S8, C4a
 #[test]
-fn a_replay_after_rename_purge_and_revocation_answers_done() {
+fn a_replay_confirms_through_rename_purge_regrant_and_remove() {
     let mut fixture = Fixture::new();
     fixture.mkdir(&alice(), "a").unwrap();
     fixture.mkdir(&alice(), "b").unwrap();
@@ -197,4 +199,41 @@ fn a_replay_after_rename_purge_and_revocation_answers_done() {
     assert_ne!(version.id, mine.id);
     fixture.remove(&alice(), "b/f").unwrap();
     assert_eq!(replay(&mut fixture), Err(ErrorCode::NotFound));
+}
+
+/// A file that takes longer than the grace to upload keeps its first chunks while its later ones
+/// arrive: a commit's uploads age together from the newest. Uploads for a commit that stopped
+/// uploading still go.
+// contract: C4a, C15
+#[test]
+fn a_commit_still_uploading_keeps_its_first_chunks_past_the_grace() {
+    const GRACE_MS: i64 = 100;
+    let mut fixture = Fixture::new();
+    let file = fixture.create(&alice(), "big").unwrap();
+    let chunk = |bytes: &[u8]| ChunkRef {
+        id: ChunkId::of(bytes),
+        len: u32::try_from(bytes.len()).unwrap(),
+    };
+    let (first, last, abandoned) = (chunk(b"first"), chunk(b"last"), chunk(b"abandoned"));
+    let mut upload = |request_id: &str, chunk: ChunkRef, at_ms: i64| {
+        let recorded = fixture
+            .authority
+            .record_upload(&alice(), SPACE, request_id, chunk, at_ms);
+        recorded.unwrap();
+    };
+    upload("slow", first, 10_000);
+    upload("gone", abandoned, 10_020);
+    upload("slow", last, 10_090);
+    let policy = Policy {
+        versions: 16,
+        max_age_ms: i64::MAX / 2,
+        grace_ms: GRACE_MS,
+    };
+    let live = fixture.authority.collect(10_150, &policy).unwrap().live;
+    assert!(live.contains(&first.id) && live.contains(&last.id));
+    assert!(!live.contains(&abandoned.id));
+    let committed = fixture.commit(&alice(), file.id, "slow", None, false, &[first, last]);
+    assert!(committed.is_ok());
+    let refused = fixture.commit(&alice(), file.id, "gone", None, false, &[abandoned]);
+    assert_eq!(refused, Err(ErrorCode::Invalid));
 }

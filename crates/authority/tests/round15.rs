@@ -83,7 +83,7 @@ fn collect_after_clock_change(backward: bool) -> (usize, usize) {
             len: 1,
         };
         authority
-            .record_upload(&alice(), "clock", chunk, wall_ms)
+            .record_upload(&alice(), "clock", &chunk.id.to_string(), chunk, wall_ms)
             .unwrap();
         uploads.push(chunk.id);
     }

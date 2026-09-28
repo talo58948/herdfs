@@ -66,16 +66,17 @@ impl Authority {
         self.transact(who, now_ms, |call| call.dispatch(request))
     }
 
-    /// Records that `who` uploaded `chunk`, so their commits may reference it
-    /// at that length.
+    /// Records that `who` uploaded `chunk` for the commit `request_id`, so their
+    /// commits may reference it at that length.
     pub fn record_upload(
         &mut self,
         who: &Principal,
         space: &str,
+        request_id: &str,
         chunk: ChunkRef,
         now_ms: i64,
     ) -> Result<(), proto::Error> {
-        self.transact(who, now_ms, |call| call.record_upload(space, chunk))
+        self.transact(who, now_ms, |call| call.record_upload(space, request_id, chunk))
     }
 
     fn transact<T>(

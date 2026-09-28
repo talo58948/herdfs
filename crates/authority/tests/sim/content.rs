@@ -259,7 +259,10 @@ impl Sim {
         let principal = &self.actors[who];
         let want = self.model.upload_outcome(principal, space);
         self.now_ms += 1;
-        let got = self.authority.record_upload(principal, space, chunk, self.now_ms);
+        let request_id = chunk.id.to_string();
+        let got = self
+            .authority
+            .record_upload(principal, space, &request_id, chunk, self.now_ms);
         assert_eq!(
             got.map_err(|error| error.code),
             want,

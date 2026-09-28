@@ -1,6 +1,6 @@
 //! Round 16: a write whose chunks take longer to upload than the collection grace. The client
-//! uploads every chunk of the file, then commits; collection meanwhile forgets the first
-//! uploads, so the commit is refused and the write set aside.
+//! uploads every chunk of the file, then commits; collection must not forget the first uploads
+//! meanwhile, or the commit is refused and the write set aside.
 
 use std::fs;
 use std::time::Duration;
@@ -53,17 +53,13 @@ fn save_slowly(grace: Duration) -> Result<Option<(Vec<String>, usize)>> {
     Ok(Some((outcomes, refused)))
 }
 
-/// Repro: [`save_slowly`] with the quick grace of 5 s. The client uploads every chunk before it
-/// commits (journal/commit.rs `attempt`); collection meanwhile deletes the upload records older
-/// than the grace (collect.rs), so the commit is `Invalid` ("neither in the base nor uploaded by
-/// you", versions.rs `commit`), which the client treats as final: the write is set aside and
-/// `fsync` fails with EIO, where C4a says a closed write commits. At the contract's 1 h grace the
-/// same happens to any file whose upload takes over an hour, e.g. 25 GiB at 50 Mbit/s (about
-/// 70 minutes), well inside the 350 GiB limit. The control is
+/// [`save_slowly`] with the quick grace of 5 s. Collection used to delete each upload record
+/// once it was older than the grace, so the commit was `Invalid` ("neither in the base nor
+/// uploaded by you") and set aside, and `fsync` failed with EIO. At the contract's 1 h grace that
+/// hit any file whose upload took over an hour, e.g. 25 GiB at 50 Mbit/s. The control is
 /// [`a_save_that_uploads_within_the_grace_commits`].
 // contract: C4a
 #[test]
-#[ignore = "ROUND16: a write whose upload outlasts the collection grace is refused and set aside"]
 fn a_save_that_uploads_for_longer_than_the_grace_commits() -> Result<()> {
     let Some((outcomes, refused)) = save_slowly(Collection::QUICK.grace)? else {
         return Ok(());
