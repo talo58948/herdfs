@@ -79,9 +79,11 @@ impl Space {
         for &(parent, name) in children {
             paths.push(self.located_child(parent, name).await?);
         }
-        for retry in 0..=MOVED_PATH_RETRIES {
+        let mut retries = 0;
+        loop {
             match call(paths.clone()).await {
-                Err(err) if err.is_not_found() && retry < MOVED_PATH_RETRIES => {
+                Err(err) if err.is_not_found() && retries < MOVED_PATH_RETRIES => {
+                    retries += 1;
                     let mut moved = Vec::with_capacity(children.len());
                     for &(parent, name) in children {
                         let parent = self.relocate_for(parent, Follow::PathOnly).await?.path;
@@ -99,7 +101,6 @@ impl Space {
                 answer => return answer.map(|answer| (paths, answer)),
             }
         }
-        unreachable!("bounded namespace retries always return")
     }
 
     /// The entry at `path`, when it was asked for, and its journal copy while it holds changes:
