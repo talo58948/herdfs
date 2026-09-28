@@ -3,8 +3,9 @@
 //! `r6 issuer DIR USER...` runs the lab's OIDC issuer for a real authority: it writes
 //! `DIR/USER.token` for each user, prints `issuer=URL`, and serves until killed.
 //!
-//! `r6 twin NAME=RTT_MS:KB_S...` runs the emulated twin of the real topology: a lab with client
-//! `maker` on a LAN link and each NAME on a link of that round trip and bandwidth. It prints
+//! `r6 twin NAME=RTT_MS:KB_S:FIRST_BYTE_MS...` runs the emulated twin of the real topology: a lab
+//! with client `maker` on a LAN link and each NAME on a link of that round trip and bandwidth, to
+//! a store with that time to first byte. It prints
 //! `NAME=MOUNT` for every client, `authority=URL`, `admin=TOKEN` and `ready`. Then, until its
 //! input ends, it obeys `cut NAME store|authority`, `restore NAME store|authority` and
 //! `fresh NAME` (restart with an empty cache) lines, answering `ok` to each.
@@ -20,7 +21,7 @@ fn main() -> Result<()> {
     match args.split_first() {
         Some((command, rest)) if command == "issuer" => issuer(rest),
         Some((command, rest)) if command == "twin" => twin(rest),
-        _ => bail!("usage: r6 issuer DIR USER... | r6 twin NAME=RTT_MS:KB_S..."),
+        _ => bail!("usage: r6 issuer DIR USER... | r6 twin NAME=RTT_MS:KB_S:FIRST_BYTE_MS..."),
     }
 }
 
@@ -40,7 +41,8 @@ fn twin(args: &[String]) -> Result<()> {
     let mut names = vec!["maker"];
     let mut config = LabConfig::default().client("maker", "maker", &[], Profile::Lan, Strategy::Stream);
     for arg in args {
-        let (name, profile) = parse_link(arg).with_context(|| format!("{arg:?} is not NAME=RTT_MS:KB_S"))?;
+        let (name, profile) =
+            parse_link(arg).with_context(|| format!("{arg:?} is not NAME=RTT_MS:KB_S:FIRST_BYTE_MS"))?;
         config = config.client(name, name, &[], profile, Strategy::Stream);
         names.push(name);
     }
@@ -83,10 +85,13 @@ fn fresh(lab: &mut Lab, name: &str) -> Result<()> {
 
 fn parse_link(arg: &str) -> Option<(&str, Profile)> {
     let (name, link) = arg.split_once('=')?;
-    let (round_trip, rate) = link.split_once(':')?;
+    let [round_trip, rate, first_byte] = link.split(':').collect::<Vec<_>>()[..] else {
+        return None;
+    };
     let profile = Profile::Custom {
         round_trip_ms: round_trip.parse().ok()?,
         kilobytes_per_sec: rate.parse().ok()?,
+        store_first_byte_ms: first_byte.parse().ok()?,
     };
     Some((name, profile))
 }
