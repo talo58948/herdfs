@@ -25,14 +25,13 @@ use tempfile::TempDir;
 
 use crate::authority::Authority;
 use crate::client::Client;
-use crate::issuer::Issuer;
 use crate::process::Proc;
 use crate::store::Store;
 use crate::toxiproxy::Toxiproxy;
 
 pub use crate::chunks::overlapping_chunk_bytes;
 pub use crate::client::Strategy;
-pub use crate::issuer::BadToken;
+pub use crate::issuer::{AUDIENCE, BadToken, Issuer};
 pub use crate::jev::{FakeJev, JevMode};
 pub use crate::lifecycle::LabConfig;
 pub use crate::process::run;
