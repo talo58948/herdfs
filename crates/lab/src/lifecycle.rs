@@ -17,8 +17,12 @@ use crate::store::{S3_HOST, Store};
 use crate::toxiproxy::Toxiproxy;
 use crate::{ADMIN, Lab, Profile, SPACE, Strategy, no_client};
 
+/// Tries per lab start: a port picked free is taken only when its service binds it, and a
+/// parallel lab may take it first.
+const PORT_TRIES: usize = 3;
+
 /// The clients of a lab.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct LabConfig {
     clients: Vec<ClientSpec>,
     on_tmpfs: bool,
@@ -70,8 +74,11 @@ impl Lab {
     pub fn start(config: LabConfig) -> Result<Self> {
         process::binary(process::AUTHORITY)?;
         process::binary(process::CLIENT)?;
-        let mut lab = Self::start_infra(config)?;
-        lab.restart_authority()?;
+        let mut lab = with_fresh_ports(config, |config| {
+            let mut lab = Self::start_services(config)?;
+            lab.restart_authority()?;
+            Ok(lab)
+        })?;
         lab.rpc(ADMIN, &Request::CreateSpace { space: SPACE.into() })?;
         for client in &lab.clients {
             let principal = format!("user:{}", client.spec.user);
@@ -92,6 +99,10 @@ impl Lab {
     /// Starts MinIO, toxiproxy, the issuer and every client's proxies, but neither the
     /// authority nor any mount.
     pub fn start_infra(config: LabConfig) -> Result<Self> {
+        with_fresh_ports(config, Self::start_services)
+    }
+
+    fn start_services(config: LabConfig) -> Result<Self> {
         let parent = config.on_tmpfs.then(|| "/dev/shm".into());
         let parent = parent.unwrap_or_else(env::temp_dir);
         let mut dir = tempfile::Builder::new()
@@ -174,4 +185,17 @@ impl Lab {
         self.agents.push(runner);
         Ok(())
     }
+}
+
+/// Runs `start` again, on fresh ports, when a service could not bind the port picked for it.
+fn with_fresh_ports(config: LabConfig, start: impl Fn(LabConfig) -> Result<Lab>) -> Result<Lab> {
+    for _ in 1..PORT_TRIES {
+        match start(config.clone()) {
+            Err(error) if format!("{error:#}").contains("already in use") => {
+                eprintln!("lab: a port was taken before its service bound it; starting again\n{error:#}");
+            }
+            started => return started,
+        }
+    }
+    start(config)
 }

@@ -4,9 +4,8 @@ use std::collections::BTreeMap;
 
 use herdfs_authority::{Outcome, Principal};
 use herdfs_core::{
-    ChunkId, SpacePath,
-    chunk::total_len,
-    proto::{EntryId, Kind, Perm, Request, Response, Version},
+    SpacePath,
+    proto::{EntryId, Kind, Perm, Request, Response},
 };
 
 use crate::model::{Model, Node, Space};
@@ -26,9 +25,7 @@ impl Model {
     /// Checks the reply to an acknowledged `request` and applies its effects.
     pub fn apply(&mut self, who: &Principal, request: &Request, outcome: &Outcome, now_ms: i64) {
         let reply = match outcome {
-            Outcome::Sign { chunks, expires_ms } => {
-                return self.check_grant(request, chunks, *expires_ms, now_ms);
-            }
+            Outcome::Sign { chunks } => return self.check_grant(request, chunks),
             Outcome::Reply(reply) => reply,
         };
         match request {
@@ -68,7 +65,15 @@ impl Model {
             Request::Open { space, path } => {
                 let entry = self.entry(space, path);
                 let version = entry.head.map(|id| self.versions[&id].clone());
-                assert_eq!(*reply, Response::Opened { entry, version });
+                let writable = self.perm(space, path, who) >= Some(Perm::Write);
+                assert_eq!(
+                    *reply,
+                    Response::Opened {
+                        entry,
+                        version,
+                        writable
+                    }
+                );
             }
             Request::History { space, path } => {
                 let versions = self.history(&self.spaces[space].nodes[path]);
@@ -115,26 +120,7 @@ impl Model {
                 );
             }
             Request::Commit { .. } => self.commit(who, request, reply, now_ms),
-            Request::Restore { space, path, version } => {
-                let Response::Version { version: restored } = reply else {
-                    panic!("Restore answered {reply:?}")
-                };
-                let old = &self.versions[version];
-                let expected = Version {
-                    author: who.user.clone(),
-                    created_ms: now_ms,
-                    ..old.clone()
-                };
-                assert_eq!(
-                    *restored,
-                    Version {
-                        id: restored.id,
-                        ..expected
-                    }
-                );
-                self.add_version(space, restored.clone());
-                assert_eq!(self.node_mut(space, path).history.last(), Some(&restored.id));
-            }
+            Request::Restore { space, version, .. } => self.restore(who, space, *version, reply, now_ms),
             Request::SetAcl {
                 space,
                 path,
@@ -206,70 +192,6 @@ impl Model {
         self.touch_parent(space, to, now_ms);
     }
 
-    fn commit(&mut self, who: &Principal, request: &Request, reply: &Response, now_ms: i64) {
-        let Request::Commit {
-            space,
-            entry,
-            request_id,
-            base,
-            guarded,
-            chunks,
-        } = request
-        else {
-            unreachable!()
-        };
-        let Response::Version { version } = reply else {
-            panic!("Commit answered {reply:?}")
-        };
-        let key = (who.user.clone(), request_id.clone());
-        if let Some(first) = self.commits.get(&key) {
-            // contract: C4a, C12 — a retried commit answers with its first version and adds none.
-            assert_eq!(
-                *version, self.versions[first],
-                "retry of {request_id} made a new version"
-            );
-            return;
-        }
-        let size = total_len(chunks);
-        let author = who.user.clone();
-        let expected = Version {
-            id: version.id,
-            entry: *entry,
-            size,
-            author,
-            created_ms: now_ms,
-            chunks: chunks.clone(),
-        };
-        assert_eq!(*version, expected);
-        self.add_version(space, version.clone());
-        self.commits.insert(key, version.id);
-        self.acked.insert(version.id, (space.clone(), *entry));
-        if *guarded {
-            *self.guarded_wins.entry((*entry, *base)).or_default() += 1;
-        }
-    }
-
-    fn add_version(&mut self, space: &str, version: Version) {
-        assert!(
-            !self.versions.contains_key(&version.id),
-            "version id {:?} reused",
-            version.id
-        );
-        let nodes = self
-            .spaces
-            .get_mut(space)
-            .expect("space exists")
-            .nodes
-            .values_mut();
-        let node = nodes
-            .into_iter()
-            .find(|node| node.id == version.entry)
-            .expect("entry exists");
-        node.history.push(version.id);
-        node.mtime_ms = version.created_ms;
-        self.versions.insert(version.id, version);
-    }
-
     fn check_list(&self, space: &str, dir: &SpacePath, reply: &Response) {
         let Response::Entries { entries } = reply else {
             panic!("List answered {reply:?}")
@@ -282,16 +204,5 @@ impl Model {
             .filter(|path| path.parent().as_ref() == Some(dir));
         let expected: Vec<_> = children.map(|path| self.entry(space, path)).collect();
         assert_eq!(entries, expected, "children of {dir}");
-    }
-
-    fn check_grant(&self, request: &Request, signed: &[ChunkId], expires_ms: i64, now_ms: i64) {
-        let Request::Grant { version, chunks, .. } = request else {
-            panic!("{request:?} signed")
-        };
-        let refs = &self.versions[version].chunks;
-        let expected: Vec<_> = chunks.iter().map(|&index| refs[index as usize].id).collect();
-        // contract: S2 — a grant covers only chunks of that version and expires within the TTL.
-        assert_eq!(signed, expected);
-        assert_eq!(expires_ms, now_ms + 5 * 60 * 1000);
     }
 }

@@ -91,15 +91,15 @@ pub fn history(lab: &Lab, user: &str, at: &str) -> Result<Vec<Version>> {
     }
 }
 
-/// The bytes of `version` of the file at `at` in [`SPACE`]: granted to `user`, then fetched
-/// over client `name`'s store link as the client would.
-pub fn version_bytes(lab: &Lab, name: &str, user: &str, at: &str, version: &Version) -> Result<Vec<u8>> {
+/// The bytes of `version` of a file in [`SPACE`]: granted to `user`, then fetched over client
+/// `name`'s store link as the client would.
+pub fn version_bytes(lab: &Lab, name: &str, user: &str, version: &Version) -> Result<Vec<u8>> {
     let chunks = (0..version.chunks.len())
         .map(u32::try_from)
         .collect::<Result<_, _>>()?;
     let grant = Request::Grant {
         space: SPACE.into(),
-        path: path(at)?,
+        entry: version.entry,
         version: version.id,
         chunks,
     };

@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 
-use herdfs_core::ChunkId;
 use herdfs_core::proto::{EntryId, Version, VersionId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
@@ -32,8 +31,9 @@ const REJECTED: &str = "rejected";
 pub struct Record {
     pub entry: EntryId,
     pub seal: u64,
-    pub base: Option<VersionId>,
-    pub base_chunks: Vec<ChunkId>,
+    pub base: Option<Version>,
+    /// A modification time set on the file, which the commit keeps (`cp -p`).
+    pub mtime_ms: Option<i64>,
     /// Lets the authority answer a retried commit with the first result.
     pub request_id: String,
 }
@@ -52,11 +52,12 @@ struct Tracked {
     handles: usize,
     /// What handles write to, from the first write after a seal to the next seal.
     working: Option<Arc<File>>,
-    /// The latest sealed copy, which reads see while there is no working copy.
+    /// The latest sealed copy, while its commit is pending; reads see it without a working copy.
     sealed: Option<(u64, Arc<File>)>,
     /// The version the copies started from, then each version they committed.
-    base: Option<VersionId>,
-    base_chunks: Vec<ChunkId>,
+    base: Option<Version>,
+    /// A modification time set since the last seal, for the next one to keep.
+    mtime: Option<i64>,
     /// The latest seal the committer has not settled; newer seals replace it.
     pending: Option<Record>,
     seals: u64,
@@ -114,7 +115,7 @@ impl Journal {
         let file = Arc::new(File::open(&sealed)?);
         let mut entries = lock(&self.entries);
         let tracked = entries.entry(record.entry).or_default();
-        (tracked.base, tracked.base_chunks) = (record.base, record.base_chunks.clone());
+        tracked.base = record.base.clone();
         (tracked.seals, tracked.sealed) = (record.seal, Some((record.seal, file)));
         self.queue(tracked, record);
         Ok([path.to_owned(), sealed])
@@ -134,14 +135,23 @@ impl Journal {
         self.tidy(&mut entries, entry);
     }
 
-    /// What this client reads for the entry: its working copy, else its latest sealed one (C1).
-    pub fn copy(&self, entry: EntryId) -> Option<Arc<File>> {
+    /// The entry's journal copy while it holds changes: the working copy, else the sealed one
+    /// a pending commit reads. Every read on this client sees it (C1).
+    pub fn changes(&self, entry: EntryId) -> Option<Arc<File>> {
         let entries = lock(&self.entries);
         let tracked = entries.get(&entry)?;
         tracked
             .working
             .clone()
             .or_else(|| Some(tracked.sealed.as_ref()?.1.clone()))
+    }
+
+    /// The version the entry's copies started from or last committed, if newer than `known`:
+    /// what reads see once this client's changes are committed (C1).
+    pub fn base_after(&self, entry: EntryId, known: Option<VersionId>) -> Option<Version> {
+        let entries = lock(&self.entries);
+        let base = entries.get(&entry)?.base.as_ref()?;
+        (Some(base.id) > known).then(|| base.clone())
     }
 
     pub fn settled(&self) -> u64 {
@@ -173,12 +183,12 @@ impl Journal {
         let older = tracked.sealed.replace((seal, working)).map(|(older, _)| older);
         (tracked.seals, tracked.working) = (seal, None);
         let request_id = format!("{:032x}", rand::random::<u128>());
-        let (base, base_chunks) = (tracked.base, tracked.base_chunks.clone());
+        let (base, mtime_ms) = (tracked.base.clone(), tracked.mtime.take());
         let record = Record {
             entry,
             seal,
             base,
-            base_chunks,
+            mtime_ms,
             request_id,
         };
         self.queue(tracked, record.clone());
@@ -228,10 +238,6 @@ impl Journal {
 
 fn open_copy(path: &Path) -> io::Result<File> {
     OpenOptions::new().read(true).write(true).open(path)
-}
-
-fn chunk_ids(version: &Version) -> Vec<ChunkId> {
-    version.chunks.iter().map(|chunk| chunk.id).collect()
 }
 
 fn write_record(path: &Path, record: &Record) -> io::Result<()> {

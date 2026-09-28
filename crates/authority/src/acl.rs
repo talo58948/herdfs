@@ -26,15 +26,20 @@ impl Call<'_> {
     /// whether or not `path` exists.
     pub(crate) fn require(&self, space: &str, path: &SpacePath, need: Perm) -> Result<()> {
         self.require_space(space)?;
+        if !self.may(space, path, need)? {
+            return Err(denied(need));
+        }
+        Ok(())
+    }
+
+    /// Whether the caller holds `need` on `path`: its highest perm there or on an ancestor.
+    pub(crate) fn may(&self, space: &str, path: &SpacePath, need: Perm) -> Result<bool> {
         let grants = self.grants(space)?.into_iter();
         let best = grants
             .filter(|(granted, _)| path.is_within(granted))
             .map(|(_, perm)| perm)
             .max();
-        if best < Some(need) {
-            return Err(denied(need));
-        }
-        Ok(())
+        Ok(best >= Some(need))
     }
 
     /// Fails unless the caller holds `need` on some path of the space.

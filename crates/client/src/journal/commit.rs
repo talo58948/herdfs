@@ -11,7 +11,7 @@ use herdfs_core::proto::{EntryId, Version};
 use herdfs_core::{ChunkId, chunk};
 use tokio::sync::{mpsc, watch};
 
-use super::{Journal, REJECTED, Record, chunk_ids, write_record};
+use super::{Journal, REJECTED, Record, write_record};
 use crate::stats::{Stats, bump};
 use crate::{cache::Cache, error::Error, lock, remote::Remote};
 
@@ -78,7 +78,8 @@ impl Committer {
     /// Chunks the sealed copy, caching each chunk and uploading those its base lacks without
     /// asking whether the store already has them (S6), and commits.
     async fn attempt(&self, job: &Job) -> Result<Version, Error> {
-        let base: HashSet<ChunkId> = job.record.base_chunks.iter().copied().collect();
+        let base = job.record.base.iter().flat_map(|base| &base.chunks);
+        let base: HashSet<ChunkId> = base.map(|chunk| chunk.id).collect();
         let sealed = File::open(&job.sealed)?;
         let (sender, mut chunks) = mpsc::channel(2);
         // Chunking reads and hashes the whole file, so it stays off the async workers.
@@ -139,7 +140,7 @@ impl Journal {
         let settled = match outcome {
             Outcome::Retrying => false,
             Outcome::Committed(version) => {
-                (tracked.base, tracked.base_chunks) = (Some(version.id), chunk_ids(&version));
+                tracked.base = Some(version);
                 true
             }
             Outcome::Rejected => {
@@ -147,11 +148,12 @@ impl Journal {
                 true
             }
         };
-        if tracked.sealed.as_ref().is_none_or(|(latest, _)| *latest != seal) {
+        // Settled, or replaced by a newer seal: nothing reads this sealed copy any more.
+        if settled || tracked.sealed.as_ref().is_none_or(|(latest, _)| *latest != seal) {
             let _ = fs::remove_file(&job.sealed);
         }
         if settled && tracked.pending.as_ref().is_some_and(|record| record.seal == seal) {
-            tracked.pending = None;
+            (tracked.pending, tracked.sealed) = (None, None);
             let _ = fs::remove_file(self.record_path(entry));
         }
         if settled {

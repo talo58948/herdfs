@@ -106,7 +106,7 @@ pub const OUT_OF_V0: &[(&str, &[&str])] = &[
     ),
     (
         "a separate ctime: ctime is reported as mtime, so chmod, which leaves mtime alone, leaves it too",
-        &["chmod::update_ctime::dir"],
+        &["chmod::update_ctime::dir", "chmod::update_ctime::regular"],
     ),
     (
         "writing to a file after it is unlinked while open: fstat on it fails with ENOENT",

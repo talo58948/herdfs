@@ -86,10 +86,11 @@ pub enum Request {
         path: SpacePath,
     },
     /// Presigned download URLs for chunks of `version`, by chunk index.
-    /// `version` must belong to the entry at `path`.
+    /// `version` must belong to `entry`, and the caller needs read on the
+    /// entry's current path, so a file renamed while open stays readable.
     Grant {
         space: String,
-        path: SpacePath,
+        entry: EntryId,
         version: VersionId,
         chunks: Vec<u32>,
     },
@@ -131,6 +132,8 @@ pub enum Request {
     /// `base` or uploaded by the caller. A `guarded` commit fails with
     /// `Conflict` unless the head is still `base`. Retrying with the same
     /// `request_id` returns the first result instead of committing again.
+    /// `mtime_ms` keeps a modification time the writer set (`cp -p`);
+    /// without it the commit time is used.
     Commit {
         space: String,
         entry: EntryId,
@@ -138,6 +141,7 @@ pub enum Request {
         base: Option<VersionId>,
         guarded: bool,
         chunks: Vec<ChunkRef>,
+        mtime_ms: Option<i64>,
     },
     /// All versions of the entry at `path`, oldest first.
     History {
@@ -163,13 +167,35 @@ pub enum Request {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-    Me { principal: String, groups: Vec<String> },
-    Entry { entry: Entry },
-    Entries { entries: Vec<Entry> },
-    Opened { entry: Entry, version: Option<Version> },
-    Grants { urls: Vec<String>, expires_ms: i64 },
-    Version { version: Version },
-    History { versions: Vec<Version> },
+    Me {
+        principal: String,
+        groups: Vec<String>,
+    },
+    Entry {
+        entry: Entry,
+    },
+    Entries {
+        entries: Vec<Entry>,
+    },
+    /// `writable` says whether the caller may commit to the entry, so a
+    /// write-open can fail at once rather than at commit.
+    Opened {
+        entry: Entry,
+        version: Option<Version>,
+        writable: bool,
+    },
+    /// URLs valid for `ttl_ms` from when the reply was sent. Relative, so a
+    /// client's clock skew does not matter.
+    Grants {
+        urls: Vec<String>,
+        ttl_ms: u64,
+    },
+    Version {
+        version: Version,
+    },
+    History {
+        versions: Vec<Version>,
+    },
     Done,
 }
 

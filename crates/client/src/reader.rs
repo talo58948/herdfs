@@ -2,21 +2,22 @@
 //! here, so all of them return the same bytes (C8).
 
 use std::sync::{Arc, Mutex};
-use std::{collections::HashMap, fs::File, io::Write, time::Instant, time::SystemTime};
+use std::time::{Duration, Instant};
+use std::{collections::HashMap, fs::File, io::Write};
 
 use futures::stream::{self, BoxStream, StreamExt};
+use herdfs_core::ChunkId;
 use herdfs_core::proto::{Version, VersionId};
-use herdfs_core::{ChunkId, SpacePath};
 use tokio::sync::{Mutex as FetchLock, OwnedMutexGuard};
 
 use crate::cache::{Cache, Lru};
 use crate::stats::{Stats, bump};
-use crate::{Average, chunk_map::ChunkMap, error::Error, lock, remote::Remote, unix_ms};
+use crate::{Average, chunk_map::ChunkMap, error::Error, lock, remote::Remote};
 
 /// Concurrent downloads per request, which is also the prefetch batch size.
 const DOWNLOADS: usize = 8;
 /// A cached grant this close to expiry is renewed rather than reused.
-const GRANT_MARGIN_MS: i64 = 10_000;
+const GRANT_MARGIN: Duration = Duration::from_secs(10);
 /// Verified chunks kept in memory, so the FUSE reads within one chunk do not each re-read
 /// and re-hash it from disk.
 const MEMORY_BYTES: u64 = 64 << 20;
@@ -49,7 +50,7 @@ pub struct Reader {
     stats: Arc<Stats>,
     memory: Mutex<Lru<Arc<Vec<u8>>>>,
     /// Presigned URLs by version and chunk index, with their expiry, reused until then.
-    grants: Mutex<HashMap<(VersionId, usize), (String, i64)>>,
+    grants: Mutex<HashMap<(VersionId, usize), (String, Instant)>>,
     /// A lock per chunk being fetched, so concurrent reads download it once.
     fetching: Mutex<HashMap<ChunkId, Arc<FetchLock<()>>>>,
     /// Download throughput in bytes per second, over recent chunk downloads.
@@ -71,21 +72,14 @@ impl Reader {
     }
 
     /// Bytes `[off, off + len)` of `file`, fetching only the chunks that overlap them (C9),
-    /// with grants asked under `path`.
-    pub async fn read(
-        &self,
-        file: &OpenVersion,
-        path: &SpacePath,
-        off: u64,
-        len: u64,
-    ) -> Result<Vec<u8>, Error> {
-        self.read_with(file, off, len, |missing| self.fetch(file, path, missing))
+    pub async fn read(&self, file: &OpenVersion, off: u64, len: u64) -> Result<Vec<u8>, Error> {
+        self.read_with(file, off, len, |missing| self.fetch(file, missing))
             .await
     }
 
     /// Downloads every chunk not yet cached, for the Fetch and Pin strategies.
-    pub async fn prefetch(&self, file: &OpenVersion, path: &SpacePath) -> Result<(), Error> {
-        let fetch = |missing| self.fetch(file, path, missing);
+    pub async fn prefetch(&self, file: &OpenVersion) -> Result<(), Error> {
+        let fetch = |missing| self.fetch(file, missing);
         let chunks = 0..file.version.chunks.len();
         let missing: Vec<usize> = chunks
             .filter(|&index| !self.cache.contains(&file.id(index)))
@@ -97,13 +91,8 @@ impl Reader {
     }
 
     /// Writes all of `file` to `out`, to start a journal copy from it.
-    pub async fn materialize(
-        &self,
-        file: &OpenVersion,
-        path: &SpacePath,
-        out: &mut File,
-    ) -> Result<(), Error> {
-        let fetch = |missing| self.fetch(file, path, missing);
+    pub async fn materialize(&self, file: &OpenVersion, out: &mut File) -> Result<(), Error> {
+        let fetch = |missing| self.fetch(file, missing);
         let indices: Vec<usize> = (0..file.version.chunks.len()).collect();
         for batch in indices.chunks(DOWNLOADS) {
             let chunks = self.load(file, batch, fetch).await?;
@@ -223,8 +212,8 @@ impl Reader {
     }
 
     /// Grants chunks of `file`, then downloads them, verifying each against its id.
-    async fn fetch<'a>(&'a self, file: &'a OpenVersion, path: &SpacePath, wanted: Vec<usize>) -> Fetched<'a> {
-        let urls = self.urls(file, path, &wanted).await?;
+    async fn fetch<'a>(&'a self, file: &'a OpenVersion, wanted: Vec<usize>) -> Fetched<'a> {
+        let urls = self.urls(file, &wanted).await?;
         let downloads = wanted.into_iter().zip(urls);
         let downloads = downloads.map(|(index, url)| self.download(file, index, url));
         Ok(stream::iter(downloads).buffered(DOWNLOADS).boxed())
@@ -245,17 +234,13 @@ impl Reader {
     }
 
     /// URLs for chunks `indices`, reusing unexpired grants and asking for the rest in one call.
-    async fn urls(
-        &self,
-        file: &OpenVersion,
-        path: &SpacePath,
-        indices: &[usize],
-    ) -> Result<Vec<String>, Error> {
-        let (version, usable_after) = (file.version.id, unix_ms(SystemTime::now()) + GRANT_MARGIN_MS);
+    /// Expiry is measured on this client's monotonic clock, so its wall clock may be off.
+    async fn urls(&self, file: &OpenVersion, indices: &[usize]) -> Result<Vec<String>, Error> {
+        let version = file.version.id;
         let usable = |index: &usize| {
             let grants = lock(&self.grants);
-            let (url, expires_ms) = grants.get(&(version, *index))?;
-            (*expires_ms > usable_after).then(|| url.clone())
+            let (url, expires) = grants.get(&(version, *index))?;
+            (*expires > Instant::now() + GRANT_MARGIN).then(|| url.clone())
         };
         let wanted: Vec<u32> = indices
             .iter()
@@ -263,12 +248,16 @@ impl Reader {
             .map(|&i| i as u32)
             .collect();
         if !wanted.is_empty() {
-            let (urls, expires_ms) = self.remote.grant(path.clone(), version, wanted.clone()).await?;
+            let asked = Instant::now();
+            let (urls, ttl) = self
+                .remote
+                .grant(file.version.entry, version, wanted.clone())
+                .await?;
             bump(&self.stats.grants, 1);
             let mut grants = lock(&self.grants);
-            grants.retain(|_, (_, expires)| *expires > usable_after);
+            grants.retain(|_, (_, expires)| *expires > Instant::now());
             let granted = wanted.into_iter().zip(urls);
-            grants.extend(granted.map(|(index, url)| ((version, index as usize), (url, expires_ms))));
+            grants.extend(granted.map(|(index, url)| ((version, index as usize), (url, asked + ttl))));
         }
         let missing = || Error::Protocol("grant lacks usable URLs".into());
         indices

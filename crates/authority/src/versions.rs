@@ -1,36 +1,56 @@
 //! File content requests: open, grant, commit, history, restore and uploads.
 
+use std::collections::HashSet;
+
 use herdfs_core::{
     ChunkId, ChunkRef, SpacePath,
     proto::{Entry, EntryId, ErrorCode, Kind, Perm, Response, Version, VersionId},
 };
 use rusqlite::{OptionalExtension, params};
 
-use crate::{Call, GRANT_TTL_MS, Outcome, Result, refuse};
+use crate::{Call, Outcome, Result, refuse};
+
+/// Chunks one grant may cover, so no request makes the server sign without bound.
+const MAX_GRANT: usize = 4096;
 
 impl Call<'_> {
     pub(crate) fn open(&self, space: &str, path: &SpacePath) -> Result<Response> {
         self.require(space, path, Perm::Read)?;
+        let writable = self.may(space, path, Perm::Write)?;
         let entry = self.entry(space, path)?;
         let version = match entry.head {
             Some(head) => self.version(head)?,
             None => None,
         };
-        Ok(Response::Opened { entry, version })
+        Ok(Response::Opened {
+            entry,
+            version,
+            writable,
+        })
     }
 
+    /// By entry id, so a file renamed while open stays readable.
     pub(crate) fn grant(
         &self,
         space: &str,
-        path: &SpacePath,
+        entry: EntryId,
         version: VersionId,
         indices: &[u32],
     ) -> Result<Outcome> {
-        self.require(space, path, Perm::Read)?;
-        let entry = self.entry(space, path)?;
-        let version = self
-            .version_of(&entry, version)?
-            .ok_or_else(|| refuse(ErrorCode::NotFound, format!("no version {} of {path}", version.0)))?;
+        if indices.len() > MAX_GRANT {
+            return Err(refuse(
+                ErrorCode::Invalid,
+                format!("at most {MAX_GRANT} chunks per grant"),
+            ));
+        }
+        let entry = self.entry_by_id(space, entry)?;
+        self.require(space, &entry.path, Perm::Read)?;
+        let version = self.version_of(&entry, version)?.ok_or_else(|| {
+            refuse(
+                ErrorCode::NotFound,
+                format!("no version {} of entry {}", version.0, entry.id.0),
+            )
+        })?;
         let chunks = indices
             .iter()
             .map(|&index| {
@@ -42,14 +62,12 @@ impl Call<'_> {
                     .ok_or_else(|| refuse(ErrorCode::Invalid, format!("no chunk {index}")))
             })
             .collect::<Result<_>>()?;
-        Ok(Outcome::Sign {
-            chunks,
-            expires_ms: self.now_ms + GRANT_TTL_MS,
-        })
+        Ok(Outcome::Sign { chunks })
     }
 
     /// Entry ids are not secret: an unknown id is `NotFound` before any permission
     /// check. Its path may be, so no refusal here names it.
+    #[expect(clippy::too_many_arguments, reason = "the fields of Request::Commit")]
     pub(crate) fn commit(
         &self,
         space: &str,
@@ -58,6 +76,7 @@ impl Call<'_> {
         base: Option<VersionId>,
         guarded: bool,
         chunks: &[ChunkRef],
+        mtime_ms: Option<i64>,
     ) -> Result<Response> {
         self.require_space(space)?;
         if let Some(version) = self.committed(request_id)? {
@@ -74,17 +93,18 @@ impl Call<'_> {
                 format!("entry {} is not a file", entry.id.0),
             ));
         }
-        let base_chunks = match base {
+        let base_chunks: HashSet<_> = match base {
             Some(base) => {
                 let version = self.version_of(&entry, base)?;
-                version
-                    .ok_or_else(|| refuse(ErrorCode::Invalid, "base is not a version of this entry"))?
-                    .chunks
+                let version = version
+                    .ok_or_else(|| refuse(ErrorCode::Invalid, "base is not a version of this entry"))?;
+                version.chunks.iter().map(|chunk| (chunk.id, chunk.len)).collect()
             }
-            None => Vec::new(),
+            None => HashSet::new(),
         };
         for chunk in chunks {
-            if !base_chunks.contains(chunk) && self.uploaded_len(chunk.id)? != Some(chunk.len) {
+            let in_base = base_chunks.contains(&(chunk.id, chunk.len));
+            if !in_base && self.uploaded_len(chunk.id)? != Some(chunk.len) {
                 let message = format!(
                     "chunk {} of {} bytes is neither in the base nor uploaded by you",
                     chunk.id, chunk.len
@@ -98,7 +118,7 @@ impl Call<'_> {
                 format!("entry {} has moved past its base", entry.id.0),
             ));
         }
-        let version = self.add_version(&entry, chunks)?;
+        let version = self.add_version(&entry, chunks, mtime_ms.unwrap_or(self.now_ms))?;
         self.db
             .prepare_cached("INSERT INTO commits (principal, request_id, version) VALUES (?1, ?2, ?3)")?
             .execute(params![self.who.user, request_id, version.id.0])?;
@@ -120,7 +140,7 @@ impl Call<'_> {
             .version_of(&entry, version)?
             .ok_or_else(|| refuse(ErrorCode::NotFound, format!("no version {} of {path}", version.0)))?;
         Ok(Response::Version {
-            version: self.add_version(&entry, &old.chunks)?,
+            version: self.add_version(&entry, &old.chunks, self.now_ms)?,
         })
     }
 

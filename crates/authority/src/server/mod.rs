@@ -26,9 +26,13 @@ use herdfs_core::{
 };
 use rusty_s3::{Bucket, Credentials, S3Action};
 
-use crate::{Authority, GRANT_TTL_MS, Outcome};
+use crate::{Authority, Outcome};
 
-const GRANT_TTL: Duration = Duration::from_millis(GRANT_TTL_MS.unsigned_abs());
+/// How long a presigned chunk URL stays valid.
+const GRANT_TTL_MS: u64 = 5 * 60 * 1000;
+const GRANT_TTL: Duration = Duration::from_millis(GRANT_TTL_MS);
+/// Commit bodies list every chunk: 32 MiB holds about 350,000, a 350 GiB file.
+const RPC_BODY_LIMIT: usize = 32 << 20;
 /// Uploads are written through at once, so the signed PUT and the request share this deadline.
 const PUT_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -64,7 +68,7 @@ impl Server {
 
     pub fn router(self) -> Router {
         Router::new()
-            .route("/v1/rpc", post(rpc))
+            .route("/v1/rpc", post(rpc).layer(DefaultBodyLimit::max(RPC_BODY_LIMIT)))
             .route(
                 "/v1/spaces/{space}/chunks/{id}",
                 put(upload).layer(DefaultBodyLimit::max(MAX_CHUNK)),
@@ -122,9 +126,9 @@ async fn rpc(
         .await?;
     let reply = match outcome {
         Outcome::Reply(reply) => reply,
-        Outcome::Sign { chunks, expires_ms } => Response::Grants {
+        Outcome::Sign { chunks } => Response::Grants {
             urls: server.sign(&chunks),
-            expires_ms,
+            ttl_ms: GRANT_TTL_MS,
         },
     };
     Ok(Json(reply))

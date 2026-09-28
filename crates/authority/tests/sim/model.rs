@@ -139,12 +139,14 @@ impl Model {
             }
             Request::Grant {
                 space,
-                path,
+                entry,
                 version,
                 chunks,
             } => {
+                ensure(chunks.len() <= 4096, Invalid)?;
+                let (path, node) = self.node_by_id(space, *entry).ok_or(NotFound)?;
                 self.require(who, space, path, Perm::Read)?;
-                ensure(self.node(space, path)?.history.contains(version), NotFound)?;
+                ensure(node.history.contains(version), NotFound)?;
                 let count = self.versions[version].chunks.len();
                 ensure(chunks.iter().all(|&index| (index as usize) < count), Invalid)
             }
@@ -176,6 +178,7 @@ impl Model {
                 base,
                 guarded,
                 chunks,
+                ..
             } => self.commit_outcome(who, space, *entry, request_id, *base, *guarded, chunks),
             Request::Restore { space, path, version } => {
                 self.require(who, space, path, Perm::Write)?;
@@ -236,6 +239,14 @@ impl Model {
             return Ok(());
         }
         ensure(!to.is_within(from), ErrorCode::Invalid)?;
+        let mut moved = self.spaces[space]
+            .nodes
+            .keys()
+            .filter(|path| path.is_within(from));
+        ensure(
+            moved.all(|path| path.rebase(from, to).is_some()),
+            ErrorCode::Invalid,
+        )?;
         let Ok(target) = self.node(space, to) else {
             return self.parent_dir(space, to);
         };

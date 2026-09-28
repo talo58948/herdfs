@@ -8,7 +8,7 @@
 mod http;
 
 use axum::http::StatusCode;
-use http::{Lab, PUBLIC_S3, now_ms};
+use http::{Lab, PUBLIC_S3};
 use herdfs_core::{ChunkId, chunk::MAX_CHUNK};
 use serde_json::{Value, json};
 
@@ -75,17 +75,15 @@ async fn an_uploaded_chunk_is_committable_and_granted_on_the_public_endpoint() {
     let (status, version) = lab.rpc(&alice, &commit).await;
     assert_eq!(status, StatusCode::OK, "{version}");
 
-    let grant = json!({"op": "grant", "space": "team", "path": "f", "version": version["version"]["id"], "chunks": [0]});
-    let before_ms = now_ms();
+    let grant = json!({"op": "grant", "space": "team", "entry": file["entry"]["id"],
+        "version": version["version"]["id"], "chunks": [0]});
     let (status, grants) = lab.rpc(&alice, &grant).await;
-    let after_ms = now_ms();
     assert_eq!(status, StatusCode::OK, "{grants}");
     let url = grants["urls"][0].as_str().unwrap();
     // contract: S2 — presigned for the public endpoint, valid five minutes.
     assert!(url.starts_with(&format!("{PUBLIC_S3}/{key}?")), "{url}");
     assert!(url.contains("X-Amz-Expires=300"), "{url}");
-    let expires_ms = grants["expires_ms"].as_i64().unwrap();
-    assert!((before_ms + 300_000..=after_ms + 300_000).contains(&expires_ms));
+    assert_eq!(grants["ttl_ms"], json!(300_000));
 }
 
 #[tokio::test]

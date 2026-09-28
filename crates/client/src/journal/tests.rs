@@ -1,6 +1,6 @@
 use std::os::unix::fs::FileExt;
 
-use herdfs_core::ChunkRef;
+use herdfs_core::{ChunkId, ChunkRef};
 
 use super::commit::Outcome;
 use super::*;
@@ -36,9 +36,9 @@ fn sealed(dir: &Path, bytes: &[u8]) -> (Arc<Journal>, mpsc::UnboundedReceiver<En
     (journal, woken)
 }
 
-/// What this client reads for `ENTRY`.
+/// What this client reads for `ENTRY` while its journal holds changes.
 fn read(journal: &Journal) -> Vec<u8> {
-    let copy = journal.copy(ENTRY).unwrap();
+    let copy = journal.changes(ENTRY).unwrap();
     let mut bytes = vec![0; copy.metadata().unwrap().len() as usize];
     copy.read_exact_at(&mut bytes, 0).unwrap();
     bytes
@@ -51,10 +51,7 @@ fn a_sealed_write_is_recovered_after_a_restart_and_an_unclosed_one_dropped() {
     let (journal, mut woken) = sealed(dir.path(), b"closed");
     assert_eq!(woken.try_recv().unwrap(), ENTRY);
     let before = journal.next(ENTRY).unwrap().record;
-    assert_eq!(
-        (before.base, before.base_chunks.clone()),
-        (Some(VersionId(3)), vec![ChunkId::of(b"old")])
-    );
+    assert_eq!(before.base, Some(base()));
     let _writer = journal.opened(ENTRY);
     journal.attach(ENTRY, true).unwrap();
     journal.write(ENTRY, 0, b"never closed").unwrap();
@@ -91,24 +88,30 @@ fn a_sealed_copy_never_changes_under_the_committer() {
     assert_eq!(read(&journal), b"second");
 }
 
-// contract: C1, C4a
+// contract: C1, C2, C4a
 #[test]
-fn the_copy_shadows_reads_until_its_commit_settles() {
+fn changes_shadow_reads_until_committed_then_the_commit_does() {
     let dir = tempfile::tempdir().unwrap();
     let (journal, _woken) = sealed(dir.path(), b"new");
-    assert!(journal.copy(ENTRY).is_some());
+    let reader = journal.opened(ENTRY);
     assert_eq!(journal.pending_count(), 1);
 
     let job = journal.next(ENTRY).unwrap();
     journal.finish(&job, Outcome::Retrying);
-    assert!(journal.copy(ENTRY).is_some());
+    assert_eq!(read(&journal), b"new");
     let version = Version {
         id: VersionId(4),
         ..base()
     };
-    journal.finish(&job, Outcome::Committed(version));
+    journal.finish(&job, Outcome::Committed(version.clone()));
+    assert!(
+        journal.changes(ENTRY).is_none(),
+        "nothing left to shadow the authority"
+    );
+    assert_eq!(journal.base_after(ENTRY, Some(VersionId(3))), Some(version));
+    assert_eq!(journal.base_after(ENTRY, Some(VersionId(4))), None);
     assert!(journal.next(ENTRY).is_none());
-    assert!(journal.copy(ENTRY).is_none());
+    drop(reader);
     assert_eq!(journal.pending_count(), 0);
     assert_eq!(
         fs::read_dir(dir.path()).unwrap().count(),
@@ -136,16 +139,32 @@ fn a_rejected_write_is_set_aside_with_its_bytes() {
     assert!(!dir.path().join("7.json").exists());
 }
 
-// contract: C1
+// contract: none (docs/architecture.md: mtime is stored and reported)
 #[test]
-fn an_open_handle_keeps_a_committed_copy() {
+fn a_set_mtime_rides_the_next_commit_unless_one_is_under_way() {
     let dir = tempfile::tempdir().unwrap();
-    let (journal, _woken) = sealed(dir.path(), b"x");
-    let reader = journal.opened(ENTRY);
+    let (journal, _woken) = Journal::open(dir.path().into()).unwrap();
+    let journal = Arc::new(journal);
+    assert!(
+        !journal.set_mtime(ENTRY, 1).unwrap(),
+        "no copy: set at the authority"
+    );
+    let writer = journal.opened(ENTRY);
+    journal
+        .install(ENTRY, journal.scratch(ENTRY).unwrap(), None)
+        .unwrap();
+    journal.write(ENTRY, 0, b"copied").unwrap();
+    assert!(journal.set_mtime(ENTRY, 2).unwrap());
+    journal.seal(ENTRY).unwrap();
+    drop(writer);
+    assert!(
+        journal.set_mtime(ENTRY, 3).unwrap(),
+        "pending: the record takes it"
+    );
     let job = journal.next(ENTRY).unwrap();
-    journal.finish(&job, Outcome::Committed(base()));
-    assert!(journal.next(ENTRY).is_none());
-    assert_eq!(read(&journal), b"x");
-    drop(reader);
-    assert!(journal.copy(ENTRY).is_none());
+    assert_eq!(job.record.mtime_ms, Some(3));
+    assert!(
+        !journal.set_mtime(ENTRY, 4).unwrap(),
+        "under way: set after it lands"
+    );
 }
