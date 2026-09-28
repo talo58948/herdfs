@@ -75,9 +75,10 @@ impl Call<'_> {
         if path.is_root() {
             return Err(refuse(ErrorCode::Invalid, "the root cannot be removed"));
         }
-        self.delete(space, &self.entry(space, path)?)?;
+        let entry = self.entry(space, path)?;
+        self.delete(space, &entry)?;
         self.touch_parent(space, path)?;
-        Ok(Response::Done)
+        Ok(Response::Entry { entry })
     }
 
     pub(crate) fn rename(&self, space: &str, from: &SpacePath, to: &SpacePath) -> Result<Response> {
