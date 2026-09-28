@@ -19,7 +19,6 @@ const BEFORE_EPOCH: Duration = Duration::from_secs(14_182_980);
 /// milliseconds. A local directory keeps the time; make takes any two such files as equally old.
 // contract: none (docs/architecture.md: mtime is stored and reported; only atime and ctime are out of v0)
 #[test]
-#[ignore = "REDTEAM7: a modification time before 1970 reads back as 1970-01-01"]
 fn an_mtime_before_1970_is_kept() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());

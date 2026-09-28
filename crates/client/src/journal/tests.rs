@@ -220,3 +220,21 @@ fn a_commit_keeps_the_time_of_the_last_write() {
     let written = fs::metadata(&job.sealed).unwrap().modified().unwrap();
     assert_eq!(job.record.mtime_ms, Some(crate::unix_ms(written)));
 }
+
+// contract: C1
+#[test]
+fn remote_state_from_before_a_settled_commit_is_never_paired_with_the_journal_after_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (journal, _woken) = sealed(dir.path(), b"appended");
+    let before = journal.settled();
+    let job = journal.next(ENTRY).unwrap();
+    let local = journal.changes_as_of(ENTRY, before).unwrap();
+    assert!(local.is_some(), "while the commit runs, its copy shows");
+    journal.finish(&job, Outcome::Committed(base()));
+    assert!(
+        journal.changes_as_of(ENTRY, before).is_none(),
+        "state asked for before the settle is stale once its copy is gone"
+    );
+    let after = journal.changes_as_of(ENTRY, journal.settled());
+    assert!(after.is_some_and(|local| local.is_none()));
+}

@@ -21,23 +21,28 @@ pub struct AttrChange {
 
 impl Space {
     pub async fn lookup(self: Arc<Self>, parent: INodeNo, name: OsString) -> Result<(FileAttr, Duration)> {
-        let (entry, fetched) = self.entry(&self.located_child(parent, &name).await?).await?;
-        Ok((
-            self.looked_up(&entry, fetched),
-            TTL.saturating_sub(fetched.elapsed()),
-        ))
+        let (entry, fetched, local) = self.entry(&self.located_child(parent, &name).await?).await?;
+        let attr = self.looked_up(&entry, fetched, local.as_deref());
+        Ok((attr, TTL.saturating_sub(fetched.elapsed())))
     }
 
     /// The inode's attributes. If its path names another entry or none, the entry has moved,
     /// or is gone and its name may now be another's, which ESTALE sends the kernel to look up
     /// (C7).
     pub async fn getattr(self: Arc<Self>, ino: INodeNo) -> Result<(FileAttr, Duration)> {
-        let (entry, fetched) = match self.entry(&self.path(ino)?).await {
-            Ok((entry, fetched)) if self.ino(entry.id) == ino => (entry, fetched),
+        let (entry, fetched, local) = match self.entry(&self.path(ino)?).await {
+            Ok(found) if self.ino(found.0.id) == ino => found,
             Err(err) if !err.is_not_found() => return Err(err),
-            _ => (self.relocate(ino).await?, Instant::now()),
+            _ => {
+                let entry = self.relocate(ino).await?;
+                let local = self.journal.changes(entry.id);
+                (entry, Instant::now(), local)
+            }
         };
-        Ok((self.attr(&entry), TTL.saturating_sub(fetched.elapsed())))
+        Ok((
+            self.attr(&entry, local.as_deref()),
+            TTL.saturating_sub(fetched.elapsed()),
+        ))
     }
 
     pub async fn setattr(self: Arc<Self>, ino: INodeNo, change: AttrChange) -> Result<FileAttr> {
@@ -48,7 +53,7 @@ impl Space {
         let path = self.located(ino).await?;
         // Answered from the entry held, which offline lets a truncation go on (C12), and found
         // before anything is journaled, so a failure changes nothing.
-        let (entry, _) = self.entry(&path).await?;
+        let (entry, _, local) = self.entry(&path).await?;
         if let Some(size) = change.size {
             self.truncate(ino, size, change.fh).await?;
         }
@@ -65,15 +70,18 @@ impl Space {
             self.committed(entry_id).await?;
         }
         if mode.is_none() && mtime_ms.is_none() {
-            return Ok(self.attr(&entry));
+            // A truncation has made the journal copy to show since.
+            let local = change.size.map_or(local, |_| self.journal.changes(entry.id));
+            return Ok(self.attr(&entry, local.as_deref()));
         }
+        let asked = self.asked();
         let entry = self.remote.set_attr(path, mode, mtime_ms).await?;
-        self.remember(&entry);
-        Ok(self.attr(&entry))
+        self.remember(&entry, asked);
+        Ok(self.attr(&entry, self.journal.changes(entry.id).as_deref()))
     }
 
     pub async fn readlink(self: Arc<Self>, ino: INodeNo) -> Result<Vec<u8>> {
-        let (entry, _) = self.entry(&self.located(ino).await?).await?;
+        let (entry, ..) = self.entry(&self.located(ino).await?).await?;
         Ok(entry.target.ok_or(Errno::EINVAL)?.into_bytes())
     }
 
@@ -98,7 +106,7 @@ impl Space {
     /// Unlinks a file or symlink, or removes an empty directory.
     pub async fn remove(self: Arc<Self>, parent: INodeNo, name: OsString) -> Result<()> {
         let path = self.located_child(parent, &name).await?;
-        let (removed, _) = self.entry(&path).await?;
+        let (removed, ..) = self.entry(&path).await?;
         self.remote.remove(path.clone()).await?;
         // Its changes are moot: deletion wins (C10).
         self.journal.discard(removed.id);
@@ -146,11 +154,11 @@ impl Space {
     /// Lists the directory once, for the readdir calls on this handle to page through.
     pub async fn opendir(self: Arc<Self>, ino: INodeNo) -> Result<u64> {
         let path = self.located(ino).await?;
-        let asked = Instant::now();
+        let asked = self.asked();
         let entries = self.remote.list(path).await?;
         let listed = |entry| {
             self.listed(entry, asked);
-            let attr = self.attr(entry);
+            let attr = self.attr(entry, None);
             (attr.ino, attr.kind, entry.path.name().to_owned())
         };
         let listing = entries.iter().map(listed).collect();

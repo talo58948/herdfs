@@ -13,7 +13,7 @@ mod strategy;
 mod version;
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use error::{Error, Result};
 pub use mount::{MountArgs, mount};
@@ -41,7 +41,35 @@ impl Average {
     }
 }
 
+/// `time` in milliseconds from the epoch, negative before it, as the protocol carries it.
 fn unix_ms(time: SystemTime) -> i64 {
-    time.duration_since(UNIX_EPOCH)
-        .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
+    let ms = |span: Duration| i64::try_from(span.as_millis()).unwrap_or(i64::MAX);
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(since) => ms(since),
+        Err(before) => -ms(before.duration()),
+    }
+}
+
+/// The time `ms` milliseconds from the epoch, the inverse of [`unix_ms`].
+fn from_unix_ms(ms: i64) -> SystemTime {
+    let span = Duration::from_millis(ms.unsigned_abs());
+    let time = if ms < 0 {
+        UNIX_EPOCH.checked_sub(span)
+    } else {
+        UNIX_EPOCH.checked_add(span)
+    };
+    time.unwrap_or(UNIX_EPOCH)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // contract: none (docs/architecture.md: mtime is stored and reported)
+    #[test]
+    fn a_time_before_the_epoch_keeps_its_milliseconds() {
+        let landing = UNIX_EPOCH - Duration::from_secs(14_182_980);
+        assert_eq!(unix_ms(landing), -14_182_980_000);
+        assert_eq!(from_unix_ms(unix_ms(landing)), landing);
+    }
 }

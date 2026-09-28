@@ -4,7 +4,6 @@ use std::fs::{File, Permissions};
 use std::io;
 use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
 
 use herdfs_core::proto::{EntryId, Version};
 use tempfile::{Builder, NamedTempFile};
@@ -82,7 +81,7 @@ impl Journal {
         let Some(tracked) = entries.get_mut(&entry) else {
             return Ok(false);
         };
-        let time = UNIX_EPOCH + Duration::from_millis(mtime_ms.try_into().unwrap_or(0));
+        let time = crate::from_unix_ms(mtime_ms);
         // The next seal takes the working copy's modification time.
         if let Some(working) = &tracked.working {
             working.set_modified(time)?;

@@ -9,7 +9,7 @@ use fuser::{Errno, FileAttr, INodeNo, OpenAccMode, OpenFlags};
 use herdfs_core::proto::{Entry, EntryId, ErrorCode};
 use herdfs_core::{ChunkId, SpacePath};
 
-use super::{PERMISSIONS, Space};
+use super::{Asked, PERMISSIONS, Space};
 use crate::{Error, Result, journal::Registration, lock, reader::Head};
 
 pub struct Handle {
@@ -76,9 +76,9 @@ impl Space {
         let entry = match self.remote.create(path.clone(), mode & PERMISSIONS).await {
             Err(Error::Api(error)) if error.code == ErrorCode::Exists && flags & libc::O_EXCL == 0 => {
                 let entry = self.remote.stat(path).await?;
-                self.added(&entry);
+                let attr = self.added(&entry);
                 let open = self.clone().open(self.ino(entry.id), OpenFlags(flags), pid);
-                return Ok((self.attr(&entry), open.await?));
+                return Ok((attr, open.await?));
             }
             created => created?,
         };
@@ -198,8 +198,8 @@ impl Space {
 
     /// Remembers an entry the authority returned, and switches an inode that open files read to
     /// a newer head it names, so every handle reads it from its next read (C3).
-    pub(super) async fn follow(&self, entry: &Entry) {
-        self.remember(entry);
+    pub(super) async fn follow(&self, entry: &Entry, asked: Asked) {
+        self.remember(entry, asked);
         let current = self.reader.current(entry.id);
         let current = current.map(|file| file.map(|file| file.version.id));
         let (open, changed) = (self.journal.is_open(&entry.id), current != Some(entry.head));
@@ -214,6 +214,7 @@ impl Space {
     /// truncating write needs none, since its unguarded commit is right on an unknown base too
     /// (C5, C12).
     async fn head(&self, entry: EntryId, path: &SpacePath, write: bool, truncate: bool) -> Result<Head> {
+        let asked = self.asked();
         let (found, head, writable) = match self.remote.open(path.clone()).await {
             Err(err) if err.is_offline() => {
                 return match self.reader.known(entry) {
@@ -225,7 +226,7 @@ impl Space {
             }
             opened => opened.map_err(|err| self.gone(path, err))?,
         };
-        self.remember(&found);
+        self.remember(&found, asked);
         // The name now holds another entry, which the kernel looks up again (C7).
         if found.id != entry {
             return Err(Errno::ESTALE.into());

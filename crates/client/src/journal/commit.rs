@@ -163,6 +163,10 @@ impl Journal {
             Outcome::Dropped | Outcome::Retrying => {}
         }
         let latest = tracked.pending.as_ref().map(|(record, _)| record.seal) == Some(seal);
+        // Counted before the copy goes, so remote state asked for before is known stale (C1).
+        if settled {
+            self.settled.fetch_add(1, Relaxed);
+        }
         if settled && latest {
             tracked.pending = None;
             let _ = fs::remove_file(self.record_path(entry));
@@ -171,9 +175,6 @@ impl Journal {
         // after the record, which recovery would otherwise find naming no copy (C4a).
         if settled || !latest {
             let _ = fs::remove_file(&job.sealed);
-        }
-        if settled {
-            self.settled.fetch_add(1, Relaxed);
         }
     }
 

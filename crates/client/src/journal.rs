@@ -163,6 +163,14 @@ impl Journal {
         self.settled.load(Relaxed)
     }
 
+    /// The entry's journal copy as `changes` gives it, unless a commit has settled since the
+    /// count `settled` without leaving one: remote state from then may predate that commit (C1).
+    pub fn changes_as_of(&self, entry: EntryId, settled: u64) -> Option<Option<Arc<File>>> {
+        let local = self.changes(entry);
+        // A settle drops the copy and counts itself in one critical section.
+        (local.is_some() || self.settled() == settled).then_some(local)
+    }
+
     /// Makes the working copy durable, renames it to the next sealed file, and records that
     /// for the committer (C3, C4a).
     pub fn seal(&self, entry: EntryId) -> io::Result<()> {
