@@ -22,7 +22,6 @@ const LEN: usize = 8 << 20;
 /// than expected". If b fsyncs the temporary file before its rename, a reads the new bytes.
 // contract: C7, C3 (a rename replaces a file whole; a read never returns a version not committed)
 #[test]
-#[ignore = "REDTEAM5: a file replaced by rename reads empty on other clients until its commit lands"]
 fn a_file_replaced_by_rename_reads_whole_on_another_client() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());

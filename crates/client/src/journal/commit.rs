@@ -4,7 +4,7 @@
 
 use std::fs::{self, File};
 use std::sync::{Arc, atomic::Ordering::Relaxed};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use std::{collections::HashSet, io, path::PathBuf};
 
 use bytes::Bytes;
@@ -18,6 +18,8 @@ use crate::{Result, cache::Cache, lock, reader::Reader, remote::Remote};
 
 const FIRST_RETRY: Duration = Duration::from_secs(1);
 const LAST_RETRY: Duration = Duration::from_secs(30);
+/// How much the writes set aside in `rejected/` may hold.
+const REJECTED_BYTES: u64 = 1 << 30;
 
 /// The latest sealed write of an entry, to be committed from its sealed file.
 pub struct Job {
@@ -28,6 +30,8 @@ pub struct Job {
 pub enum Outcome {
     Committed(Version),
     Rejected,
+    /// The entry is gone, and its write with it: deletion wins, as on a local disk (C10).
+    Dropped,
     Retrying,
 }
 
@@ -64,6 +68,7 @@ impl Committer {
                     delay = FIRST_RETRY;
                     Outcome::Committed(version)
                 }
+                Err(err) if err.is_not_found() => Outcome::Dropped,
                 Err(err) if err.is_final() => {
                     tracing::warn!(%err, entry = entry.0, "commit rejected; write set aside");
                     Outcome::Rejected
@@ -155,7 +160,7 @@ impl Journal {
         match outcome {
             Outcome::Committed(version) => tracked.base = Some(version),
             Outcome::Rejected => self.reject(job),
-            Outcome::Retrying => {}
+            Outcome::Dropped | Outcome::Retrying => {}
         }
         let latest = tracked.pending.as_ref().map(|(record, _)| record.seal) == Some(seal);
         if settled && latest {
@@ -178,10 +183,33 @@ impl Journal {
         let name = format!("{}-{}", record.entry.0, record.request_id);
         let kept = self.dir.join(REJECTED).join(name);
         let result = write_record(&kept.with_extension("json"), record)
-            .and_then(|()| fs::hard_link(&job.sealed, kept.with_extension("copy")));
+            .and_then(|()| fs::hard_link(&job.sealed, kept.with_extension("copy")))
+            .and_then(|()| self.bound_rejected());
         if let Err(err) = result {
             tracing::warn!(%err, "could not keep a rejected write");
         }
+    }
+
+    /// Drops the oldest writes set aside once they hold more than `REJECTED_BYTES` (C10).
+    fn bound_rejected(&self) -> io::Result<()> {
+        let kept = fs::read_dir(self.dir.join(REJECTED))?.map(|item| {
+            let path = item?.path();
+            let meta = fs::metadata(&path)?;
+            Ok((meta.modified()?, meta.len(), path))
+        });
+        let mut kept: Vec<(SystemTime, u64, PathBuf)> = kept.collect::<io::Result<_>>()?;
+        kept.sort();
+        let mut total: u64 = kept.iter().map(|(_, len, _)| len).sum();
+        for (_, len, path) in kept {
+            if total <= REJECTED_BYTES {
+                break;
+            }
+            tracing::warn!(write = %path.display(), "dropping an old rejected write");
+            let _ = fs::remove_file(path.with_extension("json"));
+            let _ = fs::remove_file(path.with_extension("copy"));
+            total = total.saturating_sub(len);
+        }
+        Ok(())
     }
 
     /// How much longer the committer waits for a newer seal of the entry, if at all.

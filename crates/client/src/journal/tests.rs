@@ -196,3 +196,27 @@ fn a_file_closed_again_and_again_commits_within_a_second_of_its_first_close() {
             .is_none_or(|left| left <= Duration::from_millis(100))
     );
 }
+
+// contract: C10
+#[test]
+fn a_removed_entrys_changes_are_dropped_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (journal, _woken) = sealed(dir.path(), b"scratch");
+    journal.discard(ENTRY);
+    assert!(journal.changes(ENTRY).is_none() && journal.next(ENTRY).is_none());
+    assert_eq!(
+        fs::read_dir(dir.path()).unwrap().count(),
+        1,
+        "only rejected/ is left"
+    );
+}
+
+// contract: none (docs/architecture.md: mtime is stored and reported)
+#[test]
+fn a_commit_keeps_the_time_of_the_last_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let (journal, _woken) = sealed(dir.path(), b"written");
+    let job = journal.next(ENTRY).unwrap();
+    let written = fs::metadata(&job.sealed).unwrap().modified().unwrap();
+    assert_eq!(job.record.mtime_ms, Some(crate::unix_ms(written)));
+}

@@ -71,8 +71,6 @@ impl Journal {
                 self.restart(entry, seal, sealed.transpose()?)?;
                 continue;
             };
-            // A change after a set modification time makes it the time of the change.
-            tracked.mtime = None;
             return change(working);
         }
     }
@@ -85,9 +83,9 @@ impl Journal {
             return Ok(false);
         };
         let time = UNIX_EPOCH + Duration::from_millis(mtime_ms.try_into().unwrap_or(0));
+        // The next seal takes the working copy's modification time.
         if let Some(working) = &tracked.working {
             working.set_modified(time)?;
-            tracked.mtime = Some(mtime_ms);
             return Ok(true);
         }
         let Some((record, sealed)) = tracked

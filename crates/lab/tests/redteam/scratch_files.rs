@@ -26,7 +26,6 @@ const SLACK: u64 = 1 << 20;
 /// committed leaves nothing behind.
 // contract: C10
 #[test]
-#[ignore = "REDTEAM5: files removed before they commit keep their bytes on the client's disk for good"]
 fn files_removed_before_they_commit_leave_no_disk_behind() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");
