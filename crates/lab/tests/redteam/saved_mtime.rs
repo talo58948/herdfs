@@ -17,7 +17,6 @@ use crate::{VISIBLE_AFTER, two_clients};
 /// it!!! Do you really want to write to it (y/n)?"; on a local directory it writes.
 // contract: none (docs/architecture.md: mtime is stored and reported; only atime and ctime are out of v0)
 #[test]
-#[ignore = "REDTEAM6: a saved file's mtime changes when its write commits, so editors warn it changed on disk"]
 fn a_saved_files_mtime_stays_put_when_it_commits() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
