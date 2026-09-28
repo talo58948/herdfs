@@ -1,9 +1,10 @@
 //! The sweep: after each collection, deletes the chunk objects that nothing
-//! live references and that are older than the grace.
+//! live has referenced for the grace.
 
-use std::{sync::Arc, time::Duration};
+use std::collections::BTreeSet;
+use std::sync::{Arc, atomic::Ordering};
+use std::time::Duration;
 
-use anyhow::Context;
 use herdfs_core::{ChunkId, proto};
 use rusty_s3::{
     S3Action,
@@ -34,7 +35,7 @@ impl Server {
         ticks.tick().await;
         loop {
             ticks.tick().await;
-            match self.sweep(&policy).await {
+            match self.sweep(now_ms(), &policy).await {
                 Ok(Swept {
                     pruned,
                     dropped,
@@ -48,15 +49,18 @@ impl Server {
         }
     }
 
-    /// Collects, then deletes every chunk object outside the live set whose
-    /// last write is older than the grace.
-    pub async fn sweep(self: &Arc<Self>, policy: &Policy) -> anyhow::Result<Swept> {
-        let started = now_ms();
+    /// Collects, then deletes every chunk object that has been outside the live
+    /// set for the grace. A chunk that leaves it did so after the previous
+    /// collection found it live, so its grace counts from then (S7), but never
+    /// from so early that a URL granted before this collection could outlive
+    /// the chunk (S4).
+    pub async fn sweep(self: &Arc<Self>, started: i64, policy: &Policy) -> anyhow::Result<Swept> {
+        let previous = self.collected_at.swap(started, Ordering::Relaxed);
         let run_policy = policy.clone();
         let collected = self
             .run(move |authority, _| authority.collect(started, &run_policy).map_err(unavailable))
             .await?;
-        let mut doomed = Vec::new();
+        let mut stored = Vec::new();
         let mut token = None;
         loop {
             let page = self.list(token.as_deref()).await?;
@@ -65,17 +69,32 @@ impl Server {
                     .key
                     .strip_prefix("chunks/")
                     .and_then(|hex| hex.parse::<ChunkId>().ok());
-                let old = older_than_grace(&object.last_modified, started, policy.grace_ms)?;
-                doomed.extend(
-                    id.filter(|id| old && !collected.live.contains(id))
-                        .map(|id| (id, object.size)),
-                );
+                stored.extend(id.map(|id| (id, object.size)));
             }
             token = page.next_continuation_token;
             if token.is_none() {
                 break;
             }
         }
+        let unreferenced: BTreeSet<_> = stored
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| !collected.retained.contains(id))
+            .collect();
+        let ttl_ms = i64::try_from(self.grant_ttl.as_millis()).unwrap_or(i64::MAX);
+        let since_ms = previous.max(started - policy.grace_ms + ttl_ms);
+        let since = self
+            .run(move |authority, _| {
+                authority
+                    .unreferenced(&unreferenced, since_ms)
+                    .map_err(unavailable)
+            })
+            .await?;
+        let expired = |id: &ChunkId| since.get(id).is_some_and(|at| *at < started - policy.grace_ms);
+        let mut doomed: Vec<_> = stored
+            .into_iter()
+            .filter(|(id, _)| !collected.live.contains(id) && expired(id))
+            .collect();
         // Chunks uploaded since the collection began are live again; no upload runs meanwhile.
         let _deleting = self.uploading.write().await;
         let fresh = self
@@ -119,30 +138,5 @@ impl Server {
             .and_then(reqwest::Response::error_for_status)
             .map_err(unavailable)?;
         Ok(())
-    }
-}
-
-/// Milliseconds since the epoch of an S3 `LastModified` time.
-fn modified_ms(time: &str) -> anyhow::Result<i64> {
-    let at: jiff::Timestamp = time
-        .parse()
-        .with_context(|| format!("bad LastModified {time:?}"))?;
-    Ok(at.as_millisecond())
-}
-
-fn older_than_grace(time: &str, now_ms: i64, grace_ms: i64) -> anyhow::Result<bool> {
-    Ok(modified_ms(time)? < now_ms - grace_ms)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn grace_boundary_is_kept() {
-        // contract: C15, S7
-        let at = "1970-01-01T00:00:01Z";
-        assert!(!older_than_grace(at, 2_000, 1_000).unwrap());
-        assert!(older_than_grace(at, 2_001, 1_000).unwrap());
     }
 }

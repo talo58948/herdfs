@@ -11,7 +11,6 @@ anyhow.workspace = true
 axum.workspace = true
 blake3.workspace = true
 clap.workspace = true
-jiff.workspace = true
 jsonwebtoken.workspace = true
 reqwest.workspace = true
 rusqlite = { workspace = true, features = ["fallible_uint"] }

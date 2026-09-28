@@ -19,7 +19,6 @@ fastcdc = "5"
 fuser = { version = "0.18", default-features = false }
 futures = "0.3"
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }
-jiff = { version = "0.2", default-features = false, features = ["std"] }
 libc = "0.2"
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }

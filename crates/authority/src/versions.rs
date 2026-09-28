@@ -167,18 +167,17 @@ impl Call<'_> {
     /// Uploads need write somewhere in the space: they are only useful to commit.
     pub(crate) fn record_upload(&self, space: &str, request_id: &str, chunk: ChunkRef) -> Result<()> {
         self.require_somewhere(space, Perm::Write)?;
+        let id = chunk.id.to_string();
+        // Re-uploading garbage can make it grantable before another collection sees it live.
+        self.db
+            .prepare_cached("DELETE FROM unreferenced WHERE chunk = ?1")?
+            .execute([&id])?;
         self.db
             .prepare_cached(
                 "INSERT OR REPLACE INTO uploads (principal, chunk, len, request_id, at_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
             )?
-            .execute(params![
-                self.who.user,
-                chunk.id.to_string(),
-                chunk.len,
-                request_id,
-                self.now_ms
-            ])?;
+            .execute(params![self.who.user, id, chunk.len, request_id, self.now_ms])?;
         Ok(())
     }
 

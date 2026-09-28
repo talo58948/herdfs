@@ -55,29 +55,35 @@ async fn the_binary_serves_health_with_the_documented_flags() {
 }
 
 #[test]
-fn the_binary_refuses_a_grace_shorter_than_twice_the_grant_ttl() {
+fn the_binary_refuses_a_grace_shorter_than_the_url_safety_bounds() {
     // contract: S4, S7
     let dir = tempfile::tempdir().unwrap();
-    let status = Command::new(env!("CARGO_BIN_EXE_herdfs-authority"))
-        .args(["--listen", "127.0.0.1:0", "--db"])
-        .arg(dir.path().join("authority.db"))
-        .args([
-            "--s3-endpoint",
-            "http://127.0.0.1:9",
-            "--s3-public-endpoint",
-            "http://s3.lab:9",
-        ])
-        .args(["--s3-bucket", "herdfs", "--s3-region", "us-east-1"])
-        .args([
-            "--oidc-issuer",
-            "http://127.0.0.1:9",
-            "--oidc-audience",
-            "herdfs",
-        ])
-        .args(["--grant-ttl", "60", "--gc-grace", "119"])
-        .envs([("AWS_ACCESS_KEY_ID", "key"), ("AWS_SECRET_ACCESS_KEY", "secret")])
-        .stderr(Stdio::null())
-        .status()
-        .unwrap();
-    assert!(!status.success());
+    let cases = [
+        ["--grant-ttl", "60", "--gc-every", "1", "--gc-grace", "119"],
+        ["--grant-ttl", "60", "--gc-every", "61", "--gc-grace", "120"],
+    ];
+    for flags in cases {
+        let status = Command::new(env!("CARGO_BIN_EXE_herdfs-authority"))
+            .args(["--listen", "127.0.0.1:0", "--db"])
+            .arg(dir.path().join("authority.db"))
+            .args([
+                "--s3-endpoint",
+                "http://127.0.0.1:9",
+                "--s3-public-endpoint",
+                "http://s3.lab:9",
+            ])
+            .args(["--s3-bucket", "herdfs", "--s3-region", "us-east-1"])
+            .args([
+                "--oidc-issuer",
+                "http://127.0.0.1:9",
+                "--oidc-audience",
+                "herdfs",
+            ])
+            .args(flags)
+            .envs([("AWS_ACCESS_KEY_ID", "key"), ("AWS_SECRET_ACCESS_KEY", "secret")])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(!status.success(), "accepted {flags:?}");
+    }
 }
