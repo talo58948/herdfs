@@ -68,7 +68,6 @@ fn committed_within(lab: &Lab, name: &str, deadline: Duration) -> Result<bool> {
 /// commits. Round 3 moved the reply's body out of that deadline, but not the request's.
 // contract: C4a (docs/architecture.md Write: a background committer commits the copy; Limits: largest file about 350 GiB)
 #[test]
-#[ignore = "REDTEAM4: a commit whose chunk-list body outlasts the 3 s RPC deadline never lands on a slow link"]
 fn a_commit_with_a_large_chunk_list_lands_on_a_slow_link() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");
