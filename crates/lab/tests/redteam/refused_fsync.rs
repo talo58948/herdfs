@@ -58,7 +58,6 @@ fn fsync_after_another_close(revoke: bool) -> Result<Option<(io::Result<()>, Vec
 /// [`fsync_after_another_close_that_commits`], where the commit succeeds and fsync returns 0.
 // contract: C2 (docs/architecture.md: fsync waits for that commit and returns EIO if it fails)
 #[test]
-#[ignore = "ROUND11: fsync returns 0 for a write another close sealed and the authority refused"]
 fn fsync_reports_a_refused_commit_that_another_close_started() -> Result<()> {
     let Some((synced, head)) = fsync_after_another_close(true)? else {
         return Ok(());

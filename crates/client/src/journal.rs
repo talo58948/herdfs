@@ -75,6 +75,8 @@ struct Tracked {
     reading: Option<u64>,
     /// The seal the last commit attempt covered, and whether it committed.
     attempts: watch::Sender<(u64, bool)>,
+    /// The latest seal whose commit the authority refused, or 0.
+    refused: u64,
 }
 
 /// Keeps an entry's journal copies alive while one of its handles is open.
@@ -128,6 +130,14 @@ impl Journal {
         (tracked.base, tracked.seals) = (record.base.clone(), record.seal);
         self.queue(tracked, record, file);
         Ok(vec![path.to_owned(), sealed])
+    }
+
+    /// The entry's latest seal, and the latest one whose commit the authority refused, or 0.
+    pub fn seals(&self, entry: EntryId) -> (u64, u64) {
+        let entries = lock(&self.entries);
+        entries
+            .get(&entry)
+            .map_or((0, 0), |tracked| (tracked.seals, tracked.refused))
     }
 
     /// Whether a handle has the entry open.

@@ -198,7 +198,10 @@ impl Journal {
         tracked.attempts.send_replace((seal, committed));
         match outcome {
             Outcome::Committed(version) => tracked.base = Some(version),
-            Outcome::Rejected => self.reject(job),
+            Outcome::Rejected => {
+                self.reject(job);
+                tracked.refused = seal;
+            }
             Outcome::Dropped | Outcome::Retrying => {}
         }
         let latest = tracked.pending.as_ref().map(|(record, _)| record.seal) == Some(seal);

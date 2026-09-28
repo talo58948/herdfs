@@ -106,12 +106,15 @@ impl Space {
     /// Unlinks a file or symlink, or removes an empty directory.
     pub async fn remove(self: Arc<Self>, parent: INodeNo, name: OsString) -> Result<()> {
         let path = self.located_child(parent, &name).await?;
-        let (removed, ..) = self.entry(&path).await?;
-        self.remote.remove(path.clone()).await?;
-        // Its changes are moot: deletion wins (C10).
+        let removed = self.remote.remove(path.clone()).await?;
+        // The removed entry's changes are moot: deletion wins (C10), for it alone (C4a).
         self.journal.discard(removed.id);
         self.stale(&path);
-        lock(&self.paths).retain(|_, (known, ..)| *known != path);
+        let mut paths = lock(&self.paths);
+        paths.remove(&self.ino(removed.id));
+        // Any other inode held at that path had moved away: `Locate` tells where (C7).
+        let moved = paths.values_mut().filter(|(known, ..)| *known == path);
+        moved.for_each(|(.., confirmed)| *confirmed = None);
         Ok(())
     }
 

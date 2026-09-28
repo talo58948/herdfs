@@ -57,7 +57,6 @@ fn moved_entry_after_a_remove(remove: bool) -> Result<Option<Vec<u8>>> {
 /// [`a_closed_write_reaches_its_moved_entry`], without the remove, where `q` holds the rewrite.
 // contract: C4a, C7
 #[test]
-#[ignore = "ROUND11: removing a name another client reused discards the moved entry's write"]
 fn a_remove_of_a_reused_name_keeps_the_moved_entrys_write() -> Result<()> {
     let Some(read) = moved_entry_after_a_remove(true)? else {
         return Ok(());

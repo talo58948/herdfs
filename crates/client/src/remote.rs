@@ -139,8 +139,9 @@ impl Remote {
         .await
     }
 
-    pub async fn remove(&self, path: SpacePath) -> Result<()> {
-        self.call(|space| Request::Remove { space, path }).await.map(drop)
+    /// Removes the entry at `path`, and answers with it.
+    pub async fn remove(&self, path: SpacePath) -> Result<Entry> {
+        self.entry(|space| Request::Remove { space, path }).await
     }
 
     pub async fn rename(&self, from: SpacePath, to: SpacePath) -> Result<()> {

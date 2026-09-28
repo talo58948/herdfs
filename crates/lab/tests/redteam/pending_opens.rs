@@ -76,7 +76,6 @@ fn change_after_revocation(
 /// [`a_truncation_after_revocation_fails_while_an_earlier_write_is_pending`].
 // contract: C1, C4a
 #[test]
-#[ignore = "ROUND11: an open for writing skips the write check while a write is pending"]
 fn an_overwrite_after_revocation_fails_while_an_earlier_write_is_pending() -> Result<()> {
     let Some((written, read)) = change_after_revocation(true, overwrite)? else {
         return Ok(());
@@ -103,7 +102,6 @@ fn an_overwrite_after_revocation_fails_at_open() -> Result<()> {
 /// [`a_truncation_after_revocation_fails`], where truncate fails with EACCES.
 // contract: C1, C4a
 #[test]
-#[ignore = "ROUND11: a truncation by name skips the write check while a write is pending"]
 fn a_truncation_after_revocation_fails_while_an_earlier_write_is_pending() -> Result<()> {
     let Some((truncated, read)) = change_after_revocation(true, truncate)? else {
         return Ok(());
