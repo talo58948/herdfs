@@ -86,19 +86,15 @@ impl Call<'_> {
                 return Err(refuse(ErrorCode::Invalid, "request id reused for another entry"));
             }
             let entry = self.entry_by_id(space, entry)?;
-            self.require(space, &entry.path, Perm::Read)?;
-            // The commit took effect; once retention or a purge removed its version,
-            // the head answers, whatever newer commits made it, to a caller who may read it.
-            let version = match self.version(version)? {
-                Some(_) => self.visible_version(space, &entry, version)?.ok_or_else(|| {
-                    refuse(
-                        ErrorCode::NotFound,
-                        format!("no version {} of entry {}", version.0, entry.id.0),
-                    )
-                })?,
-                None => self.head(&entry)?,
+            if let Some(version) = self.version_of(&entry, version)? {
+                return Ok(Response::Version { version });
+            }
+            return match self.may(space, &entry.path, Perm::Read)? {
+                true => Ok(Response::Version {
+                    version: self.head(&entry)?,
+                }),
+                false => Ok(Response::Done),
             };
-            return Ok(Response::Version { version });
         }
         let entry = self.entry_by_id(space, entry)?;
         self.require(space, &entry.path, Perm::Write)?;
@@ -137,9 +133,9 @@ impl Call<'_> {
     pub(crate) fn history(&self, space: &str, path: &SpacePath) -> Result<Response> {
         self.require(space, path, Perm::Read)?;
         let entry = self.entry(space, path)?;
-        let since = self.readable_since(space, path)?;
+        let after = self.readable_after(space, path)?;
         let mut versions = self.versions(entry.id)?;
-        versions.retain(|version| entry.head == Some(version.id) || version.created_ms >= since);
+        versions.retain(|version| entry.head == Some(version.id) || version.id.0 > after as u64);
         Ok(Response::History { versions })
     }
 
@@ -191,8 +187,8 @@ impl Call<'_> {
         let Some(version) = self.version_of(entry, id)? else {
             return Ok(None);
         };
-        let since = self.readable_since(space, &entry.path)?;
-        Ok((entry.head == Some(version.id) || version.created_ms >= since).then_some(version))
+        let after = self.readable_after(space, &entry.path)?;
+        Ok((entry.head == Some(version.id) || version.id.0 > after as u64).then_some(version))
     }
 
     /// The chunks of `base`. A base that is gone, of another entry, or hidden

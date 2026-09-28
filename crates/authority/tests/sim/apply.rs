@@ -39,7 +39,9 @@ impl Model {
                 );
             }
             Request::CreateSpace { space } => {
-                let acl = BTreeMap::from([((SpacePath::root(), who.user.clone()), (Perm::Admin, now_ms))]);
+                let granted_seq = self.versions.keys().next_back().map_or(0, |id| id.0);
+                let acl =
+                    BTreeMap::from([((SpacePath::root(), who.user.clone()), (Perm::Admin, granted_seq))]);
                 self.spaces.insert(
                     space.clone(),
                     Space {
@@ -85,14 +87,12 @@ impl Model {
                 );
             }
             Request::History { space, path } => {
-                let (node, since) = (
+                let (node, after) = (
                     &self.spaces[space].nodes[path],
-                    self.readable_since(space, path, who),
+                    self.readable_after(space, path, who),
                 );
                 let mut versions = self.history(node);
-                versions.retain(|version| {
-                    node.history.last() == Some(&version.id) || version.created_ms >= since
-                });
+                versions.retain(|version| node.history.last() == Some(&version.id) || version.id.0 > after);
                 assert_eq!(*reply, Response::History { versions });
                 // contract: S8 — history before the caller's access stays hidden, except the head.
                 let Response::History { versions } = reply else {
@@ -100,7 +100,7 @@ impl Model {
                 };
                 let hidden = versions
                     .iter()
-                    .find(|version| node.history.last() != Some(&version.id) && version.created_ms < since);
+                    .find(|version| node.history.last() != Some(&version.id) && version.id.0 <= after);
                 assert!(hidden.is_none(), "{} saw {hidden:?}", who.user);
             }
             Request::Purge { space, path } => {
@@ -178,11 +178,12 @@ impl Model {
                 perm,
             } => {
                 assert_eq!(*reply, Response::Done);
+                let granted_seq = self.versions.keys().next_back().map_or(0, |id| id.0);
                 let acl = &mut self.spaces.get_mut(space).expect("space exists").acl;
                 let key = (path.clone(), principal.clone());
-                // A changed perm keeps the row's grant time (S8).
+                // A changed perm keeps the row's grant sequence (S8).
                 match perm {
-                    Some(perm) => acl.entry(key).or_insert((*perm, now_ms)).0 = *perm,
+                    Some(perm) => acl.entry(key).or_insert((*perm, granted_seq)).0 = *perm,
                     None => drop(acl.remove(&key)),
                 };
             }

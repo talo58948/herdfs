@@ -21,9 +21,9 @@ fn call(authority: &mut Authority, request: Request, now_ms: i64) -> Response {
     }
 }
 
-/// Three entries with two versions each and three uncommitted uploads. After the last operation,
-/// `backward` makes the wall clock jump to zero; collection is called after another 101 ms of wall
-/// time. The authority is restarted between the jump and collection.
+/// Seeds the authority at a forward wall time, then makes three entries with two versions each and
+/// three uploads. With `backward`, those operations happen after a restart and a jump to zero.
+/// Collection runs after another age period of wall time.
 fn collect_after_clock_change(backward: bool) -> (usize, usize) {
     const FORWARD_MS: i64 = 1_000_000;
     const AGE_MS: i64 = 100;
@@ -31,14 +31,18 @@ fn collect_after_clock_change(backward: bool) -> (usize, usize) {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("authority.db");
     let mut authority = Authority::open(&db).unwrap();
+    let start_ms = if backward { 0 } else { FORWARD_MS };
     call(
         &mut authority,
         Request::CreateSpace {
             space: "clock".into(),
         },
-        0,
+        FORWARD_MS,
     );
-    let mut wall_ms = FORWARD_MS;
+    drop(authority);
+
+    let mut authority = Authority::open(&db).unwrap();
+    let mut wall_ms = start_ms;
     for trial in 0..TRIALS {
         let path = SpacePath::try_from(format!("f{trial}")).unwrap();
         let Response::Entry { entry } = call(
@@ -86,11 +90,7 @@ fn collect_after_clock_change(backward: bool) -> (usize, usize) {
     drop(authority);
 
     let mut authority = Authority::open(&db).unwrap();
-    let collect_at = if backward {
-        AGE_MS + 1
-    } else {
-        wall_ms + AGE_MS + 1
-    };
+    let collect_at = wall_ms + AGE_MS + 1;
     let policy = Policy {
         versions: 1,
         max_age_ms: AGE_MS,
@@ -104,13 +104,11 @@ fn collect_after_clock_change(backward: bool) -> (usize, usize) {
     (collected.pruned, stale_uploads)
 }
 
-/// Repro: after a forward clock jump, the authority restarts and the clock jumps backward. One
-/// retention/grace period of wall time later, all three old versions and uploads are still kept:
-/// `next_ms` advances only one millisecond per request while the wall clock catches up. With no
-/// backward jump, the same ages prune every old version and expire every upload.
+/// Repro: after a forward clock jump, the authority restarts and the clock jumps backward. A
+/// logical clock stamps new versions and uploads near the old time, so collection stalls while the
+/// wall clock catches up. Plain wall time lets retention and grace resume after their age periods.
 // contract: C14, C15, S7
 #[test]
-#[ignore = "ROUND15: backward clock jump pauses retention and upload grace"]
 fn backward_clock_jump_does_not_pause_retention_or_collection_grace() {
     assert_eq!(
         collect_after_clock_change(false),

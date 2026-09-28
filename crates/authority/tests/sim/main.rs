@@ -143,7 +143,8 @@ impl Sim {
 
     fn step(&mut self) {
         match self.rng.below(100) {
-            0..=2 => self.restart(),
+            0 => self.restart(),
+            1 | 2 => self.change_clock(),
             3 | 4 => self.new_space(),
             5 => self.deep_rename(),
             6..=22 => self.make(),
@@ -202,6 +203,15 @@ impl Sim {
 
     fn restart(&mut self) {
         self.authority = Authority::open(&self.dir.path().join("sim.db")).unwrap();
+    }
+
+    fn change_clock(&mut self) {
+        let change = 1 + self.rng.below(100_000) as i64;
+        if self.rng.chance(50) {
+            self.now_ms = self.now_ms.saturating_sub(change);
+        } else {
+            self.now_ms = self.now_ms.saturating_add(change);
+        }
     }
 
     fn let_auditor_in(&mut self, space: &str) {

@@ -11,7 +11,7 @@ use crate::{Call, Result, refuse};
 
 /// Bumped when the schema changes. v0 keeps no data worth migrating, so an
 /// older database is recreated.
-pub(crate) const SCHEMA_VERSION: i64 = 4;
+pub(crate) const SCHEMA_VERSION: i64 = 5;
 
 pub(crate) const DROP_ALL: &str = "
 DROP TABLE IF EXISTS commits;
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS acl (
     path TEXT NOT NULL,
     principal TEXT NOT NULL,
     perm TEXT NOT NULL,
-    granted_ms INTEGER NOT NULL,
+    granted_seq INTEGER NOT NULL,
     PRIMARY KEY (space, principal, path)
 );
 CREATE TABLE IF NOT EXISTS uploads (

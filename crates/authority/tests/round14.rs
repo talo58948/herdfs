@@ -7,7 +7,8 @@
 
 mod support;
 
-use herdfs_core::proto::{EntryId, ErrorCode, Perm, Request, VersionId};
+use herdfs_authority::Outcome;
+use herdfs_core::proto::{EntryId, ErrorCode, Perm, Request, Response, VersionId};
 use support::{Fixture, SPACE, alice, bob, path};
 
 fn set_bob_at(fixture: &mut Fixture, perm: Option<Perm>, at: i64) {
@@ -62,16 +63,16 @@ fn unguarded(entry: EntryId, request_id: &str) -> Request {
     }
 }
 
-/// Repro: bob commits while he has write access, alice commits a newer head, then revokes him. A
-/// fresh commit is denied, but replaying bob's request id returns its retained older version
-/// without checking current permission, confirming a version bob can no longer see.
+/// Bob commits while he has write access, alice commits a newer head, then revokes him. Round 15's
+/// ruling supersedes the old `Denied` expectation: replaying bob's request id returns his retained
+/// version, while a fresh commit still checks current permission.
 // contract: S8
 #[test]
-fn a_revoked_writer_cannot_confirm_a_version_by_replaying_its_commit() {
+fn a_revoked_writer_can_confirm_its_retained_commit() {
     let mut fixture = Fixture::new();
     let (file, _) = fixture.file("f", b"initial");
     fixture.set_acl("f", "user:bob", Some(Perm::Write));
-    let _first = fixture.commit(&bob(), file.id, "mine", None, false, &[]).unwrap();
+    let first = fixture.commit(&bob(), file.id, "mine", None, false, &[]).unwrap();
     fixture
         .commit(&alice(), file.id, "newer", None, false, &[])
         .unwrap();
@@ -85,5 +86,5 @@ fn a_revoked_writer_cannot_confirm_a_version_by_replaying_its_commit() {
     let replay = fixture
         .authority
         .handle(&bob(), unguarded(file.id, "mine"), i64::MAX);
-    assert_eq!(replay.map_err(|error| error.code), Err(ErrorCode::Denied));
+    assert_eq!(replay, Ok(Outcome::Reply(Response::Version { version: first })));
 }

@@ -21,8 +21,8 @@ const FORK: [&str; 4] = [
      WHERE source.space = ?1",
     "UPDATE entries SET head = (SELECT id FROM versions WHERE entry = entries.id)
      WHERE space = ?2",
-    "INSERT INTO acl (space, path, principal, perm, granted_ms)
-     SELECT ?2, path, principal, perm, granted_ms FROM acl WHERE space = ?1",
+    "INSERT INTO acl (space, path, principal, perm, granted_seq)
+     SELECT ?2, path, principal, perm, granted_seq FROM acl WHERE space = ?1",
 ];
 
 /// `[a-z0-9][a-z0-9._-]{0,62}`

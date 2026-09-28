@@ -30,8 +30,8 @@ pub struct Model {
 #[derive(Clone, Default)]
 pub struct Space {
     pub nodes: BTreeMap<SpacePath, Node>,
-    /// Each row's perm and the time it was first granted.
-    pub acl: BTreeMap<(SpacePath, String), (Perm, i64)>,
+    /// Each row's perm and the commit sequence when it was first granted.
+    pub acl: BTreeMap<(SpacePath, String), (Perm, u64)>,
 }
 
 #[derive(Clone)]
