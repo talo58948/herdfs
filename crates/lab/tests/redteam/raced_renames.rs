@@ -98,7 +98,6 @@ fn appears_within(span: Duration, found: impl Fn() -> bool) -> bool {
 /// threads.
 // contract: C7 (rename is atomic within a space)
 #[test]
-#[ignore = "ROUND13: a reopen answered after a rename binds the file to its old name again"]
 fn a_renamed_file_is_gone_from_its_old_name_while_it_is_reopened() -> Result<()> {
     let Some(found) = old_names_after_renames(true)? else {
         return Ok(());

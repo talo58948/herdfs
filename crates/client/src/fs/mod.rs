@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use std::{collections::HashMap, fs::File, io, os::unix::fs::MetadataExt};
 
 pub use fuse::Fuse;
-use fuser::{Errno, FileAttr, FileType, INodeNo, Notifier};
+use fuser::{Errno, FileAttr, FileType, INodeNo, Notifier, OpenAccMode, OpenFlags};
 use handles::Handle;
 pub use inodes::Inodes;
 pub use kernel::Kernel;
@@ -41,6 +41,35 @@ const MAX_NAME: usize = 255;
 
 /// A directory's entries as readdir reports them.
 type Listing = Vec<(INodeNo, FileType, String)>;
+
+#[derive(Clone, Copy)]
+enum OpenMode {
+    Read,
+    Write,
+    Truncate,
+}
+
+impl OpenMode {
+    fn for_open(flags: OpenFlags) -> Self {
+        match (flags.acc_mode(), flags.0 & libc::O_TRUNC != 0) {
+            (OpenAccMode::O_RDONLY, _) => Self::Read,
+            (_, true) => Self::Truncate,
+            _ => Self::Write,
+        }
+    }
+
+    fn for_set_len(size: u64) -> Self {
+        if size == 0 { Self::Truncate } else { Self::Write }
+    }
+
+    fn writes(self) -> bool {
+        !matches!(self, Self::Read)
+    }
+
+    fn truncates(self) -> bool {
+        matches!(self, Self::Truncate)
+    }
+}
 
 pub struct Space {
     remote: Arc<Remote>,

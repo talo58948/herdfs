@@ -56,6 +56,8 @@ impl Filesystem for Fuse {
         if let Err(missing) = config.add_capabilities(InitFlags::FUSE_ATOMIC_O_TRUNC) {
             tracing::warn!(?missing, "kernel lacks atomic O_TRUNC");
         }
+        // Direct reads can still serve the read-only mappings v0 supports where Linux allows it.
+        let _ = config.add_capabilities(InitFlags::FUSE_DIRECT_IO_ALLOW_MMAP);
         Ok(())
     }
 

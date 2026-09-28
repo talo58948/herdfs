@@ -88,7 +88,6 @@ fn rewound_reads(hidden: bool) -> Result<Option<usize>> {
 /// pages.
 // contract: C3 (an open file follows its latest version between reads, as a local file does)
 #[test]
-#[ignore = "ROUND13: after a read moves an open file on, a cached page of the older version is read"]
 fn an_open_file_never_reads_an_older_version_after_its_version_is_hidden() -> Result<()> {
     let Some(rewound) = rewound_reads(true)? else {
         return Ok(());

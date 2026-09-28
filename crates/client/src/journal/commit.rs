@@ -62,32 +62,29 @@ impl Committer {
         let mut delay = FIRST_RETRY;
         while let Some(job) = self.next(entry).await {
             let attempt = |record| self.attempt(&job.sealed, record);
-            // Whether the file's bytes may now differ from the journal copy's, which local reads
-            // were served from.
-            let (outcome, differs) = match anew(&job.record, attempt).await {
-                Ok((version, sealed)) => {
+            let outcome = match anew(&job.record, attempt).await {
+                Ok(version) => {
                     bump(&self.stats.commits, 1);
                     // Reads go on to the committed version once the journal drops the copy, as
                     // do offline opens and appends (C1, C12).
                     delay = FIRST_RETRY;
                     // A retry may be answered with the head another client committed since.
-                    (Outcome::Committed(version), !sealed)
+                    Outcome::Committed(version)
                 }
-                Err(err) if err.is_not_found() => (Outcome::Dropped, true),
+                Err(err) if err.is_not_found() => Outcome::Dropped,
                 Err(err) if err.is_final() => {
                     tracing::warn!(%err, entry = entry.0, "commit rejected; write set aside");
-                    (Outcome::Rejected, true)
+                    Outcome::Rejected
                 }
                 Err(err) => {
                     tracing::warn!(%err, entry = entry.0, ?delay, "commit failed; retrying");
-                    (Outcome::Retrying, false)
+                    Outcome::Retrying
                 }
             };
             let retry = matches!(outcome, Outcome::Retrying);
             self.finish(&job, outcome);
-            // The kernel may hold pages the copy served, which no open file reads any more (C3).
-            if differs {
-                self.kernel.apply(entry, false).await;
+            if !retry {
+                self.kernel.invalidate_attrs(entry);
             }
             if retry {
                 let window = self.remote.link.remaining().unwrap_or_default();
@@ -109,9 +106,8 @@ impl Committer {
     }
 
     /// Chunks the sealed copy, caching each chunk and uploading those the record's base lacks
-    /// without asking whether the store already has them (S6), and commits. Returns the version
-    /// the authority answers with, and whether it holds the sealed bytes.
-    async fn attempt(&self, sealed: &Path, record: Record) -> Result<(Version, bool)> {
+    /// without asking whether the store already has them (S6), and commits.
+    async fn attempt(&self, sealed: &Path, record: Record) -> Result<Version> {
         let base = record.base.iter().flat_map(|base| &base.chunks);
         let base: HashSet<ChunkId> = base.map(|chunk| chunk.id).collect();
         let sealed = File::open(sealed)?;
@@ -136,9 +132,7 @@ impl Committer {
         }
         // A splitter that died early would otherwise commit a truncated file.
         splitter.await.map_err(io::Error::other)?;
-        let version = self.remote.commit(&record, refs.clone()).await?;
-        let sealed = version.chunks == refs;
-        Ok((version, sealed))
+        self.remote.commit(&record, refs).await
     }
 }
 

@@ -9,6 +9,7 @@ use std::time::Instant;
 use fuser::Errno;
 use herdfs_core::proto::{Entry, Version};
 
+use super::OpenMode;
 use crate::journal::Local;
 use crate::{lock, reader::Head, version::OpenVersion};
 
@@ -116,11 +117,11 @@ impl State {
     /// with the access it came with. A truncating write needs none, since its unguarded commit is
     /// right on an unknown base too, nor does one over pending changes, which hold the bytes (C5,
     /// C12). `None` if nothing is known to go on.
-    pub fn offline(&self, write: bool, truncate: bool) -> Option<Result<Head, Errno>> {
+    pub(super) fn offline(&self, mode: OpenMode) -> Option<Result<Head, Errno>> {
         match self.known() {
-            Some((_, false)) if write => Some(Err(Errno::EACCES)),
+            Some((_, false)) if mode.writes() => Some(Err(Errno::EACCES)),
             Some((file, _)) => Some(Ok(file)),
-            None if truncate || self.local.as_ref().and_then(Local::copy).is_some() => Some(Ok(None)),
+            None if mode.truncates() || self.local.as_ref().and_then(Local::copy).is_some() => Some(Ok(None)),
             None => None,
         }
     }
@@ -130,11 +131,6 @@ impl State {
         if self.local.as_ref().is_some_and(Local::idle) {
             self.local = None;
         }
-    }
-
-    /// Forgets the version the entry's open files read, which this client may no longer use.
-    pub fn unfollow(&mut self) {
-        self.version = None;
     }
 
     /// Settles a commit of this client's, in the critical section that drops its copy: the
