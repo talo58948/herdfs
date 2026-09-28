@@ -8,6 +8,7 @@ use http::{Lab, now_ms};
 use herdfs_authority::Policy;
 use herdfs_core::ChunkId;
 use serde_json::json;
+use std::time::Duration;
 
 const GRACE_MS: i64 = 60 * 60 * 1_000;
 const INTERVAL_MS: i64 = 10 * 60 * 1_000;
@@ -53,36 +54,52 @@ async fn delete_chunk_space(lab: &Lab, bytes: &[u8]) -> i64 {
     now_ms()
 }
 
-/// A collection within the interval records the deletion, and the first collection after the
-/// grace then erases the chunk.
+/// A restart just before the next collection resets its schedule, but the persisted preceding
+/// collection still lets the restarted collector meet the original deletion deadline.
 // contract: S7
 #[tokio::test]
-async fn regular_collections_erase_a_deleted_spaces_chunk_by_the_deadline() {
-    let lab = Lab::start().await;
-    let bytes = b"round 22 regular collection";
+async fn a_restart_between_deletion_and_collection_keeps_the_erasure_deadline() {
+    const RESTART_GRACE_MS: i64 = 1_000;
+    const RESTART_INTERVAL_MS: i64 = 200;
+    const GRANT_TTL_MS: u64 = 20;
+    let policy = Policy {
+        versions: 1,
+        max_age_ms: 0,
+        grace_ms: RESTART_GRACE_MS,
+    };
+    let lab = Lab::start_with_ttl(Duration::from_millis(GRANT_TTL_MS)).await;
+    let previous = now_ms();
+    lab.server.sweep(previous, &policy).await.unwrap();
+    let bytes = b"round 22 restart collection";
     let deleted_at = delete_chunk_space(&lab, bytes).await;
 
-    let first = lab.server.sweep(deleted_at + INTERVAL_MS, &POLICY).await.unwrap();
-    assert_eq!(first.deleted, 0);
-    let deadline = deleted_at + GRACE_MS + INTERVAL_MS + 1;
-    let second = lab.server.sweep(deadline, &POLICY).await.unwrap();
-    assert_eq!(second.deleted, 1);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let restarted_at = now_ms();
+    assert!(restarted_at < deleted_at + RESTART_INTERVAL_MS);
+    let server = lab.restarted_server();
+    let deadline = deleted_at + RESTART_GRACE_MS + RESTART_INTERVAL_MS;
+    let mut started = restarted_at + RESTART_INTERVAL_MS;
+    while started <= deadline {
+        server.sweep(started, &policy).await.unwrap();
+        started += RESTART_INTERVAL_MS;
+    }
+
     assert!(!lab.objects.lock().unwrap().contains_key(&key(bytes)));
 }
 
-/// Repro: delete a space before this process has collected, then make its first collection just
-/// after grace plus interval. S7's deadline has passed, but the sweep treats the late collection
-/// as the start of a fresh grace window and leaves the sole chunk in the bucket.
+/// After a collector stalls past the normal bound, the URL-safety clamp delays deletion until
+/// no outstanding grant can survive, then the next collection erases the chunk.
 // contract: S7
 #[tokio::test]
-#[ignore = "ROUND22: a late first collection restarts S7's grace after DeleteSpace"]
-async fn a_late_first_collection_still_meets_the_erasure_deadline() {
+async fn a_stalled_collector_erases_within_the_resumption_bound() {
     let lab = Lab::start().await;
     let bytes = b"round 22 late first collection";
     let deleted_at = delete_chunk_space(&lab, bytes).await;
 
-    let deadline = deleted_at + GRACE_MS + INTERVAL_MS + 1;
-    let swept = lab.server.sweep(deadline, &POLICY).await.unwrap();
-    assert_eq!(swept.deleted, 1, "the S7 deadline has passed");
+    let resumed_at = deleted_at + GRACE_MS + INTERVAL_MS + 1;
+    let resumed = lab.server.sweep(resumed_at, &POLICY).await.unwrap();
+    assert_eq!(resumed.deleted, 0, "outstanding grants stay safe");
+    let swept = lab.server.sweep(resumed_at + INTERVAL_MS, &POLICY).await.unwrap();
+    assert_eq!(swept.deleted, 1);
     assert!(!lab.objects.lock().unwrap().contains_key(&key(bytes)));
 }

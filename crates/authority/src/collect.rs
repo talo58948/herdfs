@@ -22,6 +22,8 @@ pub struct Policy {
 /// What one collection pruned, and what it left live.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Collected {
+    /// When the preceding collection began, or when this database was created.
+    pub previous_ms: i64,
     pub pruned: usize,
     /// Chunk lists no remaining version used.
     pub dropped: usize,
@@ -53,6 +55,12 @@ impl Authority {
     /// ids that nothing needs, and returns the chunks still live, across every space.
     pub fn collect(&mut self, now_ms: i64, policy: &Policy) -> anyhow::Result<Collected> {
         let tx = self.db.transaction()?;
+        let previous_ms = tx.query_row(
+            "SELECT coalesce(started_ms, created_ms) FROM collection WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        tx.execute("UPDATE collection SET started_ms = ?1 WHERE id = 1", [now_ms])?;
         let pruned = tx.execute(PRUNE, params![policy.versions, now_ms - policy.max_age_ms])?;
         let dropped = tx.execute(
             "DELETE FROM manifests WHERE hash NOT IN (SELECT manifest FROM versions)",
@@ -68,6 +76,7 @@ impl Authority {
         live.extend(uploaded(&tx, i64::MIN)?);
         tx.commit()?;
         Ok(Collected {
+            previous_ms,
             pruned,
             dropped,
             retained,

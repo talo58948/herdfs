@@ -25,7 +25,7 @@ struct Args {
     #[arg(long)]
     mount: PathBuf,
     /// Serves the sessions under `<mount>/.agents/<host>/`.
-    #[arg(long)]
+    #[arg(long, value_parser = host)]
     host: String,
     /// Shell command run for each session, with the prompt on stdin.
     #[arg(long)]
@@ -34,6 +34,13 @@ struct Args {
     max_sessions: u32,
     #[arg(long, default_value_t = 1000)]
     poll_ms: u64,
+}
+
+fn host(value: &str) -> Result<String, String> {
+    if value.is_empty() || value == "." || value == ".." || value.contains('/') {
+        return Err("host must be one plain path component".into());
+    }
+    Ok(value.into())
 }
 
 /// Starts this host's sessions once their prompts are complete, as slots free up.

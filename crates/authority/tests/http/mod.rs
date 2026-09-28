@@ -4,6 +4,7 @@
 
 use std::{
     collections::BTreeMap,
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -48,6 +49,9 @@ pub struct Lab {
     /// One permit is required for a fake bucket write.
     pub store_writes: Arc<tokio::sync::Semaphore>,
     pub http: reqwest::Client,
+    db: PathBuf,
+    s3: String,
+    grant_ttl: std::time::Duration,
     _dir: TempDir,
 }
 
@@ -149,7 +153,8 @@ impl Lab {
         let store_writes = Arc::new(tokio::sync::Semaphore::new(1));
         let s3 = serve(|_| fake_s3(Arc::clone(&objects), Arc::clone(&store_writes))).await;
         let dir = tempfile::tempdir().unwrap();
-        let authority = Authority::open(&dir.path().join("authority.db")).unwrap();
+        let db = dir.path().join("authority.db");
+        let authority = Authority::open(&db).unwrap();
         let bucket = |url: &str| {
             Bucket::new(Url::parse(url).unwrap(), UrlStyle::Path, "herdfs", "us-east-1").unwrap()
         };
@@ -173,8 +178,26 @@ impl Lab {
             objects,
             store_writes,
             http: reqwest::Client::new(),
+            db,
+            s3,
+            grant_ttl,
             _dir: dir,
         }
+    }
+
+    pub fn restarted_server(&self) -> Arc<Server> {
+        let bucket = |url: &str| {
+            Bucket::new(Url::parse(url).unwrap(), UrlStyle::Path, "herdfs", "us-east-1").unwrap()
+        };
+        Arc::new(Server::new(
+            Authority::open(&self.db).unwrap(),
+            bucket(&self.s3),
+            bucket(PUBLIC_S3),
+            Credentials::new("key", "secret"),
+            self.issuer.clone(),
+            "herdfs".into(),
+            self.grant_ttl,
+        ))
     }
 
     pub fn claims(&self, sub: &str) -> Value {

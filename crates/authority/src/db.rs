@@ -11,9 +11,10 @@ use crate::{Call, Result, refuse};
 
 /// Bumped when the schema changes. v0 keeps no data worth migrating, so an
 /// older database is recreated.
-pub(crate) const SCHEMA_VERSION: i64 = 7;
+pub(crate) const SCHEMA_VERSION: i64 = 8;
 
 pub(crate) const DROP_ALL: &str = "
+DROP TABLE IF EXISTS collection;
 DROP TABLE IF EXISTS unreferenced;
 DROP TABLE IF EXISTS commits;
 DROP TABLE IF EXISTS uploads;
@@ -74,6 +75,11 @@ CREATE TABLE IF NOT EXISTS uploads (
     request_id TEXT NOT NULL,
     at_ms INTEGER NOT NULL,
     PRIMARY KEY (principal, chunk, request_id)
+);
+CREATE TABLE IF NOT EXISTS collection (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    created_ms INTEGER NOT NULL,
+    started_ms INTEGER
 );
 CREATE TABLE IF NOT EXISTS unreferenced (
     chunk TEXT PRIMARY KEY,

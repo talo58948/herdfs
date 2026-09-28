@@ -7,7 +7,7 @@ mod sweep;
 pub use sweep::Swept;
 
 use std::{
-    sync::{Arc, Mutex, PoisonError, atomic::AtomicI64},
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -49,8 +49,6 @@ pub struct Server {
     /// Held shared by each upload and alone by the sweep while it deletes, so
     /// the sweep never deletes bytes an upload has just written.
     uploading: RwLock<()>,
-    /// When the last collection began, or this process started.
-    collected_at: AtomicI64,
 }
 
 impl Server {
@@ -74,7 +72,6 @@ impl Server {
             verifier: auth::Verifier::new(issuer, audience),
             grant_ttl,
             uploading: RwLock::new(()),
-            collected_at: AtomicI64::new(now_ms()),
         }
     }
 
@@ -192,7 +189,7 @@ fn invalid(message: impl Into<String>) -> proto::Error {
 
 fn unavailable(error: impl std::fmt::Display) -> proto::Error {
     tracing::warn!(%error, "unavailable");
-    proto::Error::new(ErrorCode::Unavailable, error.to_string())
+    proto::Error::new(ErrorCode::Unavailable, "service unavailable")
 }
 
 /// A protocol error as an HTTP response.

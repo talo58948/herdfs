@@ -2,7 +2,7 @@
 //! live has referenced for the grace.
 
 use std::collections::BTreeSet;
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use herdfs_core::{ChunkId, proto};
@@ -55,7 +55,6 @@ impl Server {
     /// from so early that a URL granted before this collection could outlive
     /// the chunk (S4).
     pub async fn sweep(self: &Arc<Self>, started: i64, policy: &Policy) -> anyhow::Result<Swept> {
-        let previous = self.collected_at.swap(started, Ordering::Relaxed);
         let run_policy = policy.clone();
         let collected = self
             .run(move |authority, _| authority.collect(started, &run_policy).map_err(unavailable))
@@ -82,7 +81,7 @@ impl Server {
             .filter(|id| !collected.retained.contains(id))
             .collect();
         let ttl_ms = i64::try_from(self.grant_ttl.as_millis()).unwrap_or(i64::MAX);
-        let since_ms = previous.max(started - policy.grace_ms + ttl_ms);
+        let since_ms = collected.previous_ms.max(started - policy.grace_ms + ttl_ms);
         let since = self
             .run(move |authority, _| {
                 authority

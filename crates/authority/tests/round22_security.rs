@@ -45,7 +45,6 @@ async fn a_successful_upload_reveals_no_object_store_capability() {
 /// must not disclose the signed PUT capability that only the authority should hold.
 // contract: S1
 #[tokio::test]
-#[ignore = "ROUND22: a failed store PUT exposes its signed URL to the client"]
 async fn a_store_failure_reveals_no_object_store_capability() {
     let identity = Lab::start().await;
     let dir = tempfile::tempdir().unwrap();

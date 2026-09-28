@@ -76,7 +76,6 @@ fn a_component_host_runs_only_its_public_mount_sessions() -> Result<()> {
 /// through the corresponding directory in the public filesystem.
 // contract: A1
 #[test]
-#[ignore = "ROUND22: an absolute agents host executes sessions outside the public mount"]
 fn an_agents_host_cannot_escape_the_public_mount() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");

@@ -10,7 +10,10 @@ pub mod server;
 mod spaces;
 mod versions;
 
-use std::path::Path;
+use std::{
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 pub use collect::{Collected, Policy};
 use herdfs_core::{
@@ -51,6 +54,13 @@ impl Authority {
             db.execute_batch(db::DROP_ALL)?;
         }
         db.execute_batch(db::SCHEMA)?;
+        let created_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        });
+        db.execute(
+            "INSERT OR IGNORE INTO collection (id, created_ms) VALUES (1, ?1)",
+            [created_ms],
+        )?;
         db.pragma_update(None, "user_version", db::SCHEMA_VERSION)?;
         db.set_prepared_statement_cache_capacity(64);
         Ok(Self { db })
