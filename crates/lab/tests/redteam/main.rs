@@ -37,6 +37,7 @@ mod saved_mtime;
 mod scratch_files;
 mod shared_builds;
 mod slow_links;
+mod stalled_reads;
 mod synced_opens;
 mod times;
 mod unusable_versions;
