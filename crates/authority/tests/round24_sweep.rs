@@ -86,7 +86,6 @@ async fn a_resumed_collector_without_a_failed_pass_meets_the_recovery_bound() {
 /// the grant TTL plus one interval, not a fresh grace period from the failed pass.
 // contract: S7
 #[tokio::test]
-#[ignore = "ROUND24: a failed sweep restarts the post-stall erasure grace"]
 async fn a_failed_collection_does_not_restart_the_recovery_grace() {
     let bytes = b"round 24 failed collection";
     let (lab, deleted_at) = lab_with_deleted_chunk(bytes).await;
@@ -112,7 +111,6 @@ async fn a_failed_collection_does_not_restart_the_recovery_grace() {
 /// time in the future and defeat S7 while collections continue at every interval.
 // contract: S7
 #[tokio::test]
-#[ignore = "ROUND24: a corrected forward clock step delays erasure past S7"]
 async fn a_forward_clock_step_does_not_extend_the_erasure_deadline() {
     let bytes = b"round 24 clock correction";
     let (lab, deleted_at) = lab_with_deleted_chunk(bytes).await;

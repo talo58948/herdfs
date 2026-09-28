@@ -60,7 +60,6 @@ impl Authority {
             [],
             |row| row.get(0),
         )?;
-        tx.execute("UPDATE collection SET started_ms = ?1 WHERE id = 1", [now_ms])?;
         let pruned = tx.execute(PRUNE, params![policy.versions, now_ms - policy.max_age_ms])?;
         let dropped = tx.execute(
             "DELETE FROM manifests WHERE hash NOT IN (SELECT manifest FROM versions)",
@@ -84,14 +83,16 @@ impl Authority {
         })
     }
 
-    /// Records `chunks` as unreferenced since `since_ms` unless they already were, forgets the
-    /// rest, and returns since when each has been unreferenced.
+    /// Records the completed collection and `chunks` as unreferenced since `since_ms` unless
+    /// they already were, forgets the rest, and returns since when each has been unreferenced.
     pub(crate) fn unreferenced(
         &mut self,
         chunks: &BTreeSet<ChunkId>,
+        started_ms: i64,
         since_ms: i64,
     ) -> anyhow::Result<BTreeMap<ChunkId, i64>> {
         let tx = self.db.transaction()?;
+        tx.execute("UPDATE collection SET started_ms = ?1 WHERE id = 1", [started_ms])?;
         let mut known = BTreeMap::new();
         let mut query = tx.prepare("SELECT chunk, since_ms FROM unreferenced")?;
         for row in query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))? {
@@ -101,7 +102,14 @@ impl Authority {
         drop(query);
         let since: BTreeMap<_, _> = chunks
             .iter()
-            .map(|id| (*id, known.get(id).copied().unwrap_or(since_ms)))
+            .map(|id| {
+                let at = known
+                    .get(id)
+                    .copied()
+                    .filter(|at| *at <= started_ms)
+                    .unwrap_or(since_ms);
+                (*id, at)
+            })
             .collect();
         tx.execute("DELETE FROM unreferenced", [])?;
         let mut insert = tx.prepare("INSERT INTO unreferenced (chunk, since_ms) VALUES (?1, ?2)")?;
