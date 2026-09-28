@@ -9,6 +9,7 @@ publish.workspace = true
 herdfs-core.workspace = true
 anyhow.workspace = true
 axum.workspace = true
+blake3.workspace = true
 clap.workspace = true
 jsonwebtoken.workspace = true
 reqwest.workspace = true
