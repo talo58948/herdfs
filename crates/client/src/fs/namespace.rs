@@ -4,11 +4,12 @@ use std::sync::{Arc, atomic::Ordering::Relaxed};
 use std::time::{Duration, Instant};
 use std::{ffi::OsString, path::PathBuf};
 
-use fuser::{Errno, FileAttr, INodeNo, ReplyDirectory};
+use fuser::{Errno, FileAttr, INodeNo, OpenFlags, ReplyDirectory};
 use herdfs_core::SpacePath;
+use herdfs_core::proto::ErrorCode;
 
-use super::{PERMISSIONS, Space, TTL};
-use crate::{Result, journal::Local, lock};
+use super::{PERMISSIONS, Space, TTL, handles::Handle};
+use crate::{Error, Result, journal::Local, lock};
 
 pub struct AttrChange {
     pub mode: Option<u32>,
@@ -20,6 +21,39 @@ pub struct AttrChange {
 }
 
 impl Space {
+    /// Creates an empty file and opens it for writing. If another client created the name
+    /// first and O_EXCL was not asked for, opens that file instead, as O_CREAT does (C5).
+    pub async fn create(
+        self: Arc<Self>,
+        (parent, name): (INodeNo, OsString),
+        mode: u32,
+        flags: i32,
+        pid: u32,
+    ) -> Result<(FileAttr, u64)> {
+        let exclusive = flags & libc::O_EXCL != 0;
+        let (paths, created) = self
+            .namespace(&[(parent, &name)], |paths| {
+                let created = self.remote.create(paths[0].clone(), mode & PERMISSIONS);
+                async {
+                    match created.await {
+                        Err(Error::Api(error)) if error.code == ErrorCode::Exists && !exclusive => Ok(None),
+                        created => created.map(Some),
+                    }
+                }
+            })
+            .await?;
+        let Some(entry) = created else {
+            let entry = self.remote.stat(paths[0].clone()).await?;
+            let attr = self.added(&entry);
+            let open = self.clone().open(self.ino(entry.id), OpenFlags(flags), pid);
+            return Ok((attr, open.await?));
+        };
+        let attr = self.added(&entry);
+        self.inodes.with(entry.id, |state| state.switch((None, true)));
+        let fh = self.register(Handle::new(entry.id, true, &self.inodes));
+        Ok((attr, fh))
+    }
+
     pub async fn lookup(self: Arc<Self>, parent: INodeNo, name: OsString) -> Result<(FileAttr, Duration)> {
         let (entry, asked, local) = self.entry(&self.located_child(parent, &name).await?).await?;
         let attr = self.looked_up(&entry, asked, local.as_deref());
@@ -96,8 +130,11 @@ impl Space {
     }
 
     pub async fn mkdir(self: Arc<Self>, parent: INodeNo, name: OsString, mode: u32) -> Result<FileAttr> {
-        let path = self.located_child(parent, &name).await?;
-        let entry = self.remote.mkdir(path, mode & PERMISSIONS).await?;
+        let (_, entry) = self
+            .namespace(&[(parent, &name)], |paths| {
+                self.remote.mkdir(paths[0].clone(), mode & PERMISSIONS)
+            })
+            .await?;
         Ok(self.added(&entry))
     }
 
@@ -108,34 +145,45 @@ impl Space {
         target: PathBuf,
     ) -> Result<FileAttr> {
         let target = target.into_os_string().into_string().map_err(|_| Errno::EINVAL)?;
-        let path = self.located_child(parent, &name).await?;
-        let entry = self.remote.symlink(path, target).await?;
+        let (_, entry) = self
+            .namespace(&[(parent, &name)], |paths| {
+                self.remote.symlink(paths[0].clone(), target.clone())
+            })
+            .await?;
         Ok(self.added(&entry))
     }
 
     /// Unlinks a file or symlink, or removes an empty directory.
     pub async fn remove(self: Arc<Self>, parent: INodeNo, name: OsString) -> Result<()> {
-        let path = self.located_child(parent, &name).await?;
-        let removed = self.remote.remove(path.clone()).await?;
+        let (paths, removed) = self
+            .namespace(&[(parent, &name)], |paths| self.remote.remove(paths[0].clone()))
+            .await?;
+        let path = &paths[0];
         // The removed entry's changes are moot: deletion wins (C10), for it alone (C4a).
         let discard = |local: &mut Local| local.discard(&self.journal, removed.id);
         self.inodes.local(removed.id, false, discard);
-        self.inodes.stale(&path);
+        self.inodes.stale(path);
         // Another entry held at that path had moved away: `Locate` tells where (C7).
-        self.inodes.unbind(&path);
+        self.inodes.unbind(path);
         self.inodes.removed(removed.id);
         Ok(())
     }
 
     /// Renames at the authority, atomically there (C7), then moves every known path below.
     pub async fn rename(self: Arc<Self>, from: (INodeNo, OsString), to: (INodeNo, OsString)) -> Result<()> {
+        let from_child = (from.0, from.1.as_os_str());
+        let to_child = (to.0, to.1.as_os_str());
         let from = self.located_child(from.0, &from.1).await?;
-        let to = self.located_child(to.0, &to.1).await?;
         self.settle(&from).await?;
-        self.remote.rename(from.clone(), to.clone()).await?;
-        self.inodes.stale(&from);
-        self.inodes.stale(&to);
-        self.inodes.moved(&from, &to);
+        let (paths, ()) = self
+            .namespace(&[from_child, to_child], |paths| {
+                self.remote.rename(paths[0].clone(), paths[1].clone())
+            })
+            .await?;
+        let (from, to) = (&paths[0], &paths[1]);
+        self.inodes.stale(from);
+        self.inodes.stale(to);
+        self.inodes.moved(from, to);
         Ok(())
     }
 

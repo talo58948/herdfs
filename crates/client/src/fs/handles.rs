@@ -3,17 +3,17 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
-use std::{ffi::OsString, fs::File, io, os::unix::fs::FileExt};
+use std::{fs::File, io, os::unix::fs::FileExt};
 
-use fuser::{Errno, FileAttr, INodeNo, OpenFlags};
+use fuser::{Errno, INodeNo, OpenFlags};
 use herdfs_core::ChunkId;
-use herdfs_core::proto::{EntryId, ErrorCode};
+use herdfs_core::proto::EntryId;
 
 use tempfile::NamedTempFile;
 
-use super::{Inodes, OpenMode, PERMISSIONS, Space};
+use super::{Inodes, OpenMode, Space};
 use crate::journal::Local;
-use crate::{Error, Result, lock, reader::Head};
+use crate::{Result, lock, reader::Head};
 
 pub struct Handle {
     pub entry: EntryId,
@@ -25,13 +25,13 @@ pub struct Handle {
     /// How many of the entry's commits had settled at this handle's open or last fsync.
     synced: AtomicU64,
     /// Chunks this handle pinned, which release unpins.
-    pub pinned: Mutex<Vec<ChunkId>>,
+    pub pinned: Mutex<Option<Vec<ChunkId>>>,
     /// Keeps the entry's local changes while the handle is open.
     inodes: Arc<Inodes>,
 }
 
 impl Handle {
-    fn new(entry: EntryId, writable: bool, inodes: &Arc<Inodes>) -> Self {
+    pub(super) fn new(entry: EntryId, writable: bool, inodes: &Arc<Inodes>) -> Self {
         let settles = inodes.local(entry, true, |local| {
             local.opened();
             local.settles().0
@@ -42,7 +42,7 @@ impl Handle {
             dirty: AtomicBool::new(false),
             truncated: AtomicBool::new(false),
             synced: AtomicU64::new(settles.unwrap_or(0)),
-            pinned: Mutex::default(),
+            pinned: Mutex::new(None),
             inodes: inodes.clone(),
         }
     }
@@ -79,31 +79,6 @@ impl Space {
             tokio::spawn(self.upgrade(fh, upgrade));
         }
         Ok(fh)
-    }
-
-    /// Creates an empty file and opens it for writing. If another client created the name
-    /// first and O_EXCL was not asked for, opens that file instead, as O_CREAT does (C5).
-    pub async fn create(
-        self: Arc<Self>,
-        (parent, name): (INodeNo, OsString),
-        mode: u32,
-        flags: i32,
-        pid: u32,
-    ) -> Result<(FileAttr, u64)> {
-        let path = self.located_child(parent, &name).await?;
-        let entry = match self.remote.create(path.clone(), mode & PERMISSIONS).await {
-            Err(Error::Api(error)) if error.code == ErrorCode::Exists && flags & libc::O_EXCL == 0 => {
-                let entry = self.remote.stat(path).await?;
-                let attr = self.added(&entry);
-                let open = self.clone().open(self.ino(entry.id), OpenFlags(flags), pid);
-                return Ok((attr, open.await?));
-            }
-            created => created?,
-        };
-        let attr = self.added(&entry);
-        self.inodes.with(entry.id, |state| state.switch((None, true)));
-        let fh = self.register(Handle::new(entry.id, true, &self.inodes));
-        Ok((attr, fh))
     }
 
     pub async fn read(self: Arc<Self>, fh: u64, off: u64, len: u32) -> Result<Vec<u8>> {
@@ -147,7 +122,9 @@ impl Space {
         let Some(handle) = lock(&self.handles).remove(&fh) else {
             return Ok(());
         };
-        self.cache.unpin(&lock(&handle.pinned));
+        if let Some(pinned) = &*lock(&handle.pinned) {
+            self.cache.unpin(pinned);
+        }
         self.seal(&handle, true)
     }
 
@@ -276,7 +253,7 @@ impl Space {
         Ok(sealed.inspect_err(|_| handle.dirty.store(true, Relaxed))?)
     }
 
-    fn register(&self, handle: Handle) -> u64 {
+    pub(super) fn register(&self, handle: Handle) -> u64 {
         let fh = self.next_handle.fetch_add(1, Relaxed);
         lock(&self.handles).insert(fh, Arc::new(handle));
         fh
