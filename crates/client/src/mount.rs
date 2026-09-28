@@ -89,15 +89,6 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
     let (remote, cache, journal) = (Arc::new(remote), Arc::new(cache), Arc::new(journal));
     let stats = Arc::new(Stats::default());
     let reader = Arc::new(Reader::new(remote.clone(), cache.clone(), stats.clone()));
-    let committer = Committer {
-        journal: journal.clone(),
-        remote: remote.clone(),
-        reader: reader.clone(),
-        cache: cache.clone(),
-        stats: stats.clone(),
-    };
-    tokio::spawn(Arc::new(committer).run(woken));
-    tokio::spawn(remote.clone().probe());
     let decider = match &args.strategy {
         StrategyArg::Decider(decider) => decider.clone(),
         StrategyArg::Jev => {
@@ -108,8 +99,28 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
             Decider::Jev(Arc::new(jev), stats.clone())
         }
     };
-    let space = Space::new(remote, reader, cache, journal, stats, decider, root.id)?;
-    Ok(Arc::new(space))
+    let space = Space::new(
+        remote.clone(),
+        reader.clone(),
+        cache.clone(),
+        journal.clone(),
+        stats.clone(),
+        decider,
+        root.id,
+    )?;
+    let space = Arc::new(space);
+    let pages = space.clone();
+    let committer = Committer {
+        journal,
+        remote: remote.clone(),
+        reader,
+        cache,
+        stats,
+        forget_pages: Box::new(move |entry| pages.forget_pages(entry)),
+    };
+    tokio::spawn(Arc::new(committer).run(woken));
+    tokio::spawn(remote.probe());
+    Ok(space)
 }
 
 fn parse_resolve(value: &str) -> Result<(String, IpAddr), String> {

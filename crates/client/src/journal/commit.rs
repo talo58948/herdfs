@@ -43,6 +43,8 @@ pub struct Committer {
     pub reader: Arc<Reader>,
     pub cache: Arc<Cache>,
     pub stats: Arc<Stats>,
+    /// Drops the kernel's pages and attributes of an entry, without waiting for the kernel.
+    pub forget_pages: Box<dyn Fn(EntryId) + Send + Sync>,
 }
 
 impl Committer {
@@ -60,28 +62,35 @@ impl Committer {
         let mut delay = FIRST_RETRY;
         while let Some(job) = self.next(entry).await {
             let attempt = |record| self.attempt(&job.sealed, record);
-            let outcome = match anew(&job.record, attempt).await {
-                Ok(version) => {
+            // Whether the file's bytes may now differ from the journal copy's, which local reads
+            // were served from.
+            let (outcome, differs) = match anew(&job.record, attempt).await {
+                Ok((version, sealed)) => {
                     bump(&self.stats.commits, 1);
                     // Reads go on to the committed version once the journal drops the copy, as
                     // do offline opens and appends (C1, C12).
                     let open = |entry: &EntryId| self.journal.is_open(entry);
                     self.reader.follow(entry, (Some(version.clone()), true), open);
                     delay = FIRST_RETRY;
-                    Outcome::Committed(version)
+                    // A retry may be answered with the head another client committed since.
+                    (Outcome::Committed(version), !sealed)
                 }
-                Err(err) if err.is_not_found() => Outcome::Dropped,
+                Err(err) if err.is_not_found() => (Outcome::Dropped, true),
                 Err(err) if err.is_final() => {
                     tracing::warn!(%err, entry = entry.0, "commit rejected; write set aside");
-                    Outcome::Rejected
+                    (Outcome::Rejected, true)
                 }
                 Err(err) => {
                     tracing::warn!(%err, entry = entry.0, ?delay, "commit failed; retrying");
-                    Outcome::Retrying
+                    (Outcome::Retrying, false)
                 }
             };
             let retry = matches!(outcome, Outcome::Retrying);
             self.journal.finish(&job, outcome);
+            // The kernel may hold pages the copy served, which no open file reads any more (C3).
+            if differs {
+                (self.forget_pages)(entry);
+            }
             if retry {
                 let window = self.remote.link.remaining().unwrap_or_default();
                 tokio::time::sleep(window.max(delay)).await;
@@ -102,8 +111,9 @@ impl Committer {
     }
 
     /// Chunks the sealed copy, caching each chunk and uploading those the record's base lacks
-    /// without asking whether the store already has them (S6), and commits.
-    async fn attempt(&self, sealed: &Path, record: Record) -> Result<Version> {
+    /// without asking whether the store already has them (S6), and commits. Returns the version
+    /// the authority answers with, and whether it holds the sealed bytes.
+    async fn attempt(&self, sealed: &Path, record: Record) -> Result<(Version, bool)> {
         let base = record.base.iter().flat_map(|base| &base.chunks);
         let base: HashSet<ChunkId> = base.map(|chunk| chunk.id).collect();
         let sealed = File::open(sealed)?;
@@ -128,17 +138,19 @@ impl Committer {
         }
         // A splitter that died early would otherwise commit a truncated file.
         splitter.await.map_err(io::Error::other)?;
-        self.remote.commit(&record, refs).await
+        let version = self.remote.commit(&record, refs.clone()).await?;
+        let sealed = version.chunks == refs;
+        Ok((version, sealed))
     }
 }
 
 /// Sends `record` through `attempt`, and once more without its base if the authority no longer
 /// retains it (`Conflict` on an unguarded commit), which uploads every chunk: retention never
 /// sets a write aside (C4a). A second `Conflict` is final.
-pub(super) async fn anew<F, Fut>(record: &Record, attempt: F) -> Result<Version>
+pub(super) async fn anew<T, F, Fut>(record: &Record, attempt: F) -> Result<T>
 where
     F: Fn(Record) -> Fut,
-    Fut: Future<Output = Result<Version>>,
+    Fut: Future<Output = Result<T>>,
 {
     match attempt(record.clone()).await {
         Err(Error::Api(error)) if error.code == ErrorCode::Conflict && record.base.is_some() => {
