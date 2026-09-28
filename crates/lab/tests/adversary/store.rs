@@ -15,7 +15,7 @@ use serde_json::json;
 use crate::{ALICE, BOB, EACCES, Reply, Scene, assert_same, contains, errno, set_acl};
 
 /// The grant TTL of the contract.
-const GRANT_TTL_MS: u64 = 5 * 60 * 1000;
+const GRANT_TTL_MS: u64 = 60 * 1000;
 
 /// The URLs of a grant and how long they stay valid.
 fn grants(reply: &Reply) -> Result<(Vec<String>, u64)> {
@@ -138,7 +138,7 @@ fn revocation_stops_new_grants_at_once() -> Result<()> {
 
 // contract: S2, S4
 #[test]
-#[ignore = "slow: waits out the 5-minute grant TTL, which the authority does not let tests shorten"]
+#[ignore = "slow: waits out the 60 s grant TTL"]
 fn an_outstanding_grant_url_dies_with_its_ttl() -> Result<()> {
     let Some(scene) = Scene::start()? else {
         return Ok(());

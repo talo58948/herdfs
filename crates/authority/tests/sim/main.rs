@@ -10,11 +10,13 @@
     reason = "helpers outside #[test] fns are test code too"
 )]
 
+mod access;
 mod apply;
 mod check;
 mod choose;
 mod content;
 mod model;
+mod retention;
 mod steps;
 mod versions;
 
@@ -144,9 +146,13 @@ impl Sim {
             0..=2 => self.restart(),
             3 | 4 => self.new_space(),
             5 => self.deep_rename(),
-            6..=25 => self.make(),
-            26..=30 => self.remove(),
-            31..=39 => self.rename(),
+            6..=22 => self.make(),
+            23..=25 => self.collect(),
+            26..=28 => self.remove(),
+            29 => self.purge(),
+            30 => self.late_reader(),
+            31..=38 => self.rename(),
+            39 => self.delete_space(),
             40..=42 => self.set_attr(),
             43..=59 => self.commit(),
             60..=63 => self.race(),

@@ -147,6 +147,66 @@ impl Sim {
         );
     }
 
+    /// Grants a user read on a file with history, then has them read it:
+    /// versions from before the grant stay hidden (S8).
+    pub fn late_reader(&mut self) {
+        let space = self.space();
+        let files = self.model.spaces.get(&space).map(|known| known.nodes.iter());
+        let files = files
+            .into_iter()
+            .flatten()
+            .filter(|(_, node)| node.history.len() > 1);
+        let files: Vec<_> = files
+            .map(|(path, node)| (path.clone(), node.id, node.history[0]))
+            .collect();
+        let Some((path, entry, oldest)) = self.rng.pick(&files) else {
+            return;
+        };
+        let (who, principal) = [(1, "user:bob"), (2, "user:carol"), (2, "group:eng")][self.rng.below(3)];
+        let (space, principal) = (space.clone(), principal.to_owned());
+        let grant = Request::SetAcl {
+            space: space.clone(),
+            path: path.clone(),
+            principal,
+            perm: Some(Perm::Read),
+        };
+        self.send(0, &grant);
+        self.send(
+            who,
+            &Request::History {
+                space: space.clone(),
+                path,
+            },
+        );
+        self.send(
+            who,
+            &Request::Grant {
+                space,
+                entry,
+                version: oldest,
+                chunks: vec![0],
+            },
+        );
+    }
+
+    pub fn purge(&mut self) {
+        let (who, space) = (self.actor(), self.space());
+        let path = self.existing_path(&space);
+        self.send(who, &Request::Purge { space, path });
+    }
+
+    /// Deletes a space; space `s` comes back at once, empty, so the run goes on.
+    pub fn delete_space(&mut self) {
+        let (who, space) = (self.actor(), self.space());
+        let deleted = self
+            .exec(who, &Request::DeleteSpace { space: space.clone() })
+            .is_ok();
+        if deleted && space == "s" {
+            self.exec(0, &Request::CreateSpace { space }).unwrap();
+            self.let_auditor_in("s");
+        }
+    }
+
     pub fn set_acl(&mut self) {
         let who = if self.rng.chance(70) { 0 } else { self.actor() };
         let space = self.space();

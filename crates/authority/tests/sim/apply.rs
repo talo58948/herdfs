@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use herdfs_authority::{Outcome, Principal};
 use herdfs_core::{
     SpacePath,
-    proto::{EntryId, Kind, Perm, Request, Response},
+    proto::{EntryId, Kind, Perm, Request, Response, VersionId},
 };
 
 use crate::model::{Model, Node, Space};
@@ -25,7 +25,7 @@ impl Model {
     /// Checks the reply to an acknowledged `request` and applies its effects.
     pub fn apply(&mut self, who: &Principal, request: &Request, outcome: &Outcome, now_ms: i64) {
         let reply = match outcome {
-            Outcome::Sign { chunks } => return self.check_grant(request, chunks),
+            Outcome::Sign { chunks } => return self.check_grant(who, request, chunks),
             Outcome::Reply(reply) => reply,
         };
         match request {
@@ -39,7 +39,7 @@ impl Model {
                 );
             }
             Request::CreateSpace { space } => {
-                let acl = BTreeMap::from([((SpacePath::root(), who.user.clone()), Perm::Admin)]);
+                let acl = BTreeMap::from([((SpacePath::root(), who.user.clone()), (Perm::Admin, now_ms))]);
                 self.spaces.insert(
                     space.clone(),
                     Space {
@@ -85,8 +85,41 @@ impl Model {
                 );
             }
             Request::History { space, path } => {
-                let versions = self.history(&self.spaces[space].nodes[path]);
+                let (node, since) = (
+                    &self.spaces[space].nodes[path],
+                    self.readable_since(space, path, who),
+                );
+                let mut versions = self.history(node);
+                versions.retain(|version| {
+                    node.history.last() == Some(&version.id) || version.created_ms >= since
+                });
                 assert_eq!(*reply, Response::History { versions });
+                // contract: S8 — history before the caller's access stays hidden, except the head.
+                let Response::History { versions } = reply else {
+                    unreachable!()
+                };
+                let hidden = versions
+                    .iter()
+                    .find(|version| node.history.last() != Some(&version.id) && version.created_ms < since);
+                assert!(hidden.is_none(), "{} saw {hidden:?}", who.user);
+            }
+            Request::Purge { space, path } => {
+                assert_eq!(*reply, Response::Done);
+                let history = &mut self.node_mut(space, path).history;
+                let purged = history
+                    .drain(..history.len().saturating_sub(1))
+                    .collect::<Vec<_>>();
+                self.forget(&purged);
+            }
+            Request::DeleteSpace { space } => {
+                assert_eq!(*reply, Response::Done);
+                let deleted = self.spaces.remove(space).expect("space exists");
+                let versions: Vec<_> = deleted
+                    .nodes
+                    .values()
+                    .flat_map(|node| node.history.clone())
+                    .collect();
+                self.forget(&versions);
             }
             Request::Grant { .. } => panic!("Grant answered {reply:?}"),
             Request::Create { space, path, mode } => {
@@ -139,9 +172,10 @@ impl Model {
                 assert_eq!(*reply, Response::Done);
                 let acl = &mut self.spaces.get_mut(space).expect("space exists").acl;
                 let key = (path.clone(), principal.clone());
+                // A changed perm keeps the row's grant time (S8).
                 match perm {
-                    Some(perm) => acl.insert(key, *perm),
-                    None => acl.remove(&key),
+                    Some(perm) => acl.entry(key).or_insert((*perm, now_ms)).0 = *perm,
+                    None => drop(acl.remove(&key)),
                 };
             }
         }
@@ -175,9 +209,13 @@ impl Model {
     fn remove(&mut self, space: &str, path: &SpacePath) {
         let nodes = &mut self.spaces.get_mut(space).expect("space exists").nodes;
         let node = nodes.remove(path).expect("node exists");
-        // Versions go with their entry, and so do the request ids that made them.
-        self.commits.retain(|_, version| !node.history.contains(version));
-        self.acked.retain(|version, _| !node.history.contains(version));
+        self.forget(&node.history);
+    }
+
+    /// Versions are gone, and so are the request ids that made them.
+    pub fn forget(&mut self, gone: &[VersionId]) {
+        self.commits.retain(|_, version| !gone.contains(version));
+        self.acked.retain(|version, _| !gone.contains(version));
     }
 
     fn rename(&mut self, space: &str, from: &SpacePath, to: &SpacePath, now_ms: i64) {

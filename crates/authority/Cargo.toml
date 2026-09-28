@@ -11,10 +11,11 @@ anyhow.workspace = true
 axum.workspace = true
 blake3.workspace = true
 clap.workspace = true
+jiff.workspace = true
 jsonwebtoken.workspace = true
 reqwest.workspace = true
 rusqlite = { workspace = true, features = ["fallible_uint"] }
-rusty-s3.workspace = true
+rusty-s3 = { workspace = true, features = ["xml"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

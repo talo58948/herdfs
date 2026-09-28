@@ -269,7 +269,7 @@ impl Sim {
         if want.is_ok() {
             self.model
                 .uploads
-                .insert((principal.user.clone(), chunk.id), chunk.len);
+                .insert((principal.user.clone(), chunk.id), (chunk.len, self.now_ms));
         }
         chunk
     }

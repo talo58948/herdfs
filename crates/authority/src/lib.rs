@@ -3,6 +3,7 @@
 //! [`server`] puts it behind HTTP.
 
 mod acl;
+mod collect;
 mod db;
 mod namespace;
 pub mod server;
@@ -11,6 +12,7 @@ mod versions;
 
 use std::path::Path;
 
+pub use collect::{Collected, Policy};
 use herdfs_core::{
     ChunkId, ChunkRef,
     proto::{self, ErrorCode, Kind, Request, Response},
@@ -145,6 +147,8 @@ impl Call<'_> {
             } => self.commit(&space, entry, &request_id, base, guarded, &chunks, mtime_ms)?,
             Request::History { space, path } => self.history(&space, &path)?,
             Request::Restore { space, path, version } => self.restore(&space, &path, version)?,
+            Request::Purge { space, path } => self.purge(&space, &path)?,
+            Request::DeleteSpace { space } => self.delete_space(&space)?,
             Request::SetAcl {
                 space,
                 path,

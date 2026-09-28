@@ -1,7 +1,10 @@
-//! The authority over HTTP: bearer auth, the RPC endpoint, chunk uploads and
-//! presigned download URLs.
+//! The authority over HTTP: bearer auth, the RPC endpoint, chunk uploads,
+//! presigned download URLs, and the store sweep after each collection.
 
 mod auth;
+mod sweep;
+
+pub use sweep::Swept;
 
 use std::{
     sync::{Arc, Mutex, PoisonError},
@@ -25,12 +28,10 @@ use herdfs_core::{
     proto::{self, ErrorCode, Request, Response},
 };
 use rusty_s3::{Bucket, Credentials, S3Action};
+use tokio::sync::RwLock;
 
 use crate::{Authority, Outcome};
 
-/// How long a presigned chunk URL stays valid.
-const GRANT_TTL_MS: u64 = 5 * 60 * 1000;
-const GRANT_TTL: Duration = Duration::from_millis(GRANT_TTL_MS);
 /// Commit bodies list every chunk: 32 MiB holds about 350,000, a 350 GiB file.
 const RPC_BODY_LIMIT: usize = 32 << 20;
 /// Uploads are written through at once, so the signed PUT and the request share this deadline.
@@ -43,6 +44,11 @@ pub struct Server {
     credentials: Credentials,
     http: reqwest::Client,
     verifier: auth::Verifier,
+    /// How long a presigned chunk URL stays valid.
+    grant_ttl: Duration,
+    /// Held shared by each upload and alone by the sweep while it deletes, so
+    /// the sweep never deletes bytes an upload has just written.
+    uploading: RwLock<()>,
 }
 
 impl Server {
@@ -55,6 +61,7 @@ impl Server {
         credentials: Credentials,
         issuer: String,
         audience: String,
+        grant_ttl: Duration,
     ) -> Self {
         Self {
             authority: Mutex::new(authority),
@@ -63,10 +70,12 @@ impl Server {
             credentials,
             http: reqwest::Client::new(),
             verifier: auth::Verifier::new(issuer, audience),
+            grant_ttl,
+            uploading: RwLock::new(()),
         }
     }
 
-    pub fn router(self) -> Router {
+    pub fn router(self: &Arc<Self>) -> Router {
         Router::new()
             .route("/v1/rpc", post(rpc).layer(DefaultBodyLimit::max(RPC_BODY_LIMIT)))
             .route(
@@ -74,7 +83,7 @@ impl Server {
                 put(upload).layer(DefaultBodyLimit::max(MAX_CHUNK)),
             )
             .route("/v1/health", get(|| async { "ok" }))
-            .with_state(Arc::new(self))
+            .with_state(Arc::clone(self))
     }
 
     /// Runs `work` on the authority off the async runtime.
@@ -95,7 +104,7 @@ impl Server {
         let url = |id| {
             self.public_bucket
                 .get_object(Some(&self.credentials), &chunk_key(id))
-                .sign(GRANT_TTL)
+                .sign(self.grant_ttl)
         };
         chunks.iter().map(|&id| url(id).into()).collect()
     }
@@ -128,7 +137,7 @@ async fn rpc(
         Outcome::Reply(reply) => reply,
         Outcome::Sign { chunks } => Response::Grants {
             urls: server.sign(&chunks),
-            ttl_ms: GRANT_TTL_MS,
+            ttl_ms: u64::try_from(server.grant_ttl.as_millis()).unwrap_or(u64::MAX),
         },
     };
     Ok(Json(reply))
@@ -152,6 +161,7 @@ async fn upload(
     }
     let len = u32::try_from(bytes.len()).map_err(|_| invalid("chunk too large"))?;
     let chunk = ChunkRef { id, len };
+    let _uploading = server.uploading.read().await;
     server
         .run(move |authority, now_ms| authority.record_upload(&who, &space, chunk, now_ms))
         .await?;

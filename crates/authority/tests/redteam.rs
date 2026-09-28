@@ -94,10 +94,12 @@ async fn serve_with_keys(keys: Arc<Mutex<Vec<Value>>>) -> (String, String, tempf
         Credentials::new("key", "secret"),
         issuer.clone(),
         "herdfs".into(),
+        std::time::Duration::from_secs(60),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let authority = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, server.router()).await });
+    let router = std::sync::Arc::new(server).router();
+    tokio::spawn(async move { axum::serve(listener, router).await });
     (issuer, authority, dir)
 }
 

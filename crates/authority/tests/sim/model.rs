@@ -16,8 +16,8 @@ pub struct Model {
     pub versions: BTreeMap<VersionId, Version>,
     /// Every entry id ever handed out.
     pub entry_ids: BTreeSet<EntryId>,
-    /// Each chunk a user uploaded, with its length.
-    pub uploads: BTreeMap<(String, ChunkId), u32>,
+    /// Each chunk a user uploaded: its length, and when.
+    pub uploads: BTreeMap<(String, ChunkId), (u32, i64)>,
     /// `(user, request id)` of each commit whose entry still exists.
     pub commits: BTreeMap<(String, String), VersionId>,
     /// Acknowledged commits, with their space and entry.
@@ -29,7 +29,8 @@ pub struct Model {
 #[derive(Clone, Default)]
 pub struct Space {
     pub nodes: BTreeMap<SpacePath, Node>,
-    pub acl: BTreeMap<(SpacePath, String), Perm>,
+    /// Each row's perm and the time it was first granted.
+    pub acl: BTreeMap<(SpacePath, String), (Perm, i64)>,
 }
 
 #[derive(Clone)]
@@ -57,22 +58,6 @@ fn is_space_name(name: &str) -> bool {
 impl Model {
     pub fn space(&self, space: &str) -> Result<&Space, ErrorCode> {
         self.spaces.get(space).ok_or(ErrorCode::NotFound)
-    }
-
-    pub fn perm(&self, space: &str, path: &SpacePath, who: &Principal) -> Option<Perm> {
-        let groups: Vec<_> = who.groups.iter().map(|group| format!("group:{group}")).collect();
-        let acl = &self.spaces.get(space)?.acl;
-        acl.iter()
-            .filter(|((at, principal), _)| {
-                path.is_within(at) && (*principal == who.user || groups.contains(principal))
-            })
-            .map(|(_, perm)| *perm)
-            .max()
-    }
-
-    pub fn require(&self, who: &Principal, space: &str, path: &SpacePath, need: Perm) -> Outcome {
-        self.space(space)?;
-        ensure(self.perm(space, path, who) >= Some(need), ErrorCode::Denied)
     }
 
     pub fn node(&self, space: &str, path: &SpacePath) -> Result<&Node, ErrorCode> {
@@ -151,6 +136,7 @@ impl Model {
                 let (path, node) = self.node_by_id(space, *entry).ok_or(NotFound)?;
                 self.require(who, space, path, Perm::Read)?;
                 ensure(node.history.contains(version), NotFound)?;
+                ensure(self.visible(space, path, node, *version, who), Denied)?;
                 let count = self.versions[version].chunks.len();
                 ensure(chunks.iter().all(|&index| (index as usize) < count), Invalid)
             }
@@ -186,8 +172,15 @@ impl Model {
             } => self.commit_outcome(who, space, *entry, request_id, *base, *guarded, chunks),
             Request::Restore { space, path, version } => {
                 self.require(who, space, path, Perm::Write)?;
-                ensure(self.node(space, path)?.history.contains(version), NotFound)
+                let node = self.node(space, path)?;
+                ensure(node.history.contains(version), NotFound)?;
+                ensure(self.visible(space, path, node, *version, who), Denied)
             }
+            Request::Purge { space, path } => {
+                self.require(who, space, path, Perm::Write)?;
+                self.node(space, path).map(drop)
+            }
+            Request::DeleteSpace { space } => self.require(who, space, &SpacePath::root(), Perm::Admin),
             Request::SetAcl {
                 space,
                 path,
@@ -201,22 +194,6 @@ impl Model {
                 ensure(name.is_some_and(|name| !name.is_empty()), Invalid)
             }
         }
-    }
-
-    /// Uploads need write on some path of the space.
-    pub fn upload_outcome(&self, who: &Principal, space: &str) -> Outcome {
-        self.require_somewhere(who, space, Perm::Write)
-    }
-
-    fn require_somewhere(&self, who: &Principal, space: &str, need: Perm) -> Outcome {
-        let acl = &self.space(space)?.acl;
-        let mine = |principal: &String| {
-            *principal == who.user || who.groups.iter().any(|g| *principal == format!("group:{g}"))
-        };
-        let holds = acl
-            .iter()
-            .any(|((_, principal), perm)| mine(principal) && *perm >= need);
-        ensure(holds, ErrorCode::Denied)
     }
 
     fn new_space(&self, name: &str) -> Outcome {
