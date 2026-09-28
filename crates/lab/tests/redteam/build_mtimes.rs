@@ -25,7 +25,6 @@ const EDIT_AFTER: Duration = Duration::from_millis(50);
 /// file's time of last write and make would rebuild; on a local directory it does.
 // contract: none (docs/architecture.md: mtime is stored and reported; only atime and ctime are out of v0)
 #[test]
-#[ignore = "REDTEAM5: commit time as mtime makes an older write look newer, so make skips a rebuild"]
 fn make_rebuilds_a_target_whose_source_changed_after_it() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());

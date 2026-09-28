@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 use std::{ffi::OsString, path::PathBuf};
 
 use fuser::{Errno, FileAttr, INodeNo, ReplyDirectory};
+use herdfs_core::{SpacePath, proto::EntryId};
 
-use super::{PERMISSIONS, Space, TTL};
+use super::{Known, PERMISSIONS, Space, TTL};
 use crate::{Result, lock};
 
 pub struct AttrChange {
@@ -97,7 +98,10 @@ impl Space {
     /// Unlinks a file or symlink, or removes an empty directory.
     pub async fn remove(self: Arc<Self>, parent: INodeNo, name: OsString) -> Result<()> {
         let path = self.located_child(parent, &name).await?;
+        let (removed, _) = self.entry(&path).await?;
         self.remote.remove(path.clone()).await?;
+        // Its changes are moot: deletion wins (C10).
+        self.journal.discard(removed.id);
         self.stale(&path);
         lock(&self.paths).retain(|_, (known, ..)| *known != path);
         Ok(())
@@ -107,6 +111,7 @@ impl Space {
     pub async fn rename(self: Arc<Self>, from: (INodeNo, OsString), to: (INodeNo, OsString)) -> Result<()> {
         let from = self.located_child(from.0, &from.1).await?;
         let to = self.located_child(to.0, &to.1).await?;
+        self.settle(&from).await?;
         self.remote.rename(from.clone(), to.clone()).await?;
         self.stale(&from);
         self.stale(&to);
@@ -117,6 +122,23 @@ impl Space {
             } else if let Some(moved) = known.rebase(&from, &to) {
                 *known = moved;
             }
+        }
+        Ok(())
+    }
+
+    /// Commits the changes pending at or below `path` before a rename moves them, as fsync does,
+    /// so that other clients see the old bytes there or the new, whole (C3, C7): rsync, git and
+    /// editors rename a file they closed over the one it replaces.
+    async fn settle(&self, path: &SpacePath) -> Result<()> {
+        let within =
+            |(ino, (known, ..)): (&INodeNo, &Known)| known.is_within(path).then(|| self.entry_id(*ino));
+        let entries: Vec<EntryId> = lock(&self.paths).iter().filter_map(within).collect();
+        for &entry in &entries {
+            tokio::task::block_in_place(|| self.journal.seal(entry))?;
+            self.journal.urge(entry);
+        }
+        for entry in entries {
+            self.committed(entry).await?;
         }
         Ok(())
     }

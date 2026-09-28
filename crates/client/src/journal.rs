@@ -37,7 +37,8 @@ pub struct Record {
     pub entry: EntryId,
     pub seal: u64,
     pub base: Option<Version>,
-    /// A modification time set on the file, which the commit keeps (`cp -p`).
+    /// The file's modification time, which the commit keeps: the time of its last write on
+    /// this client, or one set on it (`cp -p`).
     pub mtime_ms: Option<i64>,
     /// Lets the authority answer a retried commit with the first result.
     pub request_id: String,
@@ -61,8 +62,6 @@ struct Tracked {
     working: Option<Arc<File>>,
     /// The version the copies started from, then each version they committed.
     base: Option<Version>,
-    /// A modification time set since the last seal, for the next one to keep.
-    mtime: Option<i64>,
     /// The latest seal the committer has not settled, which newer seals replace, and its sealed
     /// copy, which reads see without a working copy.
     pending: Option<(Record, Arc<File>)>,
@@ -193,7 +192,7 @@ impl Journal {
             entry,
             seal,
             base: tracked.base.clone(),
-            mtime_ms: tracked.mtime.take(),
+            mtime_ms: working.metadata()?.modified().ok().map(crate::unix_ms),
             request_id: format!("{:032x}", rand::random::<u128>()),
         };
         self.queue(tracked, record.clone(), working);
@@ -213,6 +212,26 @@ impl Journal {
             // Fails only once the committer has stopped, at shutdown.
             let _ = self.wake.send(entry);
         }
+    }
+
+    /// Drops the entry's changes, which removing it made moot: deletion wins (C10). An fsync
+    /// waiting for them returns, as it would for a removed local file.
+    pub fn discard(&self, entry: EntryId) {
+        let mut entries = lock(&self.entries);
+        let Some(tracked) = entries.get_mut(&entry) else {
+            return;
+        };
+        if let Some((record, _)) = tracked.pending.take() {
+            let _ = fs::remove_file(self.record_path(entry));
+            // A commit under way still reads it; settling it removes it.
+            if tracked.reading != Some(record.seal) {
+                let _ = fs::remove_file(self.sealed_path(entry, record.seal));
+            }
+            tracked.attempts.send_replace((record.seal, true));
+        }
+        tracked.working = None;
+        let _ = fs::remove_file(self.working_path(entry));
+        self.tidy(&mut entries, entry);
     }
 
     /// Forgets an entry nobody has open once nothing is left to commit, with its working copy.

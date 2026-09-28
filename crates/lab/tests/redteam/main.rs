@@ -1,4 +1,4 @@
-//! Red team: confirmed contract breaks, each reduced to one failing test. Rounds 1 to 4 are fixed
+//! Red team: confirmed contract breaks, each reduced to one failing test. Rounds 1 to 5 are fixed
 //! and run. Skips until the binaries are built.
 
 mod agents;
