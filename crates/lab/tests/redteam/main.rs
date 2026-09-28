@@ -1,12 +1,16 @@
-//! Red team, round 1: confirmed contract breaks, each reduced to one failing test. They are
-//! ignored so main stays green; each runs once its bug is fixed. Skips until the binaries are
-//! built.
+//! Red team: confirmed contract breaks, each reduced to one failing test. Round 1's are fixed and
+//! run; round 2's are ignored (`REDTEAM2`) so main stays green, and each runs once its bug is
+//! fixed. Skips until the binaries are built.
 
+mod agents;
 mod creates;
 mod journal;
 mod mtime;
 mod offline;
+mod offline_heads;
 mod open_handles;
+mod paths;
+mod versions;
 
 use std::fs::File;
 use std::io::{self, Write};

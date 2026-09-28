@@ -14,6 +14,7 @@ use std::time::Duration;
 use axum::{Json, Router, http::StatusCode, routing::get};
 use http::{KEY, KEY_X, Lab, PUBLIC_S3, ROGUE_KEY, now};
 use herdfs_authority::{Authority, server::Server};
+use herdfs_core::ChunkRef;
 use herdfs_core::proto::{ErrorCode, Request};
 use reqwest::Url;
 use rusty_s3::{Bucket, Credentials, UrlStyle};
@@ -164,4 +165,69 @@ async fn a_commit_of_a_large_file_is_accepted() {
         .await
         .unwrap();
     assert_eq!(reply.status(), StatusCode::OK, "{}", reply.text().await.unwrap());
+}
+
+/// Files in the space the fork test copies.
+const FORKED_FILES: usize = 5;
+/// Chunks per large file: as many as one commit body holds, about a 350 GiB file.
+const CHUNKS_PER_FILE: usize = 350_000;
+
+/// Repro: five one-chunk files, forked; then each file gets a version of 350,000 one-MiB chunks
+/// (one uploaded chunk, repeated), and the space, still six entries, is forked again. The fork
+/// copies every head's chunk list, 30 MB of JSON per file here, so its time grows with how much
+/// data the files hold: the second fork takes hundreds of times the first.
+// contract: C13
+#[test]
+#[ignore = "REDTEAM2: a fork's time grows with the length of every head's chunk list"]
+fn a_forks_time_does_not_grow_with_the_size_of_its_files() {
+    let mut fx = Fixture::new();
+    let chunk = fx.upload(&alice(), &vec![7; 1 << 20]).unwrap();
+    let entries: Vec<_> = (0..FORKED_FILES)
+        .map(|file| fx.create(&alice(), &format!("f{file}")).unwrap().id)
+        .collect();
+    let fork_after = |fx: &mut Fixture, chunks: &[ChunkRef], name: &str| {
+        for (file, entry) in entries.iter().enumerate() {
+            let request_id = format!("{name}-{file}");
+            fx.commit(&alice(), *entry, &request_id, None, false, chunks)
+                .unwrap();
+        }
+        let fork = Request::Fork {
+            space: SPACE.into(),
+            name: name.into(),
+        };
+        let started = std::time::Instant::now();
+        fx.call(&alice(), fork).unwrap();
+        started.elapsed()
+    };
+    let small = fork_after(&mut fx, &[chunk], "small");
+    let large = fork_after(&mut fx, &vec![chunk; CHUNKS_PER_FILE], "large");
+    // Ten times, with a floor for a fork too quick to time well.
+    let bound = (small * 10).max(Duration::from_millis(100));
+    assert!(
+        large <= bound,
+        "forking the same 6 entries took {small:?} with 1-chunk files, {large:?} with 350 GiB ones"
+    );
+}
+
+/// Repro: as round 1's large-commit test, with 400,000 one-MiB chunks, a 390 GiB file. The RPC
+/// body limit rose to 32 MiB, about 350,000 chunks, so this commit is still refused as `Invalid`,
+/// which the client takes as final: the closed write is set aside and never commits.
+// contract: C4a
+#[tokio::test]
+#[ignore = "REDTEAM2: a file over about 350 GiB can never commit"]
+async fn a_commit_of_a_file_over_350_gib_is_accepted() {
+    let lab = Lab::start().await;
+    let alice = lab.user("alice");
+    lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
+        .await;
+    let create = json!({"op": "create", "space": "team", "path": "f", "mode": 420});
+    let (_, created) = lab.rpc(&alice, &create).await;
+    let chunk = vec![7; 1 << 20];
+    let id = herdfs_core::ChunkId::of(&chunk);
+    assert_eq!(lab.upload(&alice, "team", id, chunk).await.0, StatusCode::OK);
+    let chunks = vec![json!({"id": id.to_string(), "len": 1 << 20}); 400_000];
+    let commit = json!({"op": "commit", "space": "team", "entry": created["entry"]["id"],
+                        "request_id": "big", "base": null, "guarded": false, "chunks": chunks});
+    let (status, reply) = lab.rpc(&alice, &commit).await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
 }
