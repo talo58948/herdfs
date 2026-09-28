@@ -14,7 +14,8 @@ pub struct Policy {
     pub versions: u32,
     /// Versions younger than this are kept.
     pub max_age_ms: i64,
-    /// Uploads younger than this stay live, so a commit may still use them.
+    /// A commit's uploads stay live until its newest is older than this, so the commit may
+    /// still use them.
     pub grace_ms: i64,
 }
 
@@ -36,6 +37,11 @@ const PRUNE: &str = "DELETE FROM versions WHERE id IN (
         FROM versions v JOIN entries e ON e.id = v.entry)
     WHERE newest > ?1 AND created_ms < ?2 AND id IS NOT head)";
 
+/// Uploads for commits whose newest upload is older than `?1`. A commit's uploads go together,
+/// so a file that takes longer than the grace to upload keeps its first chunks (C4a).
+const STALE_UPLOADS: &str = "DELETE FROM uploads WHERE (principal, request_id) IN (
+    SELECT principal, request_id FROM uploads GROUP BY principal, request_id HAVING max(at_ms) < ?1)";
+
 impl Authority {
     /// Prunes versions outside retention, drops chunk lists, uploads and request
     /// ids that nothing needs, and returns the chunks still live, across every space.
@@ -46,7 +52,7 @@ impl Authority {
             "DELETE FROM manifests WHERE hash NOT IN (SELECT manifest FROM versions)",
             [],
         )?;
-        tx.execute("DELETE FROM uploads WHERE at_ms < ?1", [now_ms - policy.grace_ms])?;
+        tx.execute(STALE_UPLOADS, [now_ms - policy.grace_ms])?;
         let forgotten = now_ms
             .saturating_sub(policy.max_age_ms)
             .saturating_sub(policy.grace_ms);

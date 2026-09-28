@@ -67,7 +67,10 @@ impl Attacker {
     }
 
     pub(crate) fn upload(&self, token: Option<&str>, chunk: &ChunkRef, bytes: &[u8]) -> Result<Reply> {
-        let url = format!("{}/v1/spaces/{SPACE}/chunks/{}", self.authority, chunk.id);
+        let url = format!(
+            "{}/v1/spaces/{SPACE}/commits/attack/chunks/{}",
+            self.authority, chunk.id
+        );
         self.send(authorized(self.http.put(url).body(bytes.to_vec()), token))
     }
 

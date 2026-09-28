@@ -196,7 +196,7 @@ fn upload(lab: &Lab, user: &str, space: &str, bytes: &[u8]) -> Result<Vec<ChunkR
     for chunk in chunk::split(bytes) {
         let (chunk, bytes) = chunk?;
         let url = format!(
-            "{}/v1/spaces/{space}/chunks/{}",
+            "{}/v1/spaces/{space}/commits/erasure/chunks/{}",
             lab.authority_url(ALICE),
             chunk.id
         );

@@ -24,7 +24,7 @@ Plugins are separate programs that use a mount like any other program (the agent
 
 **Write.** A file opened for writing gets a local journal copy. The copy is materialized from the head version unless the open truncates or the file is new. On `close`, the client fsyncs the journal copy and returns. A background committer then chunks the copy, uploads chunks, and sends `Commit`. `fsync` waits for that commit and returns `EIO` if it fails. Until a commit is acknowledged, this client reads its own journal copy (read-your-writes).
 
-**Uploads go through the authority.** `PUT /v1/spaces/{space}/chunks/{id}` carries at most 4 MiB. The authority verifies the hash, always writes the object, and records `(principal, id)`. A commit may reference only chunks from its `base` version (which the caller must be able to read) or chunks that caller uploaded. So nobody can learn whether bytes exist elsewhere (S7), and nobody can claim a chunk they never had.
+**Uploads go through the authority.** `PUT /v1/spaces/{space}/commits/{request_id}/chunks/{id}` carries at most 4 MiB. The authority verifies the hash, always writes the object, and records `(principal, id)` under the commit it is for. A commit may reference only chunks from its `base` version (which the caller must be able to read) or chunks that caller uploaded. So nobody can learn whether bytes exist elsewhere (S7), and nobody can claim a chunk they never had.
 
 **Consistency.** The authority orders all commits. Unguarded commits make the last one the head; every version stays in history (C5). Guarded commits (`guarded: true`) fail with `Conflict` unless the head is still `base` (C6); in v0 they are API-only. Clients cache attributes and listings for 1 s. Every `open` asks the authority for the current head (close-to-open, C2).
 
@@ -39,10 +39,10 @@ Plugins are separate programs that use a mount like any other program (the agent
 The authority keeps each entry's last N versions, head included, plus any younger than T days (`--retain-versions`, `--retain-days`); the head is never pruned. A collector runs every `--gc-every` (10 min):
 
 1. It prunes versions that fall outside retention.
-2. It deletes chunk lists and upload records nothing retained uses.
+2. It deletes chunk lists nothing retained uses, and a commit's upload records once its newest upload is older than the grace, so a file that takes longer than the grace to upload keeps its first chunks.
 3. It sweeps the bucket: a chunk object that no retained version references, and that is older than `--gc-grace` (1 h), is deleted.
 
-The grace period must exceed the grant TTL and the upload-to-commit window, so in-flight uploads and outstanding URLs never race the sweep. `Purge` and `DeleteSpace` make history and whole spaces eligible at once. Chunks are shared across files, spaces and forks, so the live set is global.
+The grace period must exceed the grant TTL and the time between one upload and the next or the commit, so in-flight uploads and outstanding URLs never race the sweep. `Purge` and `DeleteSpace` make history and whole spaces eligible at once. Chunks are shared across files, spaces and forks, so the live set is global.
 
 Access to history follows S8: each ACL row records the highest committed version ID when it was granted, and a principal sees only later versions plus the head unless it is an admin.
 

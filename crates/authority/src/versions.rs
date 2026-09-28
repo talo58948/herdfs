@@ -165,16 +165,18 @@ impl Call<'_> {
     }
 
     /// Uploads need write somewhere in the space: they are only useful to commit.
-    pub(crate) fn record_upload(&self, space: &str, chunk: ChunkRef) -> Result<()> {
+    pub(crate) fn record_upload(&self, space: &str, request_id: &str, chunk: ChunkRef) -> Result<()> {
         self.require_somewhere(space, Perm::Write)?;
         self.db
             .prepare_cached(
-                "INSERT OR REPLACE INTO uploads (principal, chunk, len, at_ms) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR REPLACE INTO uploads (principal, chunk, len, request_id, at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
             )?
             .execute(params![
                 self.who.user,
                 chunk.id.to_string(),
                 chunk.len,
+                request_id,
                 self.now_ms
             ])?;
         Ok(())

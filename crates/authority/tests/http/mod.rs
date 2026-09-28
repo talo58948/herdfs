@@ -200,7 +200,8 @@ impl Lab {
     }
 
     pub async fn upload(&self, token: &str, space: &str, id: ChunkId, body: Vec<u8>) -> (StatusCode, Value) {
-        let url = format!("{}/v1/spaces/{space}/chunks/{id}", self.url);
+        // One commit per upload, so each upload ages on its own.
+        let url = format!("{}/v1/spaces/{space}/commits/{id}/chunks/{id}", self.url);
         let reply = self
             .http
             .put(url)

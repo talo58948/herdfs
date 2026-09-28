@@ -79,7 +79,7 @@ impl Server {
         Router::new()
             .route("/v1/rpc", post(rpc).layer(DefaultBodyLimit::max(RPC_BODY_LIMIT)))
             .route(
-                "/v1/spaces/{space}/chunks/{id}",
+                "/v1/spaces/{space}/commits/{request_id}/chunks/{id}",
                 put(upload).layer(DefaultBodyLimit::max(MAX_CHUNK)),
             )
             .route("/v1/health", get(|| async { "ok" }))
@@ -149,7 +149,7 @@ async fn rpc(
 /// caller gets `Unavailable` and uploads again.
 async fn upload(
     State(server): State<Arc<Server>>,
-    Path((space, id)): Path<(String, String)>,
+    Path((space, request_id, id)): Path<(String, String, String)>,
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Response>, Failure> {
@@ -163,7 +163,7 @@ async fn upload(
     let chunk = ChunkRef { id, len };
     let _uploading = server.uploading.read().await;
     server
-        .run(move |authority, now_ms| authority.record_upload(&who, &space, chunk, now_ms))
+        .run(move |authority, now_ms| authority.record_upload(&who, &space, &request_id, chunk, now_ms))
         .await?;
     server.put(id, bytes).await?;
     Ok(Json(Response::Done))
