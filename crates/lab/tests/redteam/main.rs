@@ -40,6 +40,7 @@ mod replayed_commits;
 mod replayed_heads;
 mod revoked_replays;
 mod rewound_reads;
+mod round22_agents;
 mod saved_mtime;
 mod scratch_files;
 mod shared_appends;
