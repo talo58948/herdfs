@@ -1,9 +1,7 @@
-//! F1 and F2: SIGKILL a client mid-write and mid-commit, and the authority while two clients
-//! commit.
+//! F1: SIGKILL a client mid-write and mid-commit.
 
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -29,8 +27,6 @@ const BIG: usize = 32 << 20;
 const KILL_AT: u64 = 16 << 20;
 /// Commits that grow the file in `a_reader_sees_a_file_that_grows_whole`.
 const GROWTHS: usize = 6;
-/// Authority crashes in F2.
-const KILLS: usize = 8;
 
 /// Reads `NAME` whole on the reader's mount, over and over until finished, and fails on any read
 /// that is not exactly one of `versions` (C3).
@@ -245,74 +241,4 @@ fn f1_a_client_killed_before_its_commit_lands_commits_after_restart() -> Result<
     }
     assert_history(&lab, NAME, &[&first, &closed])?;
     watcher.finish()
-}
-
-/// A file a writer closed, and whether its fsync saw the commit.
-struct Written {
-    name: String,
-    bytes: Vec<u8>,
-    acknowledged: bool,
-}
-
-/// Writes new files on `mount`, one at a time and each synced, until `stop`.
-fn write_files(mount: &Path, prefix: &str, stop: &AtomicBool) -> Result<Vec<Written>> {
-    let mut written = Vec::new();
-    while !stop.load(Ordering::Relaxed) {
-        let name = format!("{prefix}-{}.bin", written.len());
-        let bytes = random_bytes(rand::random_range(64 << 10..512 << 10));
-        // Creating a file needs the authority; while it is down, try again.
-        let Ok(mut file) = File::create(mount.join(&name)) else {
-            thread::sleep(Duration::from_millis(50));
-            continue;
-        };
-        file.write_all(&bytes)?;
-        let acknowledged = file.sync_all().is_ok();
-        written.push(Written {
-            name,
-            bytes,
-            acknowledged,
-        });
-    }
-    Ok(written)
-}
-
-// contract: C4b, C3
-#[test]
-fn f2_commits_survive_authority_crashes_around_them() -> Result<()> {
-    let Some(mut lab) = two_clients()? else {
-        return Ok(());
-    };
-    let stop = Arc::new(AtomicBool::new(false));
-    let writers = [WRITER, READER].map(|client| {
-        let (mount, stop) = (lab.mount_path(client).to_owned(), stop.clone());
-        thread::spawn(move || write_files(&mount, client, &stop))
-    });
-    for _ in 0..KILLS {
-        thread::sleep(Duration::from_millis(rand::random_range(200..800)));
-        lab.kill_authority();
-        thread::sleep(Duration::from_millis(rand::random_range(50..300)));
-        lab.restart_authority()?;
-    }
-    stop.store(true, Ordering::Relaxed);
-    let mut written = Vec::new();
-    for (client, writer) in [WRITER, READER].into_iter().zip(writers) {
-        let joined = writer.join();
-        let files = joined.map_err(|_| anyhow!("{client}'s writer panicked"))??;
-        written.extend(files.into_iter().map(|file| (client, file)));
-    }
-    let acknowledged = written.iter().filter(|(_, file)| file.acknowledged).count();
-    eprintln!("{} files closed, {acknowledged} acknowledged", written.len());
-    ensure!(acknowledged > 0, "no commit was acknowledged");
-    for client in [WRITER, READER] {
-        wait_committed(&lab, client)?;
-    }
-    thread::sleep(VISIBLE_AFTER);
-    // Every closed file ends as one whole version, readable on the other client; for the
-    // acknowledged ones that is C4b, for the rest C4a.
-    for (client, file) in &written {
-        assert_history(&lab, &file.name, &[&file.bytes])?;
-        let other = if *client == WRITER { READER } else { WRITER };
-        assert_reads(&lab, other, &file.name, &file.bytes)?;
-    }
-    Ok(())
 }

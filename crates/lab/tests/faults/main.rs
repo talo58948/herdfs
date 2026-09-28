@@ -4,6 +4,7 @@
 //! those bytes.
 //! Skips until the binaries are built.
 
+mod authority;
 mod crash;
 mod jev;
 mod links;
