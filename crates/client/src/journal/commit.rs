@@ -3,18 +3,19 @@
 //! hold up the others.
 
 use std::fs::{self, File};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::Ordering::Relaxed};
 use std::time::{Duration, Instant, SystemTime};
-use std::{collections::HashSet, io, path::PathBuf};
+use std::{collections::HashSet, io};
 
 use bytes::Bytes;
-use herdfs_core::proto::{EntryId, Version};
+use herdfs_core::proto::{EntryId, ErrorCode, Version};
 use herdfs_core::{ChunkId, chunk};
 use tokio::sync::{mpsc, watch};
 
 use super::{Journal, REJECTED, Record, write_record};
 use crate::stats::{Stats, bump};
-use crate::{Result, cache::Cache, lock, reader::Reader, remote::Remote};
+use crate::{Error, Result, cache::Cache, lock, reader::Reader, remote::Remote};
 
 const FIRST_RETRY: Duration = Duration::from_secs(1);
 const LAST_RETRY: Duration = Duration::from_secs(30);
@@ -58,7 +59,8 @@ impl Committer {
     async fn commit(self: Arc<Self>, entry: EntryId) {
         let mut delay = FIRST_RETRY;
         while let Some(job) = self.next(entry).await {
-            let outcome = match self.attempt(&job).await {
+            let attempt = |record| self.attempt(&job.sealed, record);
+            let outcome = match anew(&job.record, attempt).await {
                 Ok(version) => {
                     bump(&self.stats.commits, 1);
                     // Reads go on to the committed version once the journal drops the copy, as
@@ -99,12 +101,12 @@ impl Committer {
         }
     }
 
-    /// Chunks the sealed copy, caching each chunk and uploading those its base lacks without
-    /// asking whether the store already has them (S6), and commits.
-    async fn attempt(&self, job: &Job) -> Result<Version> {
-        let base = job.record.base.iter().flat_map(|base| &base.chunks);
+    /// Chunks the sealed copy, caching each chunk and uploading those the record's base lacks
+    /// without asking whether the store already has them (S6), and commits.
+    async fn attempt(&self, sealed: &Path, record: Record) -> Result<Version> {
+        let base = record.base.iter().flat_map(|base| &base.chunks);
         let base: HashSet<ChunkId> = base.map(|chunk| chunk.id).collect();
-        let sealed = File::open(&job.sealed)?;
+        let sealed = File::open(sealed)?;
         let (sender, mut chunks) = mpsc::channel(2);
         // Chunking reads and hashes the whole file, so it stays off the async workers.
         let splitter = tokio::task::spawn_blocking(move || {
@@ -126,7 +128,32 @@ impl Committer {
         }
         // A splitter that died early would otherwise commit a truncated file.
         splitter.await.map_err(io::Error::other)?;
-        self.remote.commit(&job.record, refs).await
+        self.remote.commit(&record, refs).await
+    }
+}
+
+/// Sends `record` through `attempt`, and once more without its base if the authority no longer
+/// retains it (`Conflict` on an unguarded commit), which uploads every chunk: retention never
+/// sets a write aside (C4a). A second `Conflict` is final.
+pub(super) async fn anew<F, Fut>(record: &Record, attempt: F) -> Result<Version>
+where
+    F: Fn(Record) -> Fut,
+    Fut: Future<Output = Result<Version>>,
+{
+    match attempt(record.clone()).await {
+        Err(Error::Api(error)) if error.code == ErrorCode::Conflict && record.base.is_some() => {
+            tracing::info!(
+                entry = record.entry.0,
+                "base no longer retained; committing without it"
+            );
+            // Under the same request id, so that a retry after a lost answer commits once.
+            let unbased = Record {
+                base: None,
+                ..record.clone()
+            };
+            attempt(unbased).await
+        }
+        attempted => attempted,
     }
 }
 
