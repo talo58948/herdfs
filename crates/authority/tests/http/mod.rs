@@ -45,6 +45,8 @@ pub struct Lab {
     pub jwks_fetches: Arc<AtomicUsize>,
     /// The fake bucket's objects, by key.
     pub objects: Store,
+    /// One permit is required for a fake bucket write.
+    pub store_writes: Arc<tokio::sync::Semaphore>,
     pub http: reqwest::Client,
     _dir: TempDir,
 }
@@ -54,15 +56,15 @@ pub struct Lab {
 pub struct Stored {
     pub writes: usize,
     pub size: usize,
-    pub modified_ms: i64,
 }
 
 pub type Store = Arc<Mutex<BTreeMap<String, Stored>>>;
 
 /// A bucket that takes PUT and DELETE, and lists with ListObjectsV2 two keys a page.
-fn fake_s3(objects: Store) -> Router {
+fn fake_s3(objects: Store, writes: Arc<tokio::sync::Semaphore>) -> Router {
     let (puts, deletes) = (Arc::clone(&objects), Arc::clone(&objects));
     let put_object = move |Path(key): Path<String>, body: Bytes| async move {
+        let _writing = writes.acquire().await.unwrap();
         let mut objects = puts.lock().unwrap();
         let writes = objects.get(&key).map_or(0, |stored| stored.writes);
         objects.insert(
@@ -70,7 +72,6 @@ fn fake_s3(objects: Store) -> Router {
             Stored {
                 writes: writes + 1,
                 size: body.len(),
-                modified_ms: now_ms(),
             },
         );
     };
@@ -89,8 +90,8 @@ fn fake_s3(objects: Store) -> Router {
             .filter(|(key, _)| key.starts_with(&prefix))
             .collect();
         let contents: String = matching.iter().skip(skip).take(2).map(|(key, stored)| {
-            let (key, at) = (&key[bucket.len() + 1..], jiff::Timestamp::from_millisecond(stored.modified_ms).unwrap());
-            format!("<Contents><Key>{key}</Key><LastModified>{at}</LastModified><ETag>\"x\"</ETag><Size>{}</Size></Contents>", stored.size)
+            let key = &key[bucket.len() + 1..];
+            format!("<Contents><Key>{key}</Key><LastModified>1970-01-01T00:00:00Z</LastModified><ETag>\"x\"</ETag><Size>{}</Size></Contents>", stored.size)
         }).collect();
         let next = if skip + 2 < matching.len() {
             format!("<NextContinuationToken>{}</NextContinuationToken>", skip + 2)
@@ -123,6 +124,10 @@ pub fn now_ms() -> i64 {
 
 impl Lab {
     pub async fn start() -> Self {
+        Self::start_with_ttl(std::time::Duration::from_secs(60)).await
+    }
+
+    pub async fn start_with_ttl(grant_ttl: std::time::Duration) -> Self {
         let jwks_fetches = Arc::new(AtomicUsize::new(0));
         let fetches = Arc::clone(&jwks_fetches);
         let issuer = serve(|url| {
@@ -141,7 +146,8 @@ impl Lab {
         })
         .await;
         let objects = Store::default();
-        let s3 = serve(|_| fake_s3(Arc::clone(&objects))).await;
+        let store_writes = Arc::new(tokio::sync::Semaphore::new(1));
+        let s3 = serve(|_| fake_s3(Arc::clone(&objects), Arc::clone(&store_writes))).await;
         let dir = tempfile::tempdir().unwrap();
         let authority = Authority::open(&dir.path().join("authority.db")).unwrap();
         let bucket = |url: &str| {
@@ -155,7 +161,7 @@ impl Lab {
             credentials,
             issuer.clone(),
             "herdfs".into(),
-            std::time::Duration::from_secs(60),
+            grant_ttl,
         );
         let server = Arc::new(server);
         let url = serve(|_| server.router()).await;
@@ -165,6 +171,7 @@ impl Lab {
             issuer,
             jwks_fetches,
             objects,
+            store_writes,
             http: reqwest::Client::new(),
             _dir: dir,
         }

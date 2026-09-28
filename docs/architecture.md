@@ -40,9 +40,9 @@ The authority keeps each entry's last N versions, head included, plus any younge
 
 1. It prunes versions that fall outside retention.
 2. It deletes chunk lists nothing retained uses, and a commit's upload records once its newest upload is older than the grace, so a file that takes longer than the grace to upload keeps its first chunks.
-3. It sweeps the bucket: a chunk object that no retained version references, and that is older than `--gc-grace` (1 h), is deleted.
+3. It sweeps the bucket: a chunk object that no retained version or recent upload has referenced for `--gc-grace` (1 h), counted from the last collection that found it referenced, is deleted.
 
-The grace period must exceed the grant TTL and the time between one upload and the next or the commit, so in-flight uploads and outstanding URLs never race the sweep. `Purge` and `DeleteSpace` make history and whole spaces eligible at once. Chunks are shared across files, spaces and forks, so the live set is global.
+The grace period must be at least twice the grant TTL and at least the collection interval plus the grant TTL, and exceed the time between one upload and the next or the commit, so in-flight uploads and outstanding URLs never race the sweep. `Purge` and `DeleteSpace` make history and whole spaces eligible at once. Chunks are shared across files, spaces and forks, so the live set is global.
 
 Access to history follows S8: each ACL row records the highest committed version ID when it was granted, and a principal sees only later versions plus the head unless it is an admin.
 

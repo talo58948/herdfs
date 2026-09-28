@@ -1,6 +1,6 @@
 //! Red team, round 20 probes: write access revoked while an upload's bytes are in flight, after
 //! its check and before its record (held; they stay as regression tests), and a sweep racing an
-//! outstanding URL for a version that has just left retention (broken, ignored).
+//! outstanding URL for a version that has just left retention (broken in round 20, now fixed).
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -9,10 +9,10 @@
 
 mod http;
 
-use std::{sync::mpsc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use axum::http::StatusCode;
-use http::Lab;
+use http::{Lab, now_ms};
 use herdfs_authority::Policy;
 use herdfs_core::ChunkId;
 use serde_json::{Value, json};
@@ -33,19 +33,9 @@ async fn set_acl(lab: &Lab, admin: &str, principal: &str, perm: Option<&str>) {
     assert_eq!(status, StatusCode::OK, "{reply}");
 }
 
-/// Holds the fake bucket's lock on another thread, so every store write waits, until the
-/// returned sender is dropped.
-fn stall_store(lab: &Lab) -> mpsc::Sender<()> {
-    let store = std::sync::Arc::clone(&lab.objects);
-    let (held_tx, held_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel::<()>();
-    std::thread::spawn(move || {
-        let _held = store.lock().unwrap();
-        held_tx.send(()).unwrap();
-        release_rx.recv().ok();
-    });
-    held_rx.recv().unwrap();
-    release_tx
+/// Holds the fake bucket's write permit until the returned permit is dropped.
+async fn stall_store(lab: &Lab) -> tokio::sync::OwnedSemaphorePermit {
+    Arc::clone(&lab.store_writes).acquire_owned().await.unwrap()
 }
 
 /// Bob's write is revoked while his upload's bytes are being stored. Whatever the answer, the
@@ -62,7 +52,7 @@ async fn bytes_stored_for_an_upload_revoked_in_flight_are_swept() {
     set_acl(&lab, &alice, "user:bob", Some("write")).await;
 
     let bytes = b"revoked in flight".to_vec();
-    let release = stall_store(&lab);
+    let release = stall_store(&lab).await;
     let upload = {
         let (url, bob, body) = (lab.url.clone(), bob.clone(), bytes.clone());
         let http = lab.http.clone();
@@ -106,8 +96,12 @@ async fn bytes_stored_for_an_upload_revoked_in_flight_are_swept() {
         "upload answered {status} {answer}, then commit {reply}"
     );
 
-    tokio::time::sleep(Duration::from_millis(5)).await;
-    lab.server.sweep(&NOTHING_KEPT).await.unwrap();
+    let collected_at = now_ms();
+    lab.server.sweep(collected_at, &NOTHING_KEPT).await.unwrap();
+    lab.server
+        .sweep(collected_at + 60_001, &NOTHING_KEPT)
+        .await
+        .unwrap();
     assert!(
         !lab.objects.lock().unwrap().contains_key(&key(&bytes)),
         "the revoked upload's bytes outlived a sweep with no grace (upload answered {status} {answer})"
@@ -125,7 +119,7 @@ async fn a_stalled_upload_with_write_kept_commits_and_stays() {
     set_acl(&lab, &alice, "user:bob", Some("write")).await;
 
     let bytes = b"kept in flight".to_vec();
-    let release = stall_store(&lab);
+    let release = stall_store(&lab).await;
     let upload = {
         let (lab_url, bob, body) = (lab.url.clone(), bob.clone(), bytes.clone());
         let http = lab.http.clone();
@@ -156,20 +150,18 @@ async fn a_stalled_upload_with_write_kept_commits_and_stays() {
         "request_id": "r1", "base": null, "guarded": false, "chunks": [chunk]});
     let (committed, reply) = lab.rpc(&bob, &commit).await;
     assert_eq!(committed, StatusCode::OK, "{reply}");
-    tokio::time::sleep(Duration::from_millis(5)).await;
-    lab.server.sweep(&NOTHING_KEPT).await.unwrap();
+    lab.server.sweep(now_ms(), &NOTHING_KEPT).await.unwrap();
     assert!(lab.objects.lock().unwrap().contains_key(&key(&bytes)));
 }
 
-/// architecture.md, Retention and collection: the grace exceeds the grant TTL "so in-flight
-/// uploads and outstanding URLs never race the sweep". A URL granted for the head, which then
-/// leaves retention when the next commit lands, names a chunk whose object is older than the
-/// grace; the next sweep deletes it while the URL is seconds old. Grace 120 s is twice the lab's
-/// 60 s TTL, as `--gc-grace` must be. Takes about two minutes.
+/// architecture.md, Retention and collection: "outstanding URLs never race the sweep". A URL
+/// granted for the head, which then leaves retention when the next commit lands, names a chunk
+/// whose object predates the grace. The sweep used to count from the object's last write and
+/// delete it while the URL was seconds old; it now counts from when the chunk left the live set.
+/// Grace 120 s is twice the lab's 60 s TTL.
 // contract: S4, S7
 #[tokio::test]
-#[ignore = "ROUND20: a sweep deletes the chunk of a URL granted ms earlier once its version leaves retention"]
-async fn a_url_granted_just_before_its_version_leaves_retention_outlives_its_chunk() {
+async fn a_url_granted_just_before_its_version_leaves_retention_keeps_its_chunk() {
     let lab = Lab::start().await;
     let alice = lab.user("alice");
     lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
@@ -193,8 +185,8 @@ async fn a_url_granted_just_before_its_version_leaves_retention_outlives_its_chu
         max_age_ms: 0,
         grace_ms: 120_000,
     };
-    tokio::time::sleep(Duration::from_secs(121)).await;
-    lab.server.sweep(&policy).await.unwrap();
+    let collected_at = now_ms() + policy.grace_ms + 1;
+    lab.server.sweep(collected_at, &policy).await.unwrap();
     assert!(
         lab.objects.lock().unwrap().contains_key(&key(&old)),
         "control: the head's chunk stays"
@@ -208,7 +200,10 @@ async fn a_url_granted_just_before_its_version_leaves_retention_outlives_its_chu
     lab.upload(&alice, "team", ChunkId::of(&new), new.clone()).await;
     let (status, second) = lab.rpc(&alice, &commit("r2", &new)).await;
     assert_eq!(status, StatusCode::OK, "{second}");
-    lab.server.sweep(&policy).await.unwrap();
+    lab.server
+        .sweep(collected_at + policy.grace_ms + 1, &policy)
+        .await
+        .unwrap();
     let age = granted.elapsed();
     assert!(age < Duration::from_secs(60));
     assert!(

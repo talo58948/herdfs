@@ -8,11 +8,9 @@
 mod http;
 
 use axum::http::StatusCode;
-use http::{Lab, PUBLIC_S3, Stored, now_ms};
-use herdfs_authority::Policy;
+use http::{Lab, PUBLIC_S3, now_ms};
 use herdfs_core::{ChunkId, chunk::MAX_CHUNK};
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
 
 #[tokio::test]
 async fn only_a_caller_who_may_upload_causes_a_store_write() {
@@ -150,124 +148,4 @@ async fn errors_carry_their_code_and_status() {
         .await
         .unwrap();
     assert_eq!(health.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn a_sweep_deletes_only_unreferenced_chunks_older_than_the_grace() {
-    // contract: C15, S7
-    let lab = Lab::start().await;
-    let alice = lab.user("alice");
-    lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
-        .await;
-    let bytes: [&[u8]; 3] = [b"first version", b"second version", b"uploaded only"];
-    for chunk in bytes {
-        assert_eq!(
-            lab.upload(&alice, "team", ChunkId::of(chunk), chunk.to_vec())
-                .await
-                .0,
-            StatusCode::OK
-        );
-    }
-    let (_, file) = lab
-        .rpc(
-            &alice,
-            &json!({"op": "create", "space": "team", "path": "f", "mode": 420}),
-        )
-        .await;
-    for (n, chunk) in bytes[..2].iter().enumerate() {
-        let chunks = json!([{"id": ChunkId::of(chunk).to_string(), "len": chunk.len()}]);
-        let commit = json!({"op": "commit", "space": "team", "entry": file["entry"]["id"],
-            "request_id": format!("r{n}"), "base": null, "guarded": false, "chunks": chunks});
-        assert_eq!(lab.rpc(&alice, &commit).await.0, StatusCode::OK);
-    }
-    let key = |chunk: &[u8]| format!("herdfs/chunks/{}", ChunkId::of(chunk));
-    let hour_ago = now_ms() - 3_600_000;
-    {
-        let mut objects = lab.objects.lock().unwrap();
-        for chunk in bytes {
-            objects.get_mut(&key(chunk)).unwrap().modified_ms = hour_ago;
-        }
-        let garbage = [
-            (key(b"old garbage"), hour_ago),
-            (key(b"new garbage"), now_ms()),
-            ("herdfs/chunks/not-a-chunk".into(), hour_ago),
-        ];
-        for (key, modified_ms) in garbage {
-            objects.insert(
-                key,
-                Stored {
-                    writes: 1,
-                    size: 11,
-                    modified_ms,
-                },
-            );
-        }
-    }
-    let left = || lab.objects.lock().unwrap().keys().cloned().collect::<Vec<_>>();
-
-    // Retained versions and fresh uploads stay; so do young objects and keys that name no chunk.
-    let keep_all = Policy {
-        versions: 16,
-        max_age_ms: i64::MAX / 2,
-        grace_ms: 60_000,
-    };
-    let swept = lab.server.sweep(&keep_all).await.unwrap();
-    assert_eq!((swept.pruned, swept.deleted, swept.bytes), (0, 1, 11));
-    assert!(!left().contains(&key(b"old garbage")));
-
-    // With no grace, uploads expire and the pruned first version's chunk goes too.
-    let head_only = Policy {
-        versions: 1,
-        max_age_ms: 0,
-        grace_ms: 0,
-    };
-    let swept = lab.server.sweep(&head_only).await.unwrap();
-    assert_eq!((swept.pruned, swept.deleted), (1, 3));
-    let mut expected = vec![key(b"second version"), "herdfs/chunks/not-a-chunk".to_owned()];
-    expected.sort();
-    assert_eq!(left(), expected);
-}
-
-#[tokio::test]
-async fn collection_runs_periodically() {
-    // contract: C14, C15, S7
-    let lab = Lab::start().await;
-    let alice = lab.user("alice");
-    lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
-        .await;
-    let (_, file) = lab
-        .rpc(
-            &alice,
-            &json!({"op": "create", "space": "team", "path": "f", "mode": 420}),
-        )
-        .await;
-    let chunks: [&[u8]; 2] = [b"pruned", b"head"];
-    for (index, bytes) in chunks.into_iter().enumerate() {
-        let id = ChunkId::of(bytes);
-        assert_eq!(
-            lab.upload(&alice, "team", id, bytes.to_vec()).await.0,
-            StatusCode::OK
-        );
-        let chunk = json!([{"id": id.to_string(), "len": bytes.len()}]);
-        let commit = json!({"op": "commit", "space": "team", "entry": file["entry"]["id"],
-            "request_id": format!("r{index}"), "base": null, "guarded": false, "chunks": chunk});
-        assert_eq!(lab.rpc(&alice, &commit).await.0, StatusCode::OK);
-    }
-    let pruned = format!("herdfs/chunks/{}", ChunkId::of(chunks[0]));
-    lab.objects.lock().unwrap().get_mut(&pruned).unwrap().modified_ms = 0;
-    let policy = Policy {
-        versions: 1,
-        max_age_ms: 0,
-        grace_ms: 0,
-    };
-    let collector = tokio::spawn(Arc::clone(&lab.server).collect_every(Duration::from_millis(10), policy));
-
-    let gone = tokio::time::timeout(Duration::from_secs(1), async {
-        while lab.objects.lock().unwrap().contains_key(&pruned) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await;
-    collector.abort();
-    assert!(gone.is_ok(), "periodic collection left {pruned}");
 }

@@ -37,7 +37,7 @@ struct Args {
     /// Seconds between collections.
     #[arg(long, default_value_t = 600)]
     gc_every: u64,
-    /// Seconds an unreferenced chunk must age before it is deleted; at least twice the grant TTL.
+    /// Seconds an unreferenced chunk must age; at least twice the grant TTL and interval plus TTL.
     #[arg(long, default_value_t = 3600)]
     gc_grace: u64,
     /// Seconds a presigned chunk URL stays valid.
@@ -76,10 +76,11 @@ async fn main() -> anyhow::Result<()> {
     };
     let (bucket, public_bucket) = (bucket(&args.s3_endpoint)?, bucket(&args.s3_public_endpoint)?);
     let authority = Authority::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
-    // Outstanding URLs and uploads awaiting their commit must not race the sweep.
+    // Outstanding URLs and uploads awaiting their commit must not race the sweep, whose grace
+    // counts from the collection before a chunk left the live set.
     anyhow::ensure!(
-        args.gc_grace >= 2 * args.grant_ttl,
-        "--gc-grace must be at least twice --grant-ttl"
+        args.gc_grace >= 2 * args.grant_ttl && args.gc_grace >= args.gc_every + args.grant_ttl,
+        "--gc-grace must be at least twice --grant-ttl, and at least --gc-every plus --grant-ttl"
     );
     let settings = settings(&args)?;
     let (issuer, audience) = (args.oidc_issuer, args.oidc_audience);
