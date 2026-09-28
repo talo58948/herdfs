@@ -40,7 +40,6 @@ fn reads_without_store(lab: &Lab, file: &File, bytes: &[u8]) -> Result<bool> {
 /// chosen at open was retained across that switch. A fresh Pin open of v2 is the control.
 // contract: C3, P1 (docs/architecture.md: Pin is chosen once per open and is never evicted while pinned)
 #[test]
-#[ignore = "ROUND21: a Pin handle does not pin the newer version it follows"]
 fn a_pin_handle_keeps_the_version_it_follows_pinned() -> Result<()> {
     let Some(lab) = start()? else {
         return Ok(());

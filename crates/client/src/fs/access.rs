@@ -62,8 +62,16 @@ impl Space {
     fn begin(&self, strategy: Strategy, file: &Arc<OpenVersion>, handle: &Handle) {
         if strategy == Strategy::Pin {
             let mut pinned = lock(&handle.pinned);
-            *pinned = file.version.chunks.iter().map(|chunk| chunk.id).collect();
-            self.cache.pin(&pinned);
+            let chunks = file
+                .version
+                .chunks
+                .iter()
+                .map(|chunk| chunk.id)
+                .collect::<Vec<_>>();
+            self.cache.pin(&chunks);
+            if let Some(old) = pinned.replace(chunks) {
+                self.cache.unpin(&old);
+            }
         }
         if strategy != Strategy::Stream {
             let (reader, file) = (self.reader.clone(), file.clone());
@@ -72,6 +80,19 @@ impl Space {
                     tracing::warn!(%err, entry = file.version.entry.0, "prefetch failed");
                 }
             });
+        }
+    }
+
+    /// Moves Pin handles to the version their inode now follows.
+    pub(super) fn follow_pins(&self, entry: EntryId) {
+        let handles = lock(&self.handles);
+        let Some(file) = self.inodes.with(entry, |state| state.followed()).flatten() else {
+            return;
+        };
+        for handle in handles.values().filter(|handle| handle.entry == entry) {
+            if lock(&handle.pinned).is_some() {
+                self.begin(Strategy::Pin, &file, handle);
+            }
         }
     }
 

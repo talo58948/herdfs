@@ -58,7 +58,6 @@ fn make_child(lab: &Lab, trial: usize, rename: bool) -> Result<(std::io::Result<
 /// entry; the controls leave the directory in place.
 // contract: C7
 #[test]
-#[ignore = "ROUND21: a path mutation can miss a held directory renamed after Locate"]
 fn a_mutation_follows_a_held_directory_when_its_locate_races_a_rename() -> Result<()> {
     let Some(lab) = start()? else {
         return Ok(());
