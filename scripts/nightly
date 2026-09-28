@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Heavy rings, for a large Linux machine:
+#   1. mutation testing of core and authority (each crate's own tests, including the sim);
+#   2. 1M release sim seeds.
+# cargo-mutants gives each job its own build dir, so CARGO_TARGET_DIR must not be shared here.
+set -u
+. ~/.cargo/env
+export PATH=~/bin:$PATH
+cd "$(dirname "$0")/.."
+free_gb=$(df -BG --output=avail . | tail -1 | tr -dc 0-9)
+echo "== start $(date -u +%FT%TZ), ${free_gb} GB free"
+[ "$free_gb" -ge 30 ] || { echo "== skipped: need 30 GB free"; exit 1; }
+echo "== mutants"
+env -u CARGO_TARGET_DIR cargo mutants -p herdfs-core -p herdfs-authority --test-workspace=false -j 4 \
+  --timeout 300 -o ~/mutants 2>&1 | tail -3
+echo "== sim 1M"
+start=$(date +%s)
+SIM_SEEDS=1000000 cargo test -p herdfs-authority --release --test sim -- --nocapture 2>&1 \
+  | grep -E "test result|sim seed|panicked" | head -20
+echo "== sim done in $(( $(date +%s) - start ))s; end $(date -u +%FT%TZ)"
