@@ -45,6 +45,24 @@ struct Args {
     grant_ttl: u64,
 }
 
+struct Settings {
+    policy: Policy,
+    collect_every: Duration,
+    grant_ttl: Duration,
+}
+
+fn settings(args: &Args) -> anyhow::Result<Settings> {
+    Ok(Settings {
+        policy: Policy {
+            versions: args.retain_versions,
+            max_age_ms: i64::from(args.retain_days) * 24 * 60 * 60 * 1000,
+            grace_ms: i64::try_from(args.gc_grace)? * 1000,
+        },
+        collect_every: Duration::from_secs(args.gc_every),
+        grant_ttl: Duration::from_secs(args.grant_ttl),
+    })
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -63,11 +81,7 @@ async fn main() -> anyhow::Result<()> {
         args.gc_grace >= 2 * args.grant_ttl,
         "--gc-grace must be at least twice --grant-ttl"
     );
-    let policy = Policy {
-        versions: args.retain_versions,
-        max_age_ms: i64::from(args.retain_days) * 24 * 60 * 60 * 1000,
-        grace_ms: i64::try_from(args.gc_grace)? * 1000,
-    };
+    let settings = settings(&args)?;
     let (issuer, audience) = (args.oidc_issuer, args.oidc_audience);
     let server = Server::new(
         authority,
@@ -76,12 +90,44 @@ async fn main() -> anyhow::Result<()> {
         credentials,
         issuer,
         audience,
-        Duration::from_secs(args.grant_ttl),
+        settings.grant_ttl,
     );
     let server = Arc::new(server);
-    tokio::spawn(Arc::clone(&server).collect_every(Duration::from_secs(args.gc_every), policy));
+    tokio::spawn(Arc::clone(&server).collect_every(settings.collect_every, settings.policy));
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(listen = %args.listen, "serving");
     axum::serve(listener, server.router()).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flags_convert_to_runtime_durations() {
+        // contract: C14, C15, S4, S7
+        let args = Args {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            db: PathBuf::new(),
+            s3_endpoint: String::new(),
+            s3_public_endpoint: String::new(),
+            s3_bucket: String::new(),
+            s3_region: String::new(),
+            oidc_issuer: String::new(),
+            oidc_audience: String::new(),
+            retain_versions: 7,
+            retain_days: 2,
+            gc_every: 3,
+            gc_grace: 4,
+            grant_ttl: 5,
+        };
+
+        let settings = settings(&args).unwrap();
+        assert_eq!(settings.policy.versions, 7);
+        assert_eq!(settings.policy.max_age_ms, 172_800_000);
+        assert_eq!(settings.policy.grace_ms, 4_000);
+        assert_eq!(settings.collect_every, Duration::from_secs(3));
+        assert_eq!(settings.grant_ttl, Duration::from_secs(5));
+    }
 }

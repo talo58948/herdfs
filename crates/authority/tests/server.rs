@@ -12,6 +12,7 @@ use http::{Lab, PUBLIC_S3, Stored, now_ms};
 use herdfs_authority::Policy;
 use herdfs_core::{ChunkId, chunk::MAX_CHUNK};
 use serde_json::{Value, json};
+use std::{sync::Arc, time::Duration};
 
 #[tokio::test]
 async fn only_a_caller_who_may_upload_causes_a_store_write() {
@@ -225,4 +226,48 @@ async fn a_sweep_deletes_only_unreferenced_chunks_older_than_the_grace() {
     let mut expected = vec![key(b"second version"), "herdfs/chunks/not-a-chunk".to_owned()];
     expected.sort();
     assert_eq!(left(), expected);
+}
+
+#[tokio::test]
+async fn collection_runs_periodically() {
+    // contract: C14, C15, S7
+    let lab = Lab::start().await;
+    let alice = lab.user("alice");
+    lab.rpc(&alice, &json!({"op": "create_space", "space": "team"}))
+        .await;
+    let (_, file) = lab
+        .rpc(
+            &alice,
+            &json!({"op": "create", "space": "team", "path": "f", "mode": 420}),
+        )
+        .await;
+    let chunks: [&[u8]; 2] = [b"pruned", b"head"];
+    for (index, bytes) in chunks.into_iter().enumerate() {
+        let id = ChunkId::of(bytes);
+        assert_eq!(
+            lab.upload(&alice, "team", id, bytes.to_vec()).await.0,
+            StatusCode::OK
+        );
+        let chunk = json!([{"id": id.to_string(), "len": bytes.len()}]);
+        let commit = json!({"op": "commit", "space": "team", "entry": file["entry"]["id"],
+            "request_id": format!("r{index}"), "base": null, "guarded": false, "chunks": chunk});
+        assert_eq!(lab.rpc(&alice, &commit).await.0, StatusCode::OK);
+    }
+    let pruned = format!("herdfs/chunks/{}", ChunkId::of(chunks[0]));
+    lab.objects.lock().unwrap().get_mut(&pruned).unwrap().modified_ms = 0;
+    let policy = Policy {
+        versions: 1,
+        max_age_ms: 0,
+        grace_ms: 0,
+    };
+    let collector = tokio::spawn(Arc::clone(&lab.server).collect_every(Duration::from_millis(10), policy));
+
+    let gone = tokio::time::timeout(Duration::from_secs(1), async {
+        while lab.objects.lock().unwrap().contains_key(&pruned) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    collector.abort();
+    assert!(gone.is_ok(), "periodic collection left {pruned}");
 }
