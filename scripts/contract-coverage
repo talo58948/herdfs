@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Lists every CONTRACT.md line with the test files that cite it (`// contract: C9, S2`).
+# Exits 1 if a line has no test.
+set -euo pipefail
+cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+ids=$(grep -oE '^\| (C|S|P|A)[0-9]+[a-z]? ' CONTRACT.md | tr -d '| ')
+missing=0
+for id in $ids; do
+  files=$(grep -rlE "contract:.*\b$id\b" crates --include=*.rs | sed 's#crates/##' | sort -u | paste -sd' ' -)
+  count=$(grep -rhoE "contract:.*\b$id\b" crates --include=*.rs | wc -l)
+  printf '%-4s %3d  %s\n' "$id" "$count" "${files:--}"
+  [ -n "$files" ] || missing=1
+done
+exit $missing
