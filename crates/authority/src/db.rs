@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS collection (
     created_ms INTEGER NOT NULL,
     started_ms INTEGER
 );
+INSERT OR IGNORE INTO collection (id, created_ms)
+VALUES (1, CAST(unixepoch('subsec') * 1000 AS INTEGER));
 CREATE TABLE IF NOT EXISTS unreferenced (
     chunk TEXT PRIMARY KEY,
     since_ms INTEGER NOT NULL
