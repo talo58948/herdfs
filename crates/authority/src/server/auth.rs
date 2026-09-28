@@ -126,3 +126,14 @@ impl Verifier {
 fn unauthenticated(reason: impl Into<String>) -> proto::Error {
     proto::Error::new(ErrorCode::Unauthenticated, reason)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_issuer_keys_are_trusted_for_five_minutes() {
+        // contract: S5
+        assert_eq!(TRUST_AT_MOST, Duration::from_secs(300));
+    }
+}

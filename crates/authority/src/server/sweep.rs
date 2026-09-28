@@ -65,7 +65,7 @@ impl Server {
                     .key
                     .strip_prefix("chunks/")
                     .and_then(|hex| hex.parse::<ChunkId>().ok());
-                let old = modified_ms(&object.last_modified)? < started - policy.grace_ms;
+                let old = older_than_grace(&object.last_modified, started, policy.grace_ms)?;
                 doomed.extend(
                     id.filter(|id| old && !collected.live.contains(id))
                         .map(|id| (id, object.size)),
@@ -128,4 +128,21 @@ fn modified_ms(time: &str) -> anyhow::Result<i64> {
         .parse()
         .with_context(|| format!("bad LastModified {time:?}"))?;
     Ok(at.as_millisecond())
+}
+
+fn older_than_grace(time: &str, now_ms: i64, grace_ms: i64) -> anyhow::Result<bool> {
+    Ok(modified_ms(time)? < now_ms - grace_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grace_boundary_is_kept() {
+        // contract: C15, S7
+        let at = "1970-01-01T00:00:01Z";
+        assert!(!older_than_grace(at, 2_000, 1_000).unwrap());
+        assert!(older_than_grace(at, 2_001, 1_000).unwrap());
+    }
 }
