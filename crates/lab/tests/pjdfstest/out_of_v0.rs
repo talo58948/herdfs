@@ -93,4 +93,23 @@ pub const OUT_OF_V0: &[(&str, &[&str])] = &[
         "hard links: without link counts a directory's nlink is always 2, not 2 plus its subdirectories",
         &["rename::updates_link_parent"],
     ),
+    (
+        "access times: atime is reported as mtime, so an atime set apart from mtime does not stick",
+        &[
+            "utimensat::changes_timestamps::dir",
+            "utimensat::changes_timestamps::regular",
+            "utimensat::follow_symlink",
+            "utimensat::subsecond",
+            "utimensat::utime_omit",
+            "utimensat::y2038",
+        ],
+    ),
+    (
+        "a separate ctime: ctime is reported as mtime, so chmod, which leaves mtime alone, leaves it too",
+        &["chmod::update_ctime::dir"],
+    ),
+    (
+        "writing to a file after it is unlinked while open: fstat on it fails with ENOENT",
+        &["unlink::open_file_not_freed"],
+    ),
 ];

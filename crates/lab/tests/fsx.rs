@@ -5,10 +5,11 @@
 //!
 //! `FSX_OPS` sets the operations per run; `FSX_SEED` replays a seed. The nightly 1,000,000 ops
 //! commit about 8,000 versions, and the store keeps every chunk of each (C14): about 15 GB per
-//! variant, so run the variants one at a time.
+//! variant. So runs longer than the default take turns, with other checkouts' too, and each
+//! skips unless the disk has [`LONG_RUN_FREE`] bytes free when its turn comes.
 
 use std::env;
-use std::fs;
+use std::fs::{self, File};
 use std::path::Path;
 use std::process::Command;
 use std::thread;
@@ -18,6 +19,8 @@ use anyhow::{Context, Result, ensure};
 use herdfs_lab::{Lab, LabConfig, Profile, Strategy};
 
 const DEFAULT_OPS: u64 = 50_000;
+/// Free disk a run longer than [`DEFAULT_OPS`] needs: 1,000,000 ops store about 15 GB.
+const LONG_RUN_FREE: u64 = 20 << 30;
 const FILE: &str = "fsx.bin";
 /// Read-only opens after the run; several, so a chaos decider picks more than one strategy.
 const READS: u64 = 8;
@@ -55,6 +58,19 @@ fn exercise(strategy: impl FnOnce(u64) -> Strategy) -> Result<()> {
     }
     let seed = setting("FSX_SEED", rand::random())?;
     let ops = setting("FSX_OPS", DEFAULT_OPS)?;
+    let long = ops > DEFAULT_OPS;
+    let _turn = long.then(take_turn).transpose()?;
+    let free = free_bytes(&env::temp_dir())?;
+    if long && free < LONG_RUN_FREE {
+        let gib = |bytes: u64| bytes >> 30;
+        eprintln!(
+            "skipped: {ops} fsx ops need {} GiB free for the store; {} has {} GiB",
+            gib(LONG_RUN_FREE),
+            env::temp_dir().display(),
+            gib(free)
+        );
+        return Ok(());
+    }
     let strategy = strategy(seed);
     eprintln!("fsx seed {seed}, {ops} ops, {strategy:?}; replay with FSX_SEED={seed} LAB_KEEP=1");
     let lab = Lab::start(
@@ -110,6 +126,20 @@ fn fsx(dir: &Path, artifacts: &Path, seed: u64, ops: u64) -> Result<()> {
         output.status
     );
     Ok(())
+}
+
+/// Waits until no other long fsx run on this host holds the turn, then holds it until dropped.
+fn take_turn() -> Result<File> {
+    let turn = File::create(env::temp_dir().join("herdfs-fsx-long-run.lock"))?;
+    turn.lock()?;
+    Ok(turn)
+}
+
+/// Bytes free to this user on the file system holding `dir`.
+fn free_bytes(dir: &Path) -> Result<u64> {
+    let report = herdfs_lab::run(Command::new("df").args(["--output=avail", "-B1"]).arg(dir))?;
+    let free = report.lines().last().context("df printed nothing")?;
+    Ok(free.trim().parse()?)
 }
 
 /// The number in environment variable `name`, or `default`.
