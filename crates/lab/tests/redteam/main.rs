@@ -1,5 +1,5 @@
 //! Red team: confirmed contract breaks, each reduced to one failing test. Rounds 1 to 5 are fixed
-//! and run. Skips until the binaries are built.
+//! and run; round 6's are ignored until fixed. Skips until the binaries are built.
 
 mod agents;
 mod atomic_saves;
@@ -10,6 +10,7 @@ mod debounce;
 mod followed;
 mod followed_paths;
 mod journal;
+mod lock_files;
 mod mtime;
 mod offline;
 mod offline_heads;
@@ -17,7 +18,9 @@ mod offline_writes;
 mod open_handles;
 mod paths;
 mod recovery;
+mod saved_mtime;
 mod scratch_files;
+mod shared_builds;
 mod slow_links;
 mod versions;
 
