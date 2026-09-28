@@ -19,6 +19,10 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// fast. The answer's body, such as a long chunk list on a slow link, may take longer as long
 /// as it keeps coming (`READ_TIMEOUT`), and opens no offline window.
 const RPC_TIMEOUT: Duration = Duration::from_secs(3);
+/// A background call, a commit or a chunk upload, may wait this long for its answer to start,
+/// plus a second per `SLOWEST_UPLOAD` bytes of its body, since its body goes first.
+const BACKGROUND_TIMEOUT: Duration = Duration::from_secs(10);
+const SLOWEST_UPLOAD: usize = 16 << 10;
 /// How often the probe looks whether an offline window has ended.
 const PROBE_EVERY: Duration = Duration::from_secs(1);
 const FIRST_WINDOW: Duration = Duration::from_secs(2);
@@ -198,8 +202,7 @@ impl Remote {
     pub async fn put_chunk(&self, id: ChunkId, bytes: Bytes) -> Result<()> {
         let url = format!("{}/v1/spaces/{}/chunks/{id}", self.authority, self.space);
         let upload = |token: &str| self.http.put(&url).bearer_auth(token).body(bytes.clone());
-        // Its answer starts only once the whole chunk is up.
-        self.send(upload, Duration::MAX).await.map(drop)
+        self.send(upload, Some(bytes.len())).await.map(drop)
     }
 
     /// Fetches a chunk from a presigned URL and checks that it is the chunk expected.
@@ -223,8 +226,11 @@ impl Remote {
     async fn call(&self, request: impl FnOnce(String) -> Request) -> Result<Response> {
         let (url, request) = (format!("{}/v1/rpc", self.authority), request(self.space.clone()));
         let rpc = |token: &str| self.http.post(&url).bearer_auth(token).json(&request);
+        // A commit runs in the background, and its chunk list may be long.
+        let commit = matches!(request, Request::Commit { .. });
+        let body = commit.then(|| serde_json::to_vec(&request).map_or(0, |body| body.len()));
         let started = Instant::now();
-        let response = self.send(rpc, RPC_TIMEOUT).await?;
+        let response = self.send(rpc, body).await?;
         self.round_trip.add(started.elapsed().as_secs_f64());
         Ok(response.json().await?)
     }
@@ -241,17 +247,22 @@ impl Remote {
         }
     }
 
-    /// Sends unless the authority counts as unreachable, and records whether it answered by
-    /// `deadline`.
+    /// Sends unless the authority counts as unreachable, and records whether it answered in
+    /// time: `RPC_TIMEOUT` for an interactive call, longer for a background one carrying `body`
+    /// bytes, whose timeout is a slow upload rather than an outage and opens no offline window.
     async fn send(
         &self,
         request: impl Fn(&str) -> RequestBuilder,
-        deadline: Duration,
+        body: Option<usize>,
     ) -> Result<reqwest::Response> {
         self.link.check()?;
+        let upload = |len: usize| BACKGROUND_TIMEOUT + Duration::from_secs((len / SLOWEST_UPLOAD) as u64);
+        let deadline = body.map_or(RPC_TIMEOUT, upload);
         let response = tokio::time::timeout(deadline, self.exchange(request)).await;
         let response = response.unwrap_or(Err(Error::TimedOut));
-        self.link.record(&response);
+        if body.is_none() || !matches!(response, Err(Error::TimedOut | Error::Network(_))) {
+            self.link.record(&response);
+        }
         response
     }
 
