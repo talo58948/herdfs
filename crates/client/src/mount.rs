@@ -84,7 +84,7 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
     let root = root.with_context(|| format!("cannot reach space {space:?} at the authority {authority}"))?;
     let cache = Cache::open(args.cache.clone(), args.cache_bytes)
         .with_context(|| format!("opening cache {}", args.cache.display()))?;
-    let (journal, woken) = Journal::open(args.journal.clone())
+    let (journal, woken) = Journal::open(args.journal.clone(), Arc::default())
         .with_context(|| format!("opening journal {}", args.journal.display()))?;
     let (remote, cache, journal) = (Arc::new(remote), Arc::new(cache), Arc::new(journal));
     let stats = Arc::new(Stats::default());
@@ -115,7 +115,6 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
         remote: remote.clone(),
         cache,
         stats,
-        inodes: space.inodes(),
         kernel,
     };
     tokio::spawn(Arc::new(committer).run(woken));

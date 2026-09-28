@@ -1,7 +1,7 @@
 //! Namespace operations: lookups, attributes, directories and renames.
 
 use std::sync::{Arc, atomic::Ordering::Relaxed};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{ffi::OsString, path::PathBuf};
 
 use fuser::{Errno, FileAttr, INodeNo, ReplyDirectory};
@@ -23,7 +23,7 @@ impl Space {
     pub async fn lookup(self: Arc<Self>, parent: INodeNo, name: OsString) -> Result<(FileAttr, Duration)> {
         let (entry, asked, local) = self.entry(&self.located_child(parent, &name).await?).await?;
         let attr = self.looked_up(&entry, asked, local.as_deref());
-        Ok((attr, TTL.saturating_sub(asked.0.elapsed())))
+        Ok((attr, TTL.saturating_sub(asked.elapsed())))
     }
 
     /// The inode's attributes. If its path names another entry or none, the entry has moved,
@@ -38,13 +38,13 @@ impl Space {
             Ok(Some(found)) if self.ino(found.0.id) == ino => found,
             Err(err) if !err.is_not_found() => return Err(err),
             _ => {
-                let (asked, entry) = (self.asked(), self.relocate(ino).await?);
-                let local = self.journal.changes(entry.id);
+                let asked = Instant::now();
+                let (entry, local) = self.view(self.relocate(ino).await?);
                 (entry, asked, local)
             }
         };
         let attr = self.attr(&entry, local.as_deref());
-        Ok((attr, TTL.saturating_sub(asked.0.elapsed())))
+        Ok((attr, TTL.saturating_sub(asked.elapsed())))
     }
 
     pub async fn setattr(self: Arc<Self>, ino: INodeNo, change: AttrChange) -> Result<FileAttr> {
@@ -74,14 +74,18 @@ impl Space {
         }
         if mode.is_none() && mtime_ms.is_none() {
             // A truncation has made the journal copy to show since.
-            let local = change.size.map_or(local, |_| self.journal.changes(entry.id));
+            let (entry, local) = match change.size {
+                Some(_) => self.view(entry),
+                None => (entry, local),
+            };
             return Ok(self.attr(&entry, local.as_deref()));
         }
-        let asked = self.asked();
+        let asked = Instant::now();
         let entry = self.remote.set_attr(path, mode, mtime_ms).await?;
         self.inodes.observe(&entry, asked, false);
         self.expect(ino, &entry)?;
-        Ok(self.attr(&entry, self.journal.changes(entry.id).as_deref()))
+        let (entry, local) = self.view(entry);
+        Ok(self.attr(&entry, local.as_deref()))
     }
 
     pub async fn readlink(self: Arc<Self>, ino: INodeNo) -> Result<Vec<u8>> {
@@ -151,7 +155,7 @@ impl Space {
     /// Lists the directory once, for the readdir calls on this handle to page through.
     pub async fn opendir(self: Arc<Self>, ino: INodeNo) -> Result<u64> {
         let path = self.located(ino).await?;
-        let asked = self.asked();
+        let asked = Instant::now();
         let entries = self.remote.list(path).await?;
         let listed = |entry| {
             self.inodes.observe(entry, asked, true);

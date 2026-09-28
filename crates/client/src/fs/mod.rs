@@ -4,6 +4,7 @@ mod access;
 mod answer;
 mod fuse;
 mod handles;
+mod inode;
 mod inodes;
 mod kernel;
 mod namespace;
@@ -34,9 +35,6 @@ const MAX_NAME: usize = 255;
 
 /// A directory's entries as readdir reports them.
 type Listing = Vec<(INodeNo, FileType, String)>;
-/// When a call to the authority was sent, and the count of settled commits then: what it
-/// answers is current as of both.
-type Asked = (Instant, u64);
 
 pub struct Space {
     remote: Arc<Remote>,
@@ -69,6 +67,7 @@ impl Space {
     ) -> io::Result<Self> {
         // /proc/self belongs to this process's user and group.
         let process = std::fs::metadata("/proc/self")?;
+        let inodes = journal.inodes();
         Ok(Self {
             remote,
             reader,
@@ -78,7 +77,7 @@ impl Space {
             decider: Mutex::new(decider),
             kernel,
             owner: (process.uid(), process.gid()),
-            inodes: Arc::default(),
+            inodes,
             opens: Mutex::default(),
             handles: Mutex::default(),
             listings: Mutex::default(),
@@ -97,17 +96,6 @@ impl Space {
 
     pub fn mounted(&self, notifier: Notifier) {
         self.kernel.mounted(notifier);
-    }
-
-    /// What this client knows of each entry, which the committer updates too.
-    pub fn inodes(&self) -> Arc<Inodes> {
-        self.inodes.clone()
-    }
-
-    /// When a call that a reply depends on is sent: before it, so that a commit settling during
-    /// the call makes its answer stale (C1).
-    fn asked(&self) -> Asked {
-        (Instant::now(), self.journal.settled())
     }
 
     /// The entry's attributes, with size and mtime from its journal copy while it has one.

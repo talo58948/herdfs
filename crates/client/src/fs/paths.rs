@@ -8,7 +8,7 @@ use fuser::{Errno, FileAttr, INodeNo};
 use herdfs_core::SpacePath;
 use herdfs_core::proto::Entry;
 
-use super::{Asked, MAX_NAME, Space, TTL};
+use super::{MAX_NAME, Space, TTL};
 use crate::{Error, Result};
 
 impl Space {
@@ -27,7 +27,7 @@ impl Space {
 
     /// The entry of the inode, wherever it is now.
     pub(super) async fn relocate(&self, ino: INodeNo) -> Result<Entry> {
-        let asked = self.asked();
+        let asked = Instant::now();
         let entry = match self.remote.locate(self.entry_id(ino)).await {
             Err(err) => return Err(self.gone(self.path(ino)?.as_ref(), err)),
             located => located?,
@@ -47,39 +47,40 @@ impl Space {
 
     /// The entry at `path`, when it was asked for, and its journal copy while it holds changes.
     /// The entry comes from what this client knows for TTL after that, so opens see commits (C2),
-    /// else from the authority; both are read in one generation of settled commits, counted
-    /// before either, so a reply never pairs a remote size with a journal state from after a
-    /// commit changed it (C1).
-    pub(super) async fn entry(&self, path: &SpacePath) -> Result<(Entry, Asked, Option<Arc<File>>)> {
-        loop {
-            let asked = self.asked();
-            let found = match self.cached(path, asked.1) {
-                // A listing leaves entries it never followed.
-                Some(cached) => {
-                    self.move_on(&cached.0).await;
-                    Ok(cached)
-                }
-                None => self.fetch(path, asked).await,
-            };
-            let (entry, fetched) = match found {
-                Err(err) if err.is_offline() => return self.held(path).ok_or(err),
-                found => found?,
-            };
-            if let Some(local) = self.journal.changes_as_of(entry.id, asked.1) {
-                return Ok((entry, fetched, local));
+    /// else from the authority; either way the reply is one snapshot of its inode (C1).
+    pub(super) async fn entry(&self, path: &SpacePath) -> Result<(Entry, Instant, Option<Arc<File>>)> {
+        let asked = Instant::now();
+        let found = match self.cached(path) {
+            // A listing leaves entries it never followed.
+            Some(cached) => {
+                self.move_on(&cached.0).await;
+                Ok(cached)
             }
-        }
+            None => self.fetch(path, asked).await,
+        };
+        let (entry, fetched) = match found {
+            Err(err) if err.is_offline() => self.held(path).ok_or(err)?,
+            found => found?,
+        };
+        let (entry, local) = self.view(entry);
+        Ok((entry, fetched, local))
     }
 
-    /// The entry bound to `path` while it may answer for it: within TTL, in generation `settled`,
-    /// and unchanged by this client since.
-    fn cached(&self, path: &SpacePath, settled: u64) -> Option<(Entry, Asked)> {
+    /// One snapshot of the entry's inode: its attributes as any commit of this client's since
+    /// left them, with the journal copy of the changes still pending (C1).
+    pub(super) fn view(&self, entry: Entry) -> (Entry, Option<Arc<File>>) {
+        let view = self.inodes.with(entry.id, |state| state.view()).flatten();
+        view.unwrap_or((entry, None))
+    }
+
+    /// The entry bound to `path` while it may answer for it: within TTL, and unchanged by this
+    /// client since.
+    fn cached(&self, path: &SpacePath) -> Option<(Entry, Instant)> {
         let (entry, asked, current) = self.inodes.at(path)?;
-        let usable = current && asked.1 == settled && asked.0.elapsed() < TTL;
-        usable.then_some((entry, asked))
+        (current && asked.elapsed() < TTL).then_some((entry, asked))
     }
 
-    async fn fetch(&self, path: &SpacePath, asked: Asked) -> Result<(Entry, Asked)> {
+    async fn fetch(&self, path: &SpacePath, asked: Instant) -> Result<(Entry, Instant)> {
         let entry = self.remote.stat(path.clone()).await?;
         self.follow(&entry, asked).await;
         Ok((entry, asked))
@@ -87,10 +88,9 @@ impl Space {
 
     /// Offline, the last entry seen at `path`, however old, keeps cached reads and writes
     /// working (C12).
-    fn held(&self, path: &SpacePath) -> Option<(Entry, Asked, Option<Arc<File>>)> {
+    fn held(&self, path: &SpacePath) -> Option<(Entry, Instant)> {
         let (entry, asked, _) = self.inodes.at(path)?;
-        let local = self.journal.changes(entry.id);
-        Some((entry, asked, local))
+        Some((entry, asked))
     }
 
     /// ESTALE for an entry the authority no longer finds where it was looked for. Its path is
@@ -117,7 +117,7 @@ impl Space {
 
     /// Counts a reply that hands the kernel a reference to the entry's inode, and returns its
     /// attributes for that reply.
-    pub(super) fn looked_up(&self, entry: &Entry, asked: Asked, local: Option<&File>) -> FileAttr {
+    pub(super) fn looked_up(&self, entry: &Entry, asked: Instant, local: Option<&File>) -> FileAttr {
         self.inodes.looked_up(entry, asked);
         self.attr(entry, local)
     }
@@ -126,7 +126,7 @@ impl Space {
     pub(super) fn added(&self, entry: &Entry) -> FileAttr {
         self.inodes.stale(&entry.path);
         let local = self.journal.changes(entry.id);
-        self.looked_up(entry, self.asked(), local.as_deref())
+        self.looked_up(entry, Instant::now(), local.as_deref())
     }
 
     /// Drops the kernel's `lookups` references to `ino`.

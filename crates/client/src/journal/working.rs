@@ -8,8 +8,7 @@ use std::sync::Arc;
 use herdfs_core::proto::{EntryId, Version};
 use tempfile::{Builder, NamedTempFile};
 
-use super::{Journal, Tracked, write_record};
-use crate::lock;
+use super::{Journal, write_record};
 
 impl Journal {
     /// A file to fill as the entry's next working copy, deleted unless installed. Its mode is
@@ -24,13 +23,14 @@ impl Journal {
 
     /// Makes `scratch` the entry's working copy over `base`, unless another open got there first.
     pub fn install(&self, entry: EntryId, scratch: NamedTempFile, base: Option<&Version>) -> io::Result<()> {
-        let mut entries = lock(&self.entries);
-        let tracked = entries.entry(entry).or_default();
-        if tracked.working.is_none() && tracked.pending.is_none() {
-            tracked.working = Some(Arc::new(scratch.persist(self.working_path(entry))?));
-            tracked.base = base.cloned();
-        }
-        Ok(())
+        let installed = self.local(entry, true, |local| {
+            if local.working.is_none() && local.pending.is_none() {
+                local.working = Some(Arc::new(scratch.persist(self.working_path(entry))?));
+                local.base = base.cloned();
+            }
+            Ok(())
+        });
+        installed.unwrap_or(Ok(()))
     }
 
     /// Joins the entry's journal copies for writing, emptying them if asked. False if it has none.
@@ -51,53 +51,55 @@ impl Journal {
     }
 
     /// Changes the working copy, first starting one if a seal took the last. Runs under the
-    /// lock, so a seal never takes a copy halfway through a change (C3).
+    /// inode's lock, so a seal never takes a copy halfway through a change (C3).
     fn change(
         &self,
         entry: EntryId,
         empty: bool,
         change: impl FnOnce(&File) -> io::Result<()>,
     ) -> io::Result<()> {
+        let no_copy = || io::Error::other("no journal copy");
+        let mut change = Some(change);
         loop {
-            let mut entries = lock(&self.entries);
-            let no_copy = || io::Error::other("no journal copy");
-            let tracked = entries.get_mut(&entry).ok_or_else(no_copy)?;
-            let Some(working) = &tracked.working else {
-                let seal = tracked.pending.as_ref().ok_or_else(no_copy)?.0.seal;
+            let restart = self.local(entry, false, |local| {
+                if let Some(working) = &local.working {
+                    return change
+                        .take()
+                        .map_or(Ok(None), |change| change(working).map(|()| None));
+                }
+                let seal = local.pending.as_ref().ok_or_else(no_copy)?.0.seal;
                 // Opened under the lock, before a commit can delete it.
                 let sealed = (!empty).then(|| File::open(self.sealed_path(entry, seal)));
-                drop(entries);
-                self.restart(entry, seal, sealed.transpose()?)?;
-                continue;
-            };
-            return change(working);
+                Ok(Some((seal, sealed.transpose()?)))
+            });
+            match restart.ok_or_else(no_copy)?? {
+                Some((seal, sealed)) => self.restart(entry, seal, sealed)?,
+                None => return Ok(()),
+            }
         }
     }
 
     /// Records a modification time for the entry's next commit to keep, if a commit will
     /// come that has not started yet. False otherwise: the caller sets it at the authority.
     pub fn set_mtime(&self, entry: EntryId, mtime_ms: i64) -> io::Result<bool> {
-        let mut entries = lock(&self.entries);
-        let Some(tracked) = entries.get_mut(&entry) else {
-            return Ok(false);
-        };
         let time = crate::from_unix_ms(mtime_ms);
-        // The next seal takes the working copy's modification time.
-        if let Some(working) = &tracked.working {
-            working.set_modified(time)?;
-            return Ok(true);
-        }
-        let Some((record, sealed)) = tracked
-            .pending
-            .as_mut()
-            .filter(|(record, _)| tracked.reading != Some(record.seal))
-        else {
-            return Ok(false);
-        };
-        record.mtime_ms = Some(mtime_ms);
-        write_record(&self.record_path(entry), record)?;
-        sealed.set_modified(time)?;
-        Ok(true)
+        let set = self.local(entry, false, |local| {
+            // The next seal takes the working copy's modification time.
+            if let Some(working) = &local.working {
+                working.set_modified(time)?;
+                return Ok(true);
+            }
+            let reading = local.reading;
+            let pending = local.pending.as_mut();
+            let Some((record, sealed)) = pending.filter(|(record, _)| reading != Some(record.seal)) else {
+                return Ok(false);
+            };
+            record.mtime_ms = Some(mtime_ms);
+            write_record(&self.record_path(entry), record)?;
+            sealed.set_modified(time)?;
+            Ok(true)
+        });
+        set.unwrap_or(Ok(false))
     }
 
     /// Starts a working copy after seal `seal`: a copy of `sealed`, else empty. The copy is made
@@ -108,14 +110,13 @@ impl Journal {
         if let Some(mut sealed) = sealed {
             io::copy(&mut sealed, scratch.as_file_mut())?;
         }
-        let mut entries = lock(&self.entries);
-        let current = |tracked: &&mut Tracked| {
-            let latest = tracked.pending.as_ref().map(|(record, _)| record.seal);
-            tracked.working.is_none() && latest.is_none_or(|latest| latest == seal)
-        };
-        if let Some(tracked) = entries.get_mut(&entry).filter(current) {
-            tracked.working = Some(Arc::new(scratch.persist(self.working_path(entry))?));
-        }
-        Ok(())
+        let installed = self.local(entry, false, |local| {
+            let latest = local.pending.as_ref().map(|(record, _)| record.seal);
+            if local.working.is_none() && latest.is_none_or(|latest| latest == seal) {
+                local.working = Some(Arc::new(scratch.persist(self.working_path(entry))?));
+            }
+            Ok(())
+        });
+        installed.unwrap_or(Ok(()))
     }
 }

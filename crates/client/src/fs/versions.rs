@@ -2,11 +2,13 @@
 //! finds (C2, C3), to what is known offline (C12), and past a version this client may no longer
 //! use (C14, S8).
 
+use std::time::Instant;
+
 use fuser::Errno;
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{Entry, EntryId};
 
-use super::{Asked, Space};
+use super::Space;
 use crate::{Result, reader::Head};
 
 impl Space {
@@ -51,7 +53,7 @@ impl Space {
 
     /// Remembers an entry the authority returned, and switches an inode that open files read to
     /// a newer head it names, so every handle reads it from its next read (C3).
-    pub(super) async fn follow(&self, entry: &Entry, asked: Asked) {
+    pub(super) async fn follow(&self, entry: &Entry, asked: Instant) {
         self.inodes.observe(entry, asked, false);
         self.move_on(entry).await;
     }
@@ -77,7 +79,7 @@ impl Space {
         write: bool,
         truncate: bool,
     ) -> Result<Head> {
-        let asked = self.asked();
+        let asked = Instant::now();
         let (found, head, writable) = match self.remote.open(path.clone()).await {
             Err(err) if err.is_offline() => {
                 return match self.inodes.known(entry) {

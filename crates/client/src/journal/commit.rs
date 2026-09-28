@@ -4,7 +4,7 @@
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, atomic::Ordering::Relaxed};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use std::{collections::HashSet, io};
 
@@ -14,9 +14,9 @@ use herdfs_core::{ChunkId, chunk};
 use tokio::sync::{mpsc, watch};
 
 use super::{Journal, REJECTED, Record, write_record};
-use crate::fs::{Inodes, Kernel};
+use crate::fs::Kernel;
 use crate::stats::{Stats, bump};
-use crate::{Error, Result, cache::Cache, lock, remote::Remote};
+use crate::{Error, Result, cache::Cache, remote::Remote};
 
 const FIRST_RETRY: Duration = Duration::from_secs(1);
 const LAST_RETRY: Duration = Duration::from_secs(30);
@@ -43,7 +43,6 @@ pub struct Committer {
     pub remote: Arc<Remote>,
     pub cache: Arc<Cache>,
     pub stats: Arc<Stats>,
-    pub inodes: Arc<Inodes>,
     pub kernel: Arc<Kernel>,
 }
 
@@ -69,7 +68,6 @@ impl Committer {
                     bump(&self.stats.commits, 1);
                     // Reads go on to the committed version once the journal drops the copy, as
                     // do offline opens and appends (C1, C12).
-                    self.inodes.switch(entry, (Some(version.clone()), true));
                     delay = FIRST_RETRY;
                     // A retry may be answered with the head another client committed since.
                     (Outcome::Committed(version), !sealed)
@@ -171,50 +169,65 @@ where
 impl Journal {
     /// The entry's latest sealed write still to commit. `None` ends its committer.
     pub fn next(&self, entry: EntryId) -> Option<Job> {
-        let mut entries = lock(&self.entries);
-        let tracked = entries.get_mut(&entry)?;
-        if let Some((record, _)) = &tracked.pending {
-            (tracked.reading, tracked.due) = (Some(record.seal), None);
-            let (record, sealed) = (record.clone(), self.sealed_path(entry, record.seal));
-            return Some(Job { record, sealed });
-        }
-        tracked.committing = false;
-        self.tidy(&mut entries, entry);
-        None
+        let job = self.local(entry, false, |local| {
+            let Some((record, _)) = &local.pending else {
+                local.committing = false;
+                return None;
+            };
+            let job = Job {
+                record: record.clone(),
+                sealed: self.sealed_path(entry, record.seal),
+            };
+            (local.reading, local.due) = (Some(job.record.seal), None);
+            Some(job)
+        });
+        job.flatten()
     }
 
-    /// Settles a commit attempt: a committed version becomes the new base, a rejected write
-    /// is set aside, and a sealed file that a newer seal replaced goes.
+    /// Settles a commit attempt: a committed version becomes the new base, a rejected write is
+    /// set aside, and a sealed file that a newer seal replaced goes. A settle drops the copy and
+    /// gives the inode the result in one critical section, so no reply pairs the copy's absence
+    /// with attributes from before the commit (C1).
     pub fn finish(&self, job: &Job, outcome: Outcome) {
         let (entry, seal) = (job.record.entry, job.record.seal);
-        let mut entries = lock(&self.entries);
-        let Some(tracked) = entries.get_mut(&entry) else {
-            return;
-        };
-        tracked.reading = None;
-        let settled = !matches!(outcome, Outcome::Retrying);
-        let committed = matches!(outcome, Outcome::Committed(_));
-        tracked.attempts.send_replace((seal, committed));
-        match outcome {
-            Outcome::Committed(version) => tracked.base = Some(version),
-            Outcome::Rejected => {
-                self.reject(job);
-                tracked.refused = seal;
+        let settled = self.inodes.local(entry, false, |state| {
+            let local = state.local.as_mut()?;
+            local.reading = None;
+            let settled = !matches!(outcome, Outcome::Retrying);
+            let committed = match outcome {
+                Outcome::Committed(version) => Some(version),
+                Outcome::Rejected => {
+                    self.reject(job);
+                    local.refused = seal;
+                    None
+                }
+                Outcome::Dropped | Outcome::Retrying => None,
+            };
+            local.attempts.send_replace((seal, committed.is_some()));
+            if let Some(version) = &committed {
+                local.base = Some(version.clone());
             }
-            Outcome::Dropped | Outcome::Retrying => {}
-        }
-        let latest = tracked.pending.as_ref().map(|(record, _)| record.seal) == Some(seal);
-        // Counted before the copy goes, so remote state asked for before is known stale (C1).
-        if settled {
-            self.settled.fetch_add(1, Relaxed);
-        }
-        if settled && latest {
-            tracked.pending = None;
-            let _ = fs::remove_file(self.record_path(entry));
-        }
-        // Settled, or replaced by a newer seal: nothing reads this sealed copy any more. It goes
-        // after the record, which recovery would otherwise find naming no copy (C4a).
-        if settled || !latest {
+            let latest = local.pending.as_ref().map(|(record, _)| record.seal) == Some(seal);
+            if settled && latest {
+                local.pending = None;
+                let _ = fs::remove_file(self.record_path(entry));
+            }
+            // Settled, or replaced by a newer seal: nothing reads this sealed copy any more. It goes
+            // after the record, which recovery would otherwise find naming no copy (C4a).
+            if settled || !latest {
+                let _ = fs::remove_file(&job.sealed);
+            }
+            if local.idle() {
+                let _ = fs::remove_file(self.working_path(entry));
+                state.local = None;
+            }
+            if settled {
+                state.settle(committed.as_ref(), job.record.mtime_ms);
+            }
+            Some(())
+        });
+        // This client removed the entry meanwhile, and its local state with it (C10).
+        if settled.flatten().is_none() {
             let _ = fs::remove_file(&job.sealed);
         }
     }
@@ -256,27 +269,24 @@ impl Journal {
 
     /// How much longer the committer waits for a newer seal of the entry, if at all.
     pub fn quiet(&self, entry: EntryId) -> Option<Duration> {
-        let until = lock(&self.entries).get(&entry)?.quiet_until?;
+        let until = self.local(entry, false, |local| local.quiet_until).flatten()?;
         Some(until.saturating_duration_since(Instant::now())).filter(|left| !left.is_zero())
     }
 
     /// Ends the entry's quiet period: an fsync waits for its commit.
     pub fn urge(&self, entry: EntryId) {
-        if let Some(tracked) = lock(&self.entries).get_mut(&entry) {
-            tracked.quiet_until = None;
-        }
+        self.local(entry, false, |local| local.quiet_until = None);
         self.urged.notify_waiters();
     }
 
     /// The latest pending seal and a feed of commit attempts, for fsync to wait on.
     pub fn pending(&self, entry: EntryId) -> Option<(u64, watch::Receiver<(u64, bool)>)> {
-        let entries = lock(&self.entries);
-        let tracked = entries.get(&entry)?;
-        Some((tracked.pending.as_ref()?.0.seal, tracked.attempts.subscribe()))
+        let pending =
+            |local: &mut super::Local| Some((local.pending.as_ref()?.0.seal, local.attempts.subscribe()));
+        self.local(entry, false, pending).flatten()
     }
 
     pub fn pending_count(&self) -> usize {
-        let entries = lock(&self.entries);
-        entries.values().filter(|t| t.pending.is_some()).count()
+        self.inodes.count(|local| local.pending.is_some())
     }
 }

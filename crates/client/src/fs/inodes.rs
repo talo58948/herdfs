@@ -1,6 +1,6 @@
 //! The entries this client knows: each one's path, bound one to one with its id under one lock,
-//! so that no decision about an entry is taken from a path another entry now holds (C7); the
-//! entry as the authority last described it (C1, C2); and the kernel's references to its inode.
+//! so that no decision about an entry is taken from a path another entry now holds (C7), and
+//! the kernel's references to its inode. What is known of each entry is its `Inode`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -9,8 +9,8 @@ use std::time::Instant;
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{Entry, EntryId, Version};
 
-use super::Asked;
-use crate::{lock, lru::Lru, reader::Head, version::OpenVersion};
+use super::inode::{Inode, State};
+use crate::{journal::Local, lock, lru::Lru, reader::Head};
 
 /// How many entries that nothing holds are kept, for lookups within TTL and while offline (C12).
 const IDLE: u64 = 4096;
@@ -22,7 +22,8 @@ pub struct Inodes(Mutex<Table>);
 struct Table {
     nodes: HashMap<EntryId, Node>,
     by_path: HashMap<SpacePath, EntryId>,
-    /// The nodes that nothing holds, the next to go first.
+    /// The nodes the kernel holds no reference to, the next to go first; those with local
+    /// state stay.
     idle: Lru<EntryId, ()>,
 }
 
@@ -34,30 +35,16 @@ struct Node {
     inode: Arc<Inode>,
 }
 
-/// What this client knows of one entry.
-pub struct Inode(Mutex<State>);
-
-struct State {
-    entry: Entry,
-    /// When the entry was asked for, and in which generation of settled commits.
-    asked: Asked,
-    /// Whether it may answer for its path within TTL: a change this client made says not.
-    current: bool,
-    /// The version its open files read, if known, and whether this client may write it.
-    version: Option<Head>,
-    writable: bool,
-}
-
 impl Inodes {
     /// Takes an answer of the authority asked for at `asked`: the entry's attributes, unless ones
     /// asked for later are held, and its path, unless the authority confirmed a binding of the
     /// entry or the path since (C7). A listing's entries (`cold`) go first unless used (C12).
-    pub fn observe(&self, entry: &Entry, asked: Asked, cold: bool) {
+    pub fn observe(&self, entry: &Entry, asked: Instant, cold: bool) {
         lock(&self.0).observe(entry, asked, cold);
     }
 
     /// As `observe`, for an answer that hands the kernel a reference to the entry's inode.
-    pub fn looked_up(&self, entry: &Entry, asked: Asked) {
+    pub fn looked_up(&self, entry: &Entry, asked: Instant) {
         let mut table = lock(&self.0);
         table.observe(entry, asked, false);
         table.idle.remove(&entry.id);
@@ -81,64 +68,69 @@ impl Inodes {
 
     /// The entry bound to `path`, when it was asked for, and whether it may still answer for
     /// the path, marking it used.
-    pub fn at(&self, path: &SpacePath) -> Option<(Entry, Asked, bool)> {
+    pub fn at(&self, path: &SpacePath) -> Option<(Entry, Instant, bool)> {
         let mut table = lock(&self.0);
         let id = *table.by_path.get(path)?;
         let _ = table.idle.get(&id);
-        let state = lock(&table.nodes.get(&id)?.inode.0);
-        Some((state.entry.clone(), state.asked, state.current))
+        let inode = table.nodes.get(&id)?.inode.clone();
+        drop(table);
+        inode.state().cached()
+    }
+
+    /// Reads or changes what is known of the entry, under its inode's lock alone.
+    pub fn with<T>(&self, id: EntryId, change: impl FnOnce(&mut State) -> T) -> Option<T> {
+        let inode = lock(&self.0).nodes.get(&id)?.inode.clone();
+        Some(change(&mut inode.state()))
     }
 
     /// The version the entry's open files read, if known, and whether this client may write it.
     pub fn known(&self, id: EntryId) -> Option<(Head, bool)> {
-        let table = lock(&self.0);
-        let state = lock(&table.nodes.get(&id)?.inode.0);
-        Some((state.version.clone()?, state.writable))
+        self.with(id, |state| state.known()).flatten()
     }
 
     /// The version the entry's open files read, if known and committed.
     pub fn followed(&self, id: EntryId) -> Head {
-        self.known(id).and_then(|(file, _)| file)
+        self.with(id, |state| state.followed()).flatten()
     }
 
     /// Whether the entry names a newer head than the version its open files read (C3).
     pub fn behind(&self, id: EntryId) -> bool {
-        let table = lock(&self.0);
-        let Some(node) = table.nodes.get(&id) else {
-            return false;
-        };
-        let state = lock(&node.inode.0);
-        let followed = state
-            .version
-            .as_ref()
-            .map(|file| file.as_ref().map(|file| file.version.id));
-        followed < Some(state.entry.head)
+        self.with(id, |state| state.behind()) == Some(true)
     }
 
-    /// Makes `head` the version the entry's open files read, from an open or a commit, unless a
-    /// newer one is known, and records whether this client may write it. True if that replaced a
-    /// version known before, whose pages the kernel may hold.
-    pub fn switch(&self, id: EntryId, (head, writable): (Option<Version>, bool)) -> bool {
-        let table = lock(&self.0);
-        let Some(node) = table.nodes.get(&id) else {
-            return false;
-        };
-        let mut state = lock(&node.inode.0);
-        let older =
-            |file: &Head| file.as_ref().map(|file| file.version.id) < head.as_ref().map(|head| head.id);
-        let switched = state.version.as_ref().is_some_and(older);
-        if state.version.as_ref().is_none_or(older) {
-            state.version = Some(head.map(|head| Arc::new(OpenVersion::new(head))));
-        }
-        state.writable = writable;
-        switched
+    /// Takes an Open answer: see `State::switch`.
+    pub fn switch(&self, id: EntryId, answer: (Option<Version>, bool)) -> bool {
+        self.with(id, |state| state.switch(answer)) == Some(true)
     }
 
     /// Forgets the version the entry's open files read, which this client may no longer use.
     pub fn unfollow(&self, id: EntryId) {
-        if let Some(node) = lock(&self.0).nodes.get(&id) {
-            lock(&node.inode.0).version = None;
-        }
+        self.with(id, State::unfollow);
+    }
+
+    /// As `with`, for the journal: with `make`, the entry first gets local state, and an inode if
+    /// unknown, since a write recovered from the journal names only its entry.
+    pub fn local<T>(&self, id: EntryId, make: bool, change: impl FnOnce(&mut State) -> T) -> Option<T> {
+        let inode = {
+            let mut table = lock(&self.0);
+            let inode = match table.nodes.get(&id) {
+                Some(node) => node.inode.clone(),
+                None if make => table.add(id, None, Instant::now()),
+                None => return None,
+            };
+            if make {
+                inode.state().local.get_or_insert_with(Local::default);
+            }
+            inode
+        };
+        Some(change(&mut inode.state()))
+    }
+
+    /// How many entries have local state for which `counts` holds.
+    pub fn count(&self, counts: impl Fn(&Local) -> bool) -> usize {
+        let table = lock(&self.0);
+        let local = |node: &&Node| node.inode.state().local.as_ref().is_some_and(&counts);
+        table.nodes.values().filter(local).count()
     }
 
     /// Whether the entry is known, and its path with when it was confirmed, if it has one.
@@ -163,7 +155,7 @@ impl Inodes {
         }
     }
 
-    /// Forgets an entry this client removed.
+    /// Forgets an entry this client removed, whose local state goes with it (C10).
     pub fn removed(&self, id: EntryId) {
         let mut table = lock(&self.0);
         if let Some((path, _)) = table.nodes.remove(&id).and_then(|node| node.bound) {
@@ -200,42 +192,40 @@ impl Inodes {
         let changed = |known: &SpacePath| known.is_within(path) || Some(known) == parent.as_ref();
         for node in table.nodes.values() {
             if node.bound.as_ref().is_some_and(|(known, _)| changed(known)) {
-                lock(&node.inode.0).current = false;
+                node.inode.state().current = false;
             }
         }
     }
 }
 
 impl Table {
-    fn observe(&mut self, entry: &Entry, asked: Asked, cold: bool) {
-        let node = self.nodes.entry(entry.id).or_insert_with(|| {
-            let state = State {
-                entry: entry.clone(),
-                asked,
-                current: true,
-                version: None,
-                writable: true,
-            };
-            let inode = Arc::new(Inode(Mutex::new(state)));
-            Node {
-                bound: None,
-                lookups: 0,
-                inode,
-            }
-        });
-        let (idle, bound, mut known) = (node.lookups == 0, node.bound.is_some(), lock(&node.inode.0));
-        if asked.0 >= known.asked.0 {
-            (known.entry, known.asked, known.current) = (entry.clone(), asked, true);
-        }
-        drop(known);
+    fn add(&mut self, id: EntryId, entry: Option<Entry>, asked: Instant) -> Arc<Inode> {
+        let inode = Arc::new(Inode::new(entry, asked));
+        let node = Node {
+            bound: None,
+            lookups: 0,
+            inode: inode.clone(),
+        };
+        self.nodes.insert(id, node);
+        self.idle.insert(id, 1, ());
+        inode
+    }
+
+    fn observe(&mut self, entry: &Entry, asked: Instant, cold: bool) {
+        let (bound, inode) = match self.nodes.get(&entry.id) {
+            Some(node) => (node.bound.is_some(), node.inode.clone()),
+            None => (false, self.add(entry.id, Some(entry.clone()), asked)),
+        };
+        inode.state().observe(entry, asked);
         // A listing names entries in bulk: it binds new ones, but confirms no binding (C7).
         if !(cold && bound) {
-            self.bind(entry.id, &entry.path, asked.0);
+            self.bind(entry.id, &entry.path, asked);
         }
-        match (idle, cold) {
-            (false, _) => {}
-            (true, true) => self.idle.insert_cold(entry.id, 1, ()),
-            (true, false) => self.idle.insert(entry.id, 1, ()),
+        if self.idle.contains(&entry.id) {
+            match cold {
+                true => self.idle.insert_cold(entry.id, 1, ()),
+                false => self.idle.insert(entry.id, 1, ()),
+            }
         }
         self.evict();
     }
@@ -266,7 +256,9 @@ impl Table {
 
     /// Drops the least recently used entries that nothing holds, past `IDLE`.
     fn evict(&mut self) {
-        for id in self.idle.evict(IDLE, |_| false) {
+        let nodes = &self.nodes;
+        let used = |id: &EntryId| nodes.get(id).is_some_and(|node| node.inode.in_use());
+        for id in self.idle.evict(IDLE, used) {
             if let Some((path, _)) = self.nodes.remove(&id).and_then(|node| node.bound) {
                 self.by_path.remove(&path);
             }
