@@ -10,7 +10,7 @@ use herdfs_core::proto::{Entry, EntryId, ErrorCode};
 use herdfs_core::{ChunkId, SpacePath};
 
 use super::{PERMISSIONS, Space};
-use crate::{error::Error, journal::Registration, lock, reader::OpenVersion};
+use crate::{Error, Result, journal::Registration, lock, reader::Head};
 
 pub struct Handle {
     pub entry: EntryId,
@@ -35,7 +35,7 @@ impl Handle {
 }
 
 impl Space {
-    pub async fn open(self: Arc<Self>, ino: INodeNo, flags: OpenFlags, pid: u32) -> Result<u64, Error> {
+    pub async fn open(self: Arc<Self>, ino: INodeNo, flags: OpenFlags, pid: u32) -> Result<u64> {
         let entry = self.entry_id(ino);
         let path = self.located(ino).await?;
         let writable = flags.acc_mode() != OpenAccMode::O_RDONLY;
@@ -43,11 +43,11 @@ impl Space {
         let handle = Handle::new(entry, writable, self.journal.opened(entry));
         let mut upgrade = None;
         // While this client holds changes, every handle reads them, so no head is needed (C1).
-        if self.journal.changes(entry).is_none() {
-            let head = self.head(entry, &path, writable, truncate).await?;
-            if let Some(file) = head.filter(|_| !writable) {
-                upgrade = self.start(&file, &path, pid, &handle);
-            }
+        if self.journal.changes(entry).is_none()
+            && let Some(file) = self.head(entry, &path, writable, truncate).await?
+            && !writable
+        {
+            upgrade = self.start(&file, &path, pid, &handle);
         }
         if truncate {
             self.prepare(entry, true).await?;
@@ -68,17 +68,14 @@ impl Space {
         mode: u32,
         flags: i32,
         pid: u32,
-    ) -> Result<(FileAttr, u64), Error> {
+    ) -> Result<(FileAttr, u64)> {
         let path = self.located_child(parent, &name).await?;
         let entry = match self.remote.create(path.clone(), mode & PERMISSIONS).await {
             Err(Error::Api(error)) if error.code == ErrorCode::Exists && flags & libc::O_EXCL == 0 => {
                 let entry = self.remote.stat(path).await?;
                 self.added(&entry);
-                let fh = self
-                    .clone()
-                    .open(self.ino(entry.id), OpenFlags(flags), pid)
-                    .await?;
-                return Ok((self.attr(&entry), fh));
+                let open = self.clone().open(self.ino(entry.id), OpenFlags(flags), pid);
+                return Ok((self.attr(&entry), open.await?));
             }
             created => created?,
         };
@@ -87,7 +84,7 @@ impl Space {
         Ok((self.added(&entry), fh))
     }
 
-    pub async fn read(self: Arc<Self>, fh: u64, off: u64, len: u32) -> Result<Vec<u8>, Error> {
+    pub async fn read(self: Arc<Self>, fh: u64, off: u64, len: u32) -> Result<Vec<u8>> {
         let handle = self.handle(fh)?;
         // Changes pending on this client show through every handle (C1).
         if let Some(copy) = self.journal.changes(handle.entry) {
@@ -100,7 +97,7 @@ impl Space {
     }
 
     /// Writes into the journal copy, which the first write makes.
-    pub async fn write(self: Arc<Self>, fh: u64, off: u64, data: Vec<u8>) -> Result<u32, Error> {
+    pub async fn write(self: Arc<Self>, fh: u64, off: u64, data: Vec<u8>) -> Result<u32> {
         let handle = self.handle(fh)?;
         if !handle.writable {
             return Err(Errno::EBADF.into());
@@ -113,11 +110,11 @@ impl Space {
 
     /// Seals the handle's writes. Runs on flush, which close(2) waits for, so a write
     /// survives a crash once close returns (C4a).
-    pub async fn flush(self: Arc<Self>, fh: u64) -> Result<(), Error> {
+    pub async fn flush(self: Arc<Self>, fh: u64) -> Result<()> {
         self.seal(&*self.handle(fh)?)
     }
 
-    pub async fn release(self: Arc<Self>, fh: u64) -> Result<(), Error> {
+    pub async fn release(self: Arc<Self>, fh: u64) -> Result<()> {
         let Some(handle) = lock(&self.handles).remove(&fh) else {
             return Ok(());
         };
@@ -127,7 +124,7 @@ impl Space {
 
     /// Waits for the commit of everything sealed so far. EIO if that attempt fails; the
     /// committer keeps retrying in the background.
-    pub async fn fsync(self: Arc<Self>, fh: u64) -> Result<(), Error> {
+    pub async fn fsync(self: Arc<Self>, fh: u64) -> Result<()> {
         let handle = self.handle(fh)?;
         self.seal(&handle)?;
         self.journal.urge(handle.entry);
@@ -135,7 +132,7 @@ impl Space {
     }
 
     /// Waits for the commit of the entry's pending write, if any. EIO if that attempt fails.
-    pub(super) async fn committed(&self, entry: EntryId) -> Result<(), Error> {
+    pub(super) async fn committed(&self, entry: EntryId) -> Result<()> {
         let Some((sealed, mut attempts)) = self.journal.pending(entry) else {
             return Ok(());
         };
@@ -146,11 +143,9 @@ impl Space {
 
     /// Truncates through the journal: on the handle if one is given, else as a short open,
     /// which needs write access as an open for writing does.
-    pub(super) async fn truncate(&self, ino: INodeNo, size: u64, fh: Option<u64>) -> Result<(), Error> {
-        let handle = fh
-            .map(|fh| self.handle(fh))
-            .transpose()?
-            .filter(|handle| handle.writable);
+    pub(super) async fn truncate(&self, ino: INodeNo, size: u64, fh: Option<u64>) -> Result<()> {
+        let handle = fh.map(|fh| self.handle(fh)).transpose()?;
+        let handle = handle.filter(|handle| handle.writable);
         let entry = self.entry_id(ino);
         let _registration = self.journal.opened(entry);
         if handle.is_none() && self.journal.changes(entry).is_none() {
@@ -168,7 +163,7 @@ impl Space {
 
     /// Gives the entry a journal copy to change, emptied if `truncate`: the one holding its
     /// changes, else its current version materialized (C1).
-    async fn prepare(&self, entry: EntryId, truncate: bool) -> Result<(), Error> {
+    async fn prepare(&self, entry: EntryId, truncate: bool) -> Result<()> {
         if self.journal.attach(entry, truncate)? {
             return Ok(());
         }
@@ -179,7 +174,7 @@ impl Space {
         };
         let mut scratch = self.journal.scratch(entry)?;
         if let Some(base) = base.as_ref().filter(|_| !truncate) {
-            self.reader.materialize(base, &mut scratch.file).await?;
+            self.reader.materialize(base, scratch.as_file_mut()).await?;
         }
         self.journal
             .install(entry, scratch, base.as_ref().map(|base| &base.version))?;
@@ -189,26 +184,21 @@ impl Space {
     }
 
     /// The version the entry's handles read: the one this client follows, else its head now.
-    async fn current(&self, entry: EntryId) -> Result<Option<Arc<OpenVersion>>, Error> {
-        match self.reader.current(entry) {
-            Some(file) => Ok(file),
-            None => {
-                self.head(entry, &self.located(self.ino(entry)).await?, false, false)
-                    .await
-            }
+    async fn current(&self, entry: EntryId) -> Result<Head> {
+        if let Some(file) = self.reader.current(entry) {
+            return Ok(file);
         }
+        let path = self.located(self.ino(entry)).await?;
+        self.head(entry, &path, false, false).await
     }
 
-    /// Switches an inode that open files read to a newer head a stat saw, so every handle
-    /// reads it from its next read (C3).
+    /// Remembers an entry the authority returned, and switches an inode that open files read to
+    /// a newer head it names, so every handle reads it from its next read (C3).
     pub(super) async fn follow(&self, entry: &Entry) {
-        let open = lock(&self.handles)
-            .values()
-            .any(|handle| handle.entry == entry.id);
-        let current = self
-            .reader
-            .current(entry.id)
-            .map(|file| file.map(|file| file.version.id));
+        self.remember(entry);
+        let open = lock(&self.handles).values().any(|h| h.entry == entry.id);
+        let current = self.reader.current(entry.id);
+        let current = current.map(|file| file.map(|file| file.version.id));
         if open && current != Some(entry.head) && self.journal.changes(entry.id).is_none() {
             let _ = self.head(entry.id, &entry.path, false, false).await;
         }
@@ -218,13 +208,7 @@ impl Space {
     /// close-to-open consistency (C2), and one for writing needs write access. Offline, the
     /// version followed lets writes and cached reads go on, and a truncating write needs none,
     /// since its unguarded commit is right on an unknown base too (C5, C12).
-    async fn head(
-        &self,
-        entry: EntryId,
-        path: &SpacePath,
-        write: bool,
-        truncate: bool,
-    ) -> Result<Option<Arc<OpenVersion>>, Error> {
+    async fn head(&self, entry: EntryId, path: &SpacePath, write: bool, truncate: bool) -> Result<Head> {
         let (found, head, writable) = match self.remote.open(path.clone()).await {
             Err(err) if err.is_offline() => {
                 return self.reader.current(entry).or(truncate.then_some(None)).ok_or(err);
@@ -251,16 +235,13 @@ impl Space {
     }
 
     /// Persists the handle's writes, if any since the last seal, for the committer.
-    fn seal(&self, handle: &Handle) -> Result<(), Error> {
+    fn seal(&self, handle: &Handle) -> Result<()> {
         if !handle.dirty.swap(false, Relaxed) {
             return Ok(());
         }
         // Sealing fsyncs the copy, which may take a while for a large file.
         let sealed = tokio::task::block_in_place(|| self.journal.seal(handle.entry));
-        if sealed.is_err() {
-            handle.dirty.store(true, Relaxed);
-        }
-        Ok(sealed?)
+        Ok(sealed.inspect_err(|_| handle.dirty.store(true, Relaxed))?)
     }
 
     fn register(&self, handle: Handle) -> u64 {
@@ -269,7 +250,7 @@ impl Space {
         fh
     }
 
-    fn handle(&self, fh: u64) -> Result<Arc<Handle>, Error> {
+    fn handle(&self, fh: u64) -> Result<Arc<Handle>> {
         Ok(lock(&self.handles).get(&fh).cloned().ok_or(Errno::EBADF)?)
     }
 }

@@ -1,21 +1,21 @@
 //! The herdfs client: a FUSE mount of one space, backed by the authority.
 
 mod cache;
-mod chunk_map;
 mod error;
 mod fs;
 mod journal;
-mod link;
 mod lru;
 mod mount;
 mod reader;
 mod remote;
 mod stats;
 mod strategy;
+mod version;
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use error::{Error, Result};
 pub use mount::{MountArgs, mount};
 pub use strategy::{Jev, OpenContext, Strategy};
 

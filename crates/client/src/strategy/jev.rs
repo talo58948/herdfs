@@ -10,7 +10,7 @@ use tokio::sync::oneshot;
 
 use super::{Decider, Decision, OpenContext, Strategy};
 use crate::stats::{Stats, bump};
-use crate::{error::Error, lock};
+use crate::{Error, Result, lock};
 
 const MODEL: &str = "typesafe-ai/jev";
 /// Jev answers warm in about 350 ms; past this the rule's choice stands (P2).
@@ -32,7 +32,7 @@ impl Jev {
     pub const CONFIDENT: f64 = 0.3;
 
     /// Jev at `url`, with the AI Gateway key in `key_file`.
-    pub fn new(key_file: &Path, url: &str) -> Result<Self, Error> {
+    pub fn new(key_file: &Path, url: &str) -> Result<Self> {
         Ok(Self {
             http: reqwest::Client::builder().timeout(TIMEOUT).build()?,
             url: url.to_owned(),
@@ -42,7 +42,7 @@ impl Jev {
     }
 
     /// Jev's choice for `context`, with its confidence.
-    pub async fn ask(&self, context: &OpenContext) -> Result<(Strategy, f64), Error> {
+    pub async fn ask(&self, context: &OpenContext) -> Result<(Strategy, f64)> {
         let question = json!({
             "model": MODEL,
             "state": phrase(context),

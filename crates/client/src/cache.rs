@@ -97,11 +97,8 @@ impl Cache {
             return 1.0;
         }
         let index = lock(&self.index);
-        let cached: u64 = chunks
-            .iter()
-            .filter(|chunk| index.chunks.contains(&chunk.id))
-            .map(|chunk| u64::from(chunk.len))
-            .sum();
+        let cached = chunks.iter().filter(|chunk| index.chunks.contains(&chunk.id));
+        let cached: u64 = cached.map(|chunk| u64::from(chunk.len)).sum();
         cached as f64 / total as f64
     }
 

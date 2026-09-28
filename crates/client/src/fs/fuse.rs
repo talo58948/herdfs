@@ -14,7 +14,7 @@ use tokio::runtime::Handle as Runtime;
 
 use super::answer::Answer;
 use super::{Space, namespace::AttrChange};
-use crate::{error::Error, unix_ms};
+use crate::{Result, unix_ms};
 
 const STATS_XATTR: &str = "user.herdfs.stats";
 
@@ -36,7 +36,7 @@ impl Fuse {
     fn spawn<T>(
         &self,
         reply: impl Answer<T> + Send + 'static,
-        work: impl Future<Output = Result<T, Error>> + Send + 'static,
+        work: impl Future<Output = Result<T>> + Send + 'static,
     ) {
         self.runtime.spawn(async move {
             match work.await {
@@ -93,14 +93,13 @@ impl Filesystem for Fuse {
             TimeOrNow::SpecificTime(time) => unix_ms(time),
             TimeOrNow::Now => unix_ms(SystemTime::now()),
         });
-        let fh = fh.map(u64::from);
         let change = AttrChange {
             mode,
             uid,
             gid,
             size,
             mtime_ms,
-            fh,
+            fh: fh.map(u64::from),
         };
         self.spawn(reply, self.space().setattr(ino, change));
     }
@@ -263,10 +262,8 @@ impl Filesystem for Fuse {
         flags: i32,
         reply: ReplyCreate,
     ) {
-        let work = self
-            .space()
-            .create((parent, name.to_owned()), mode & !umask, flags, req.pid());
-        self.spawn(reply, work);
+        let child = (parent, name.to_owned());
+        self.spawn(reply, self.space().create(child, mode & !umask, flags, req.pid()));
     }
 }
 

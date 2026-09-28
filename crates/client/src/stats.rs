@@ -1,8 +1,9 @@
 //! Counters behind the `user.herdfs.stats` xattr on the mount root.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-use serde_json::{Map, Value, json};
+use serde_json::json;
 
 use crate::strategy::Strategy;
 
@@ -33,15 +34,7 @@ impl Stats {
     /// The counters as JSON. Pending commits are counted by the journal, the round trip (seconds)
     /// by the remote.
     pub fn json(&self, pending_commits: usize, round_trip: Option<f64>) -> Vec<u8> {
-        let decisions: Map<String, Value> = Strategy::ALL
-            .into_iter()
-            .map(|strategy| {
-                (
-                    strategy.name().into(),
-                    self.decisions[strategy as usize].load(Relaxed).into(),
-                )
-            })
-            .collect();
+        let decided = |strategy: Strategy| (strategy.name(), self.decisions[strategy as usize].load(Relaxed));
         json!({
             "bytes_fetched": self.bytes_fetched.load(Relaxed),
             "chunks_fetched": self.chunks_fetched.load(Relaxed),
@@ -53,7 +46,7 @@ impl Stats {
             "jev_answers": self.jev_answers.load(Relaxed),
             "jev_unsure": self.jev_unsure.load(Relaxed),
             "jev_errors": self.jev_errors.load(Relaxed),
-            "decisions": decisions,
+            "decisions": BTreeMap::from(Strategy::ALL.map(decided)),
         })
         .to_string()
         .into_bytes()
