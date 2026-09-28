@@ -22,7 +22,13 @@ pub use kernel::Kernel;
 use herdfs_core::proto::{Entry, EntryId, Kind};
 
 use crate::{
-    Result, cache::Cache, journal::Journal, lru::Lru, reader::Reader, remote::Remote, stats::Stats,
+    Result,
+    cache::Cache,
+    journal::{Journal, Local},
+    lru::Lru,
+    reader::Reader,
+    remote::Remote,
+    stats::Stats,
     strategy::Decider,
 };
 
@@ -58,16 +64,16 @@ pub struct Space {
 impl Space {
     pub fn new(
         remote: Arc<Remote>,
-        reader: Arc<Reader>,
         cache: Arc<Cache>,
         journal: Arc<Journal>,
         stats: Arc<Stats>,
         decider: Decider,
         kernel: Arc<Kernel>,
+        inodes: Arc<Inodes>,
     ) -> io::Result<Self> {
         // /proc/self belongs to this process's user and group.
         let process = std::fs::metadata("/proc/self")?;
-        let inodes = journal.inodes();
+        let reader = Arc::new(Reader::new(remote.clone(), cache.clone(), stats.clone()));
         Ok(Self {
             remote,
             reader,
@@ -165,6 +171,6 @@ impl Space {
     /// The counters behind `user.herdfs.stats`.
     pub fn stats(&self) -> Vec<u8> {
         self.stats
-            .json(self.journal.pending_count(), self.remote.round_trip.get())
+            .json(self.inodes.count(Local::is_pending), self.remote.round_trip.get())
     }
 }

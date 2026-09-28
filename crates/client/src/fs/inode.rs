@@ -125,6 +125,13 @@ impl State {
         }
     }
 
+    /// Forgets the local changes once nothing holds them.
+    pub fn tidy(&mut self) {
+        if self.local.as_ref().is_some_and(Local::idle) {
+            self.local = None;
+        }
+    }
+
     /// Forgets the version the entry's open files read, which this client may no longer use.
     pub fn unfollow(&mut self) {
         self.version = None;

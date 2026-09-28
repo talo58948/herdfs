@@ -81,7 +81,10 @@ impl Inodes {
     /// Reads or changes what is known of the entry, under its inode's lock alone.
     pub fn with<T>(&self, id: EntryId, change: impl FnOnce(&mut State) -> T) -> Option<T> {
         let inode = lock(&self.0).nodes.get(&id)?.inode.clone();
-        Some(change(&mut inode.state()))
+        let mut state = inode.state();
+        let changed = change(&mut state);
+        state.tidy();
+        Some(changed)
     }
 
     /// The entry as its inode now has it, with the journal copy of this client's changes, if
@@ -91,9 +94,10 @@ impl Inodes {
         view.unwrap_or((entry, None))
     }
 
-    /// As `with`, for the journal: with `make`, the entry first gets local state, and an inode if
-    /// unknown, since a write recovered from the journal names only its entry.
-    pub fn local<T>(&self, id: EntryId, make: bool, change: impl FnOnce(&mut State) -> T) -> Option<T> {
+    /// Runs `change` on the entry's local changes (journal/local.rs), under its inode's lock
+    /// alone, and forgets them once nothing holds them. With `make`, they are made first, and an
+    /// inode if unknown, since a write recovered from the journal names only its entry.
+    pub fn local<T>(&self, id: EntryId, make: bool, change: impl FnOnce(&mut Local) -> T) -> Option<T> {
         let inode = {
             let mut table = lock(&self.0);
             let inode = match table.nodes.get(&id) {
@@ -106,7 +110,10 @@ impl Inodes {
             }
             inode
         };
-        Some(change(&mut inode.state()))
+        let mut state = inode.state();
+        let changed = change(state.local.as_mut()?);
+        state.tidy();
+        Some(changed)
     }
 
     /// How many entries have local state for which `counts` holds.

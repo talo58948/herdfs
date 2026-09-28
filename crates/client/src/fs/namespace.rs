@@ -8,7 +8,7 @@ use fuser::{Errno, FileAttr, INodeNo, ReplyDirectory};
 use herdfs_core::SpacePath;
 
 use super::{PERMISSIONS, Space, TTL};
-use crate::{Result, lock};
+use crate::{Result, journal::Local, lock};
 
 pub struct AttrChange {
     pub mode: Option<u32>,
@@ -64,7 +64,10 @@ impl Space {
         let entry_id = self.entry_id(ino);
         // The next commit keeps a journaled mtime, which it would otherwise stamp over (cp -p).
         let journaled = match change.mtime_ms {
-            Some(mtime) => self.journal.set_mtime(entry_id, mtime)?,
+            Some(mtime) => {
+                let set = |local: &mut Local| local.set_mtime(&self.journal, entry_id, mtime);
+                self.inodes.local(entry_id, false, set).unwrap_or(Ok(false))?
+            }
             None => false,
         };
         let mtime_ms = change.mtime_ms.filter(|_| !journaled);
@@ -115,7 +118,8 @@ impl Space {
         let path = self.located_child(parent, &name).await?;
         let removed = self.remote.remove(path.clone()).await?;
         // The removed entry's changes are moot: deletion wins (C10), for it alone (C4a).
-        self.journal.discard(removed.id);
+        let discard = |local: &mut Local| local.discard(&self.journal, removed.id);
+        self.inodes.local(removed.id, false, discard);
         self.inodes.stale(&path);
         // Another entry held at that path had moved away: `Locate` tells where (C7).
         self.inodes.unbind(&path);
@@ -141,8 +145,8 @@ impl Space {
     async fn settle(&self, path: &SpacePath) -> Result<()> {
         let entries = self.inodes.within(path);
         for &entry in &entries {
-            tokio::task::block_in_place(|| self.journal.seal(entry))?;
-            self.journal.urge(entry);
+            tokio::task::block_in_place(|| self.seal_entry(entry))?;
+            self.urge(entry);
         }
         for entry in entries {
             self.committed(entry).await?;
