@@ -3,10 +3,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use herdfs_core::SpacePath;
 use herdfs_core::proto::EntryId;
 
-use super::{Space, State, handles::Handle};
+use super::{Space, handles::Handle};
 use crate::lock;
 use crate::strategy::{OpenContext, Strategy, Upgrade};
 use crate::version::OpenVersion;
@@ -19,28 +18,30 @@ const OPENS: u64 = 4096;
 
 impl Space {
     /// Changes the version an inode follows, then moves its Pin handles to that version.
-    pub(crate) fn switch_version<T>(
+    pub(crate) fn switch_version(
         &self,
         entry: EntryId,
-        change: impl FnOnce(&mut State) -> Option<(T, bool)>,
-    ) -> Option<T> {
-        let (changed, switched) = self.inodes.with(entry, change).flatten()?;
+        change: impl FnOnce(&mut super::inode::State) -> Option<bool>,
+    ) -> Option<bool> {
+        let switched = self.inodes.with(entry, change).flatten()?;
         if switched {
             self.follow_pins(entry);
         }
-        Some(changed)
+        Some(switched)
     }
 
     /// Decides the access strategy for this open of `file` (P1), and begins it.
     pub(super) fn start(
         &self,
         file: Option<&Arc<OpenVersion>>,
-        path: Option<&SpacePath>,
         pid: u32,
         handle: &Handle,
     ) -> Option<Upgrade> {
+        let path = self.path(self.ino(handle.entry)).ok().flatten();
         let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
-        let extension = path.and_then(|path| std::path::Path::new(path.name()).extension());
+        let extension = path
+            .as_ref()
+            .and_then(|path| std::path::Path::new(path.name()).extension());
         let context = OpenContext {
             size: file.map_or(0, |file| file.version.size),
             extension: extension.map(|extension| extension.to_string_lossy().into()),

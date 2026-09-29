@@ -55,23 +55,17 @@ impl Mount {
             Arc::new(Kernel::new(EntryId(1))),
         );
         let space = Space::new(
-            remote.clone(),
-            cache.clone(),
+            remote,
+            cache,
             journal.clone(),
-            stats.clone(),
+            stats,
             Decider::Fixed(Strategy::Stream),
-            kernel.clone(),
+            kernel,
             inodes.clone(),
         )
         .unwrap();
         let committer = Committer {
             space: Arc::new(space),
-            journal: journal.clone(),
-            inodes: inodes.clone(),
-            remote,
-            cache,
-            stats,
-            kernel,
         };
         let mount = Self {
             journal,

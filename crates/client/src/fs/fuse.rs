@@ -39,14 +39,22 @@ impl Fuse {
         work: impl Future<Output = Result<T>> + Send + 'static,
     ) {
         self.runtime.spawn(async move {
-            match work.await {
-                Ok(value) => reply.answer(value),
-                Err(err) => {
-                    tracing::debug!(%err, "request failed");
-                    reply.fail(err.errno());
-                }
-            }
+            Self::reply(reply, work.await);
         });
+    }
+
+    fn reply<T>(reply: impl Answer<T>, result: Result<T>) -> bool {
+        match result {
+            Ok(value) => {
+                reply.answer(value);
+                true
+            }
+            Err(err) => {
+                tracing::debug!(%err, "request failed");
+                reply.fail(err.errno());
+                false
+            }
+        }
     }
 }
 
@@ -161,17 +169,12 @@ impl Filesystem for Fuse {
         let (from, to) = ((parent, name.to_owned()), (new_parent, destination.clone()));
         let space = self.space();
         self.runtime.spawn(async move {
-            match space.clone().rename(from, to).await {
-                Ok(stale) => {
-                    reply.ok();
-                    if let Some(stale) = stale {
-                        space.kernel.invalidate_entry(new_parent, stale, &destination);
-                    }
-                }
-                Err(err) => {
-                    tracing::debug!(%err, "request failed");
-                    reply.error(err.errno());
-                }
+            let result = space.clone().rename(from, to).await;
+            let stale = result.as_ref().ok().copied().flatten();
+            if Self::reply(reply, result.map(|_| ()))
+                && let Some(stale) = stale
+            {
+                space.kernel.invalidate_entry(new_parent, stale, &destination);
             }
         });
     }

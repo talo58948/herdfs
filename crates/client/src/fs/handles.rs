@@ -65,11 +65,11 @@ impl Space {
         if writable {
             self.head(entry, mode).await?;
         } else {
-            let (file, path) = match self.changes(entry) {
-                Some(_) => (None, self.path(ino)?),
+            let file = match self.changes(entry) {
+                Some(_) => None,
                 None => self.head(entry, mode).await?,
             };
-            upgrade = self.start(file.as_ref(), path.as_ref(), pid, &handle);
+            upgrade = self.start(file.as_ref(), pid, &handle);
         }
         if truncate {
             self.prepare(entry, true).await?;

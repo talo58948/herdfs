@@ -100,25 +100,9 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
         }
     };
     let kernel = Arc::new(Kernel::new(root.id));
-    let space = Space::new(
-        remote.clone(),
-        cache.clone(),
-        journal.clone(),
-        stats.clone(),
-        decider,
-        kernel.clone(),
-        inodes.clone(),
-    )?;
+    let space = Space::new(remote.clone(), cache, journal, stats, decider, kernel, inodes)?;
     let space = Arc::new(space);
-    let committer = Committer {
-        space: space.clone(),
-        journal,
-        inodes,
-        remote: remote.clone(),
-        cache,
-        stats,
-        kernel,
-    };
+    let committer = Committer { space: space.clone() };
     tokio::spawn(Arc::new(committer).run(woken));
     tokio::spawn(remote.probe());
     Ok(space)

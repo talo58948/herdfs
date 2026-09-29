@@ -67,7 +67,12 @@ impl Authority {
     }
 
     /// Refuses an upload by `who` to `space` before its bytes are stored.
-    pub fn check_upload(&mut self, who: &Principal, space: &str, now_ms: i64) -> Result<(), proto::Error> {
+    pub(crate) fn check_upload(
+        &mut self,
+        who: &Principal,
+        space: &str,
+        now_ms: i64,
+    ) -> Result<(), proto::Error> {
         self.transact(who, now_ms, |call| call.require_somewhere(space, Perm::Write))
     }
 

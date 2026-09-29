@@ -1,32 +1,22 @@
 //! Typed calls to the authority, chunk uploads and verified chunk downloads.
 
 use std::net::{IpAddr, SocketAddr};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::{fs, io, time::Duration, time::Instant};
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::{io, time::Duration, time::Instant};
 
 use bytes::Bytes;
 use herdfs_core::proto::{Entry, EntryId, Request, Response, Version, VersionId};
 use herdfs_core::{ChunkId, ChunkRef, SpacePath};
-use reqwest::{RequestBuilder, StatusCode, header::CONTENT_TYPE};
+use reqwest::header::CONTENT_TYPE;
 
-use crate::{Average, Error, Result, journal::Record, lock};
+use crate::{Average, Error, Result, journal::Record};
 
 mod link;
+mod send;
 
 pub use link::Link;
-
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long a connection may stay silent before its request fails and can be retried.
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long an authority call may wait for its answer to start, so a silent outage shows up fast.
-/// A body may take longer while it keeps coming (`READ_TIMEOUT`), and opens no offline window.
-const RPC_TIMEOUT: Duration = Duration::from_secs(3);
-/// A background call, a commit or a chunk upload, may wait this long for its answer to start,
-/// plus a second per `SLOWEST_UPLOAD` bytes of its body, since its body goes first.
-const BACKGROUND_TIMEOUT: Duration = Duration::from_secs(10);
-const SLOWEST_UPLOAD: usize = 16 << 10;
-const PROBE_EVERY: Duration = Duration::from_secs(1);
+use send::{CONNECT_TIMEOUT, READ_TIMEOUT, read_token};
 
 pub struct Remote {
     http: reqwest::Client,
@@ -86,7 +76,8 @@ impl Remote {
         }
     }
 
-    /// The entry, its head version, and whether the caller may commit to it.
+    /// The entry, its head version (`None` until its first commit), and whether
+    /// the caller may commit to it.
     pub async fn open(&self, entry: EntryId) -> Result<(Entry, Option<Version>, bool)> {
         match self.call(|space| Request::Open { space, entry }).await? {
             Response::Opened {
@@ -98,7 +89,8 @@ impl Remote {
         }
     }
 
-    /// Presigned URLs for chunks of `version`, and how long they remain valid.
+    /// Presigned URLs for chunks of `version` of `entry`, in the order asked, and how long
+    /// they stay valid from when the call was sent.
     pub async fn grant(
         &self,
         entry: EntryId,
@@ -240,59 +232,6 @@ impl Remote {
         self.round_trip.add(started.elapsed().as_secs_f64());
         Ok(response.json().await?)
     }
-
-    /// Stats the root when an offline window ends, and at most every `PROBE_EVERY` after, so the
-    /// client finds out the authority answers again even while nothing else asks it.
-    pub async fn probe(self: Arc<Self>) {
-        loop {
-            let left = self.link.remaining().unwrap_or_default();
-            tokio::time::sleep(left.max(PROBE_EVERY)).await;
-            if self.link.remaining() == Some(Duration::ZERO) {
-                let _ = self.stat(SpacePath::root()).await;
-            }
-        }
-    }
-
-    /// Sends unless the authority counts as unreachable, and records whether it answered in
-    /// time: `RPC_TIMEOUT` for an interactive call, longer for a background one carrying `body`
-    /// bytes, whose timeout is a slow upload rather than an outage and opens no offline window.
-    async fn send(
-        &self,
-        request: impl Fn(&str) -> RequestBuilder,
-        body: Option<usize>,
-    ) -> Result<reqwest::Response> {
-        self.link.check()?;
-        let upload = |len: usize| BACKGROUND_TIMEOUT + Duration::from_secs((len / SLOWEST_UPLOAD) as u64);
-        let deadline = body.map_or(RPC_TIMEOUT, upload);
-        let response = tokio::time::timeout(deadline, self.exchange(request)).await;
-        let response = response.unwrap_or(Err(Error::TimedOut));
-        if body.is_none() || !matches!(response, Err(Error::TimedOut | Error::Network(_))) {
-            self.link.record(&response);
-        }
-        response
-    }
-
-    /// Sends with the current token. On 401 it re-reads the token file and tries once more,
-    /// so a refreshed token takes effect without a remount.
-    async fn exchange(&self, request: impl Fn(&str) -> RequestBuilder) -> Result<reqwest::Response> {
-        let token = lock(&self.token).clone();
-        let mut response = request(&token).send().await?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            let fresh = read_token(&self.token_file)?;
-            response = request(&fresh).send().await?;
-            *lock(&self.token) = fresh;
-        }
-        let status = response.status();
-        if status.is_success() {
-            return Ok(response);
-        }
-        let refusal = serde_json::from_slice(&response.bytes().await?);
-        Err(refusal.map_or_else(|_| Error::Protocol(format!("HTTP {status}")), Error::Api))
-    }
-}
-
-fn read_token(path: &Path) -> Result<String> {
-    Ok(fs::read_to_string(path)?.trim().to_owned())
 }
 
 fn unexpected(response: &Response) -> Error {
