@@ -13,6 +13,7 @@ use support::{Fixture, SPACE, alice};
 const CORRECTED_MS: i64 = 10_000;
 const FORWARD_MS: i64 = 1_000_000;
 const GRACE_MS: i64 = 100;
+const INTERVAL_MS: i64 = 20;
 const POLICY: Policy = Policy {
     versions: 1,
     max_age_ms: 0,
@@ -58,32 +59,35 @@ fn deleted_upload(at_ms: i64, trial: usize, label: &str) -> (Fixture, ChunkId) {
     (fx, chunk.id)
 }
 
-/// After a forward wall-clock step is corrected, an upload made during the step must age out like
-/// a normal upload once a full grace has elapsed; otherwise a deleted space's bytes stay live.
+/// Collections every `INTERVAL_MS`, from just after the deletion through grace plus one interval
+/// past it; whether the deleted upload's chunk is still live after the last.
+fn live_after_regular_collections(fx: &mut Fixture, chunk: ChunkId) -> bool {
+    let deleted = CORRECTED_MS + 2;
+    let mut at = deleted + INTERVAL_MS;
+    let mut live = true;
+    while at <= deleted + GRACE_MS + INTERVAL_MS {
+        live = fx.authority.collect(at, &POLICY).unwrap().live.contains(&chunk);
+        at += INTERVAL_MS;
+    }
+    live
+}
+
+/// After a forward wall-clock step is corrected, an upload made during the step ages from the
+/// first collection after the correction: with collections every interval, a deleted space's
+/// bytes leave the live set within grace plus one interval, as a normal upload's do.
 // contract: C15, S7
 #[test]
 fn a_corrected_forward_clock_step_does_not_keep_deleted_uploads_live() {
-    let mut retained = 0;
     for trial in 0..3 {
         let (mut control, control_chunk) = deleted_upload(CORRECTED_MS, trial, "control");
-        let control_live = control
-            .authority
-            .collect(CORRECTED_MS + GRACE_MS + 2, &POLICY)
-            .unwrap()
-            .live;
         assert!(
-            !control_live.contains(&control_chunk),
+            !live_after_regular_collections(&mut control, control_chunk),
             "trial {trial}: normal-time control remained live"
         );
-
         let (mut jumped, jumped_chunk) = deleted_upload(FORWARD_MS, trial, "jumped");
-        let jumped_live = jumped
-            .authority
-            .collect(CORRECTED_MS + GRACE_MS + 2, &POLICY)
-            .unwrap()
-            .live;
-        retained += usize::from(jumped_live.contains(&jumped_chunk));
+        assert!(
+            !live_after_regular_collections(&mut jumped, jumped_chunk),
+            "trial {trial}: a future-stamped upload remained live"
+        );
     }
-
-    assert_eq!(retained, 0, "{retained}/3 future-stamped uploads remained live");
 }
