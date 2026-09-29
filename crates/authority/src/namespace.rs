@@ -204,12 +204,13 @@ impl Call<'_> {
             .ok()
             .filter(|name| name.parent() == Some(SpacePath::root()))
             .ok_or_else(|| refuse(ErrorCode::Invalid, format!("invalid name {name:?}")))?;
-        let path = parent_entry.path.join(name.as_str()).map_err(|_| {
-            refuse(
+        let Ok(path) = parent_entry.path.join(name.as_str()) else {
+            self.require(space, &parent_entry.path, Perm::Write)?;
+            return Err(refuse(
                 ErrorCode::Invalid,
                 format!("path below entry {} is too long", parent.0),
-            )
-        })?;
+            ));
+        };
         Ok((path, parent_entry.kind))
     }
 

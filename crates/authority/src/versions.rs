@@ -109,11 +109,13 @@ impl Call<'_> {
             None => HashSet::new(),
         };
         let distinct: HashSet<_> = chunks.iter().map(|chunk| (chunk.id, chunk.len)).collect();
+        let mut uploaded = Vec::new();
         for (id, len) in distinct.difference(&base_chunks) {
             if self.uploaded_len(*id)? != Some(*len) {
                 let message = format!("chunk {id} of {len} bytes is neither in the base nor uploaded by you");
                 return Err(refuse(ErrorCode::Invalid, message));
             }
+            uploaded.push(id.to_string());
         }
         if guarded && entry.head != base {
             return Err(refuse(
@@ -122,6 +124,13 @@ impl Call<'_> {
             ));
         }
         let version = self.add_version(&entry, chunks, mtime_ms.unwrap_or(self.now_ms))?;
+        // A version now names them, so the next collection must not count them as unreferenced
+        // since before it (S4).
+        let uploaded = serde_json::to_string(&uploaded)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        self.db
+            .prepare_cached("DELETE FROM unreferenced WHERE chunk IN (SELECT value FROM json_each(?1))")?
+            .execute([uploaded])?;
         self.db
             .prepare_cached(
                 "INSERT INTO commits (principal, request_id, entry, version, at_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
