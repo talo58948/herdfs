@@ -49,7 +49,8 @@ impl Model {
         applying.map(|(.., granted)| granted).min().unwrap_or(u64::MAX)
     }
 
-    /// Whether `who` may see `version` of the node at `path`: its head, or one made since access began.
+    /// Whether `who` may see `version` of the node at `path`: its head, one made since access
+    /// began, or one `who` authored.
     pub fn visible(
         &self,
         space: &str,
@@ -58,7 +59,9 @@ impl Model {
         version: VersionId,
         who: &Principal,
     ) -> bool {
-        node.history.last() == Some(&version) || version.0 > self.readable_after(space, path, who)
+        node.history.last() == Some(&version)
+            || version.0 > self.readable_after(space, path, who)
+            || self.versions[&version].author == who.user
     }
 
     pub fn require(&self, who: &Principal, space: &str, path: &SpacePath, need: Perm) -> Outcome {
