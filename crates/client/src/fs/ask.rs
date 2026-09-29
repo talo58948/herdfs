@@ -124,14 +124,13 @@ impl Space {
 
     /// The entry's current head, which its open files then follow. Every open asks, for
     /// close-to-open consistency (C2), and one for writing needs write access (C1, C4a).
-    pub(super) async fn head(&self, entry: EntryId, mode: OpenMode) -> Result<(Head, SpacePath)> {
+    pub(super) async fn head(&self, entry: EntryId, mode: OpenMode) -> Result<(Head, Option<SpacePath>)> {
         let asked = Instant::now();
         let (found, head, writable) = match self.remote.open(entry).await {
             Err(err) if err.is_offline() => {
                 let held = self.inodes.with(entry, |state| state.offline(mode));
                 let head = held.flatten().ok_or(err)??;
-                let path = self.path(self.ino(entry))?.ok_or(Errno::ENOENT)?;
-                return Ok((head, path));
+                return Ok((head, self.path(self.ino(entry))?));
             }
             opened => {
                 let path = self.path(self.ino(entry))?;
@@ -151,7 +150,7 @@ impl Space {
             return Err(Errno::EACCES.into());
         }
         let head = self.inodes.with(entry, |state| state.followed()).flatten();
-        Ok((head, found.path))
+        Ok((head, Some(found.path)))
     }
 
     /// Runs `with` on the version the entry's open files read, and once more on its head if the

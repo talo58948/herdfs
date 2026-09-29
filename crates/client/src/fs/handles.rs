@@ -61,13 +61,15 @@ impl Space {
         let (writable, truncate) = (mode.writes(), mode.truncates());
         let handle = Handle::new(entry, writable, &self.inodes);
         let mut upgrade = None;
-        // Every open for writing asks for write access, over pending changes too (C1, C4a); one
-        // for reading needs no head while this client holds changes, which every handle reads.
-        if writable || self.changes(entry).is_none() {
-            let (file, path) = self.head(entry, mode).await?;
-            if !writable {
-                upgrade = self.start(file.as_ref(), &path, pid, &handle);
-            }
+        // Every open for writing asks for write access, over pending changes too (C1, C4a).
+        if writable {
+            self.head(entry, mode).await?;
+        } else {
+            let (file, path) = match self.changes(entry) {
+                Some(_) => (None, self.path(ino)?),
+                None => self.head(entry, mode).await?,
+            };
+            upgrade = self.start(file.as_ref(), path.as_ref(), pid, &handle);
         }
         if truncate {
             self.prepare(entry, true).await?;

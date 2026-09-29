@@ -53,6 +53,8 @@ mod round29_empty_pin;
 mod round29_rename_source;
 mod round30_agents_acl;
 mod round30_agents_race;
+mod round31_offline_held;
+mod round31_pending_pin;
 mod round32_agents_cwd;
 mod saved_mtime;
 mod scratch_files;
