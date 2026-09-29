@@ -34,7 +34,7 @@ impl Space {
     /// Decides the access strategy for this open of `file` (P1), and begins it.
     pub(super) fn start(
         &self,
-        file: &Arc<OpenVersion>,
+        file: Option<&Arc<OpenVersion>>,
         path: &SpacePath,
         pid: u32,
         handle: &Handle,
@@ -42,11 +42,11 @@ impl Space {
         let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
         let extension = std::path::Path::new(path.name()).extension();
         let context = OpenContext {
-            size: file.version.size,
+            size: file.map_or(0, |file| file.version.size),
             extension: extension.map(|extension| extension.to_string_lossy().into()),
-            opens: self.opened(file.version.entry, comm.trim_end()),
+            opens: self.opened(handle.entry, comm.trim_end()),
             comm: comm.trim_end().to_owned(),
-            coverage: self.cache.coverage(&file.version.chunks),
+            coverage: file.map_or(1.0, |file| self.cache.coverage(&file.version.chunks)),
             throughput: self.reader.throughput.get(),
             round_trip: self.remote.round_trip.get().unwrap_or_default(),
         };
@@ -72,13 +72,12 @@ impl Space {
     }
 
     /// Pins every chunk for Pin, and prefetches them in the background for Fetch and Pin.
-    fn begin(&self, strategy: Strategy, file: &Arc<OpenVersion>, handle: &Handle) {
+    fn begin(&self, strategy: Strategy, file: Option<&Arc<OpenVersion>>, handle: &Handle) {
         if strategy == Strategy::Pin {
             let mut pinned = lock(&handle.pinned);
             let chunks = file
-                .version
-                .chunks
-                .iter()
+                .into_iter()
+                .flat_map(|file| &file.version.chunks)
                 .map(|chunk| chunk.id)
                 .collect::<Vec<_>>();
             self.cache.pin(&chunks);
@@ -86,7 +85,9 @@ impl Space {
                 self.cache.unpin(&old);
             }
         }
-        if strategy != Strategy::Stream {
+        if strategy != Strategy::Stream
+            && let Some(file) = file
+        {
             let (reader, file) = (self.reader.clone(), file.clone());
             tokio::spawn(async move {
                 if let Err(err) = reader.prefetch(&file).await {
@@ -104,7 +105,7 @@ impl Space {
         };
         for handle in handles.values().filter(|handle| handle.entry == entry) {
             if lock(&handle.pinned).is_some() {
-                self.begin(Strategy::Pin, &file, handle);
+                self.begin(Strategy::Pin, Some(&file), handle);
             }
         }
     }
@@ -114,9 +115,9 @@ impl Space {
         // Pinning under the handles lock: release either comes later and unpins, or came first.
         if let Ok(strategy) = upgrade.await
             && let Some(handle) = lock(&self.handles).get(&fh)
-            && let Some(file) = self.inodes.with(handle.entry, |state| state.followed()).flatten()
         {
-            self.begin(strategy, &file, handle);
+            let file = self.inodes.with(handle.entry, |state| state.followed()).flatten();
+            self.begin(strategy, file.as_ref(), handle);
         }
     }
 }

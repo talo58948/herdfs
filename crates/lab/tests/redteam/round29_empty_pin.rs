@@ -37,7 +37,6 @@ fn reads_without_store(lab: &Lab, file: &File, bytes: &[u8]) -> Result<bool> {
 /// A fresh Pin open after the version exists is the control for every trial.
 // contract: P1 (Pin is chosen at open and is never evicted while its handle is open)
 #[test]
-#[ignore = "ROUND29: a Pin open on an empty entry does not pin the first version it follows"]
 fn a_pin_handle_opened_before_the_first_version_keeps_that_version_pinned() -> Result<()> {
     let Some(lab) = start()? else {
         return Ok(());

@@ -9,7 +9,7 @@ use std::{
 
 use fuser::{Errno, FileAttr, INodeNo, OpenFlags, ReplyDirectory};
 use herdfs_core::SpacePath;
-use herdfs_core::proto::ErrorCode;
+use herdfs_core::proto::{EntryId, ErrorCode};
 
 use super::{MAX_NAME, PERMISSIONS, Space, TTL, handles::Handle};
 use crate::{Error, Result, journal::Local, lock};
@@ -153,19 +153,29 @@ impl Space {
     }
 
     /// Renames at the authority, atomically there (C7), then moves every known path below.
-    pub async fn rename(self: Arc<Self>, from: (INodeNo, OsString), to: (INodeNo, OsString)) -> Result<()> {
+    pub async fn rename(
+        self: Arc<Self>,
+        from: (INodeNo, OsString),
+        to: (INodeNo, OsString),
+    ) -> Result<Option<EntryId>> {
         let parents = (self.entry_id(from.0), self.entry_id(to.0));
         let (from_name, to_name) = (child_name(&from.1)?, child_name(&to.1)?);
         let (source, ..) = self.child(from.0, from_name.clone()).await?;
+        let asked = Instant::now();
+        let current = self.remote.lookup(parents.0, from_name.clone()).await?;
+        self.follow(&current, asked).await;
+        if source.id != current.id {
+            return Err(Errno::ESTALE.into());
+        }
         self.settle(&source.path).await?;
-        let (from, to) = self
+        let (from, moved) = self
             .remote
             .rename(parents.0, from_name, parents.1, to_name)
             .await?;
         self.inodes.stale(&from);
-        self.inodes.stale(&to);
-        self.inodes.moved(&from, &to);
-        Ok(())
+        self.inodes.stale(&moved.path);
+        self.inodes.moved(&from, &moved);
+        Ok((source.id != moved.id).then_some(source.id))
     }
 
     /// Commits the changes pending at or below `path` before a rename moves them, as fsync does,

@@ -186,11 +186,15 @@ impl Model {
                     .expect("renamed")
                     .0;
                 let to = self.child_path(space, *to_parent, to_name).expect("renamed").0;
+                let entry = herdfs_core::proto::Entry {
+                    path: to.clone(),
+                    ..self.entry(space, &from)
+                };
                 assert_eq!(
                     *reply,
                     Response::Renamed {
                         from: from.clone(),
-                        to: to.clone()
+                        entry
                     }
                 );
                 self.rename(space, &from, &to, now_ms);

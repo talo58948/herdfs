@@ -235,10 +235,10 @@ pub enum Response {
     History {
         versions: Vec<Version>,
     },
-    /// The paths an entry moved from and to, resolved in the rename transaction.
+    /// The source path and moved entry, resolved in the rename transaction.
     Renamed {
         from: SpacePath,
-        to: SpacePath,
+        entry: Entry,
     },
     Done,
 }

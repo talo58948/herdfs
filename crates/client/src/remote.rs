@@ -168,7 +168,7 @@ impl Remote {
         from_name: String,
         to_parent: EntryId,
         to_name: String,
-    ) -> Result<(SpacePath, SpacePath)> {
+    ) -> Result<(SpacePath, Entry)> {
         let request = |space| Request::Rename {
             space,
             from_parent,
@@ -177,7 +177,7 @@ impl Remote {
             to_name,
         };
         match self.call(request).await? {
-            Response::Renamed { from, to } => Ok((from, to)),
+            Response::Renamed { from, entry } => Ok((from, entry)),
             other => Err(unexpected(&other)),
         }
     }

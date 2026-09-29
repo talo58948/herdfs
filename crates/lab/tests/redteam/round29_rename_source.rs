@@ -43,7 +43,6 @@ fn rename_reused_source(trial: usize, reuse: bool) -> Result<Option<(Vec<u8>, Ve
 /// The control leaves the source alone; three attacks replace it after b caches both entries.
 // contract: C7 (rename is atomic; operations after a rename reach the moved entry)
 #[test]
-#[ignore = "ROUND29: rename locally moves a stale source inode instead of the entry the authority moved"]
 fn rename_of_a_reused_source_keeps_the_authoritys_entry_at_the_destination() -> Result<()> {
     let Some(control) = rename_reused_source(0, false)? else {
         return Ok(());
