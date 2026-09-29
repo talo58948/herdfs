@@ -60,6 +60,7 @@ mod round33_relocated_child;
 mod round35_held_entries;
 mod round37_sequences;
 mod round37_swapped_dirs;
+mod round39_client;
 mod saved_mtime;
 mod scratch_files;
 mod shared_appends;
