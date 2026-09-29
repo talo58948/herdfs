@@ -121,13 +121,16 @@ impl Runner {
 
     /// Marks the session running and runs it in the background, holding `slot` until it ends.
     async fn start(&self, dir: PathBuf, slot: OwnedSemaphorePermit) {
-        if let Err(err) = session::claim(&dir).await {
-            log_error(&dir, &err);
-            return;
-        }
+        let session = match session::claim(&dir).await {
+            Ok(session) => session,
+            Err(err) => {
+                log_error(&dir, &err);
+                return;
+            }
+        };
         let agent = Arc::clone(&self.agent);
         tokio::spawn(async move {
-            if let Err(err) = agent.run(&dir).await {
+            if let Err(err) = agent.run(&session).await {
                 log_error(&dir, &err);
             }
             drop(slot);
