@@ -50,8 +50,21 @@ fn write_on_the_host_dir_is_what_spawns_a_session() -> Result<()> {
     let denied = lab.mount_path("b").join(HOST_DIR).join("t2");
     assert_eq!(errno(fs::create_dir(&denied)), Some(libc::EACCES));
     thread::sleep(QUIET);
-    let (space, path) = (SPACE.into(), path(HOST_DIR)?);
-    let Response::Entries { entries } = lab.rpc(ADMIN, &Request::List { space, path })? else {
+    let Response::Entry { entry } = lab.rpc(
+        ADMIN,
+        &Request::Stat {
+            space: SPACE.into(),
+            path: path(HOST_DIR)?,
+        },
+    )?
+    else {
+        bail!("Stat answered something else");
+    };
+    let list = Request::List {
+        space: SPACE.into(),
+        entry: entry.id,
+    };
+    let Response::Entries { entries } = lab.rpc(ADMIN, &list)? else {
         bail!("List answered something else");
     };
     let sessions: Vec<_> = entries.iter().map(|entry| entry.path.name()).collect();

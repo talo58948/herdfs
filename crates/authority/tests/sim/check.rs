@@ -39,12 +39,13 @@ impl Sim {
         let root = self
             .stat(space, &SpacePath::root())
             .expect("the auditor reads every root");
+        let root_id = root.id;
         let mut snapshot = Snapshot::from([(SpacePath::root(), (root, Vec::new()))]);
-        let mut dirs = vec![SpacePath::root()];
-        while let Some(dir) = dirs.pop() {
+        let mut dirs = vec![root_id];
+        while let Some(id) = dirs.pop() {
             let Response::Entries { entries } = self.audit(&Request::List {
                 space: space.into(),
-                path: dir,
+                entry: id,
             }) else {
                 panic!("List answers entries");
             };
@@ -52,7 +53,7 @@ impl Sim {
                 let history = match entry.kind {
                     Kind::File => self.history(space, &entry.path),
                     Kind::Dir => {
-                        dirs.push(entry.path.clone());
+                        dirs.push(entry.id);
                         Vec::new()
                     }
                     Kind::Symlink => Vec::new(),

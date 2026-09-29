@@ -19,15 +19,13 @@ pub use link::Link;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a connection may stay silent before its request fails and can be retried.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long an authority call may wait for its answer to start, so a silent outage shows up
-/// fast. The answer's body, such as a long chunk list on a slow link, may take longer as long
-/// as it keeps coming (`READ_TIMEOUT`), and opens no offline window.
+/// How long an authority call may wait for its answer to start, so a silent outage shows up fast.
+/// A body may take longer while it keeps coming (`READ_TIMEOUT`), and opens no offline window.
 const RPC_TIMEOUT: Duration = Duration::from_secs(3);
 /// A background call, a commit or a chunk upload, may wait this long for its answer to start,
 /// plus a second per `SLOWEST_UPLOAD` bytes of its body, since its body goes first.
 const BACKGROUND_TIMEOUT: Duration = Duration::from_secs(10);
 const SLOWEST_UPLOAD: usize = 16 << 10;
-/// How often the probe looks whether an offline window has ended.
 const PROBE_EVERY: Duration = Duration::from_secs(1);
 
 pub struct Remote {
@@ -77,17 +75,20 @@ impl Remote {
         self.entry(|space| Request::Locate { space, entry }).await
     }
 
-    pub async fn list(&self, path: SpacePath) -> Result<Vec<Entry>> {
-        match self.call(|space| Request::List { space, path }).await? {
+    pub async fn lookup(&self, parent: EntryId, name: String) -> Result<Entry> {
+        self.entry(|space| Request::Lookup { space, parent, name }).await
+    }
+
+    pub async fn list(&self, entry: EntryId) -> Result<Vec<Entry>> {
+        match self.call(|space| Request::List { space, entry }).await? {
             Response::Entries { entries } => Ok(entries),
             other => Err(unexpected(&other)),
         }
     }
 
-    /// The entry at `path`, its head version (`None` until its first commit), and whether
-    /// the caller may commit to it.
-    pub async fn open(&self, path: SpacePath) -> Result<(Entry, Option<Version>, bool)> {
-        match self.call(|space| Request::Open { space, path }).await? {
+    /// The entry, its head version, and whether the caller may commit to it.
+    pub async fn open(&self, entry: EntryId) -> Result<(Entry, Option<Version>, bool)> {
+        match self.call(|space| Request::Open { space, entry }).await? {
             Response::Opened {
                 entry,
                 version,
@@ -97,8 +98,7 @@ impl Remote {
         }
     }
 
-    /// Presigned URLs for chunks of `version` of `entry`, in the order asked, and how long
-    /// they stay valid from when the call was sent.
+    /// Presigned URLs for chunks of `version`, and how long they remain valid.
     pub async fn grant(
         &self,
         entry: EntryId,
@@ -147,10 +147,10 @@ impl Remote {
         .await
     }
 
-    pub async fn set_attr(&self, path: SpacePath, mode: Option<u32>, mtime_ms: Option<i64>) -> Result<Entry> {
+    pub async fn set_attr(&self, entry: EntryId, mode: Option<u32>, mtime_ms: Option<i64>) -> Result<Entry> {
         self.entry(|space| Request::SetAttr {
             space,
-            path,
+            entry,
             mode,
             mtime_ms,
         })

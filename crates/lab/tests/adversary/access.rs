@@ -33,15 +33,26 @@ fn bob_gets_no_grant_and_no_metadata_for_alices_files() -> Result<()> {
         StatusCode::FORBIDDEN
     );
     let secret_path = secret.path.as_str();
-    let named = [
-        ("open", secret_path),
-        ("stat", secret_path),
-        ("history", secret_path),
-    ];
-    let listed = [("list", secret_path), ("list", "finance"), ("list", "")];
-    for (op, path) in named.into_iter().chain(listed) {
+    for (op, path) in [("stat", secret_path), ("history", secret_path)] {
         let reply = scene.attacker.rpc(&at_path(op, path))?;
         assert_eq!(reply.status, StatusCode::FORBIDDEN, "{op} /{path}");
+    }
+    let open = Request::Open {
+        space: SPACE.into(),
+        entry: secret.version.entry,
+    };
+    assert_eq!(scene.attacker.call(&open)?.status, StatusCode::FORBIDDEN);
+    let listed = [
+        secret.version.entry,
+        parent_id(&scene, "finance/q3.xlsx")?,
+        parent_id(&scene, "finance")?,
+    ];
+    for entry in listed {
+        let list = Request::List {
+            space: SPACE.into(),
+            entry,
+        };
+        assert_eq!(scene.attacker.call(&list)?.status, StatusCode::FORBIDDEN);
     }
     // An entry bob may read lends its permission to none of alice's versions.
     let restore = Request::Restore {
@@ -147,7 +158,7 @@ fn dot_dot_symlinks_and_renames_do_not_reach_finance() -> Result<()> {
         "..",
     ];
     for escape in escapes {
-        let by_path = ["open", "stat", "history", "list", "remove"].map(|op| at_path(op, escape));
+        let by_path = ["stat", "history"].map(|op| at_path(op, escape));
         for request in &by_path {
             let reply = scene.attacker.rpc(request)?;
             assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{request}");
@@ -185,7 +196,7 @@ fn dot_dot_symlinks_and_renames_do_not_reach_finance() -> Result<()> {
 
     let open = Request::Open {
         space: SPACE.into(),
-        path: scene.secret.path.clone(),
+        entry: scene.secret.version.entry,
     };
     let Response::Opened { entry, .. } = scene.lab.rpc(ALICE, &open)? else {
         bail!("open answers with the entry");
@@ -248,9 +259,19 @@ fn bob_cannot_start_a_session_on_another_host() -> Result<()> {
             "{op}"
         );
     }
+    let Response::Entry { entry } = scene.lab.rpc(
+        ALICE,
+        &Request::Stat {
+            space: SPACE.into(),
+            path: SpacePath::try_from(".agents/C")?,
+        },
+    )?
+    else {
+        bail!("stat answers with an entry");
+    };
     let list = Request::List {
         space: SPACE.into(),
-        path: SpacePath::try_from(".agents/C")?,
+        entry: entry.id,
     };
     let Response::Entries { entries } = scene.lab.rpc(ALICE, &list)? else {
         bail!("list answers with entries");

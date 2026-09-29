@@ -20,7 +20,6 @@ fn node(kind: Kind, mode: u32, target: Option<&String>, now_ms: i64) -> Node {
         history: Vec::new(),
     }
 }
-
 impl Model {
     /// Checks the reply to an acknowledged `request` and applies its effects.
     pub fn apply(&mut self, who: &Principal, request: &Request, outcome: &Outcome, now_ms: i64) {
@@ -65,15 +64,24 @@ impl Model {
             ),
             Request::Locate { space, entry } => {
                 let path = self.node_by_id(space, *entry).expect("located").0;
-                assert_eq!(
-                    *reply,
-                    Response::Entry {
-                        entry: self.entry(space, path)
-                    }
-                );
+                let expected = Response::Entry {
+                    entry: self.entry(space, path),
+                };
+                assert_eq!(*reply, expected);
             }
-            Request::List { space, path } => self.check_list(space, path, reply),
-            Request::Open { space, path } => {
+            Request::Lookup { space, parent, name } => {
+                let path = self.child_path(space, *parent, name).expect("looked up").0;
+                let expected = Response::Entry {
+                    entry: self.entry(space, &path),
+                };
+                assert_eq!(*reply, expected);
+            }
+            Request::List { space, entry } => {
+                let path = self.node_by_id(space, *entry).expect("listed").0;
+                self.check_list(space, path, reply);
+            }
+            Request::Open { space, entry } => {
+                let path = self.node_by_id(space, *entry).expect("opened").0;
                 let entry = self.entry(space, path);
                 let version = entry.head.map(|id| self.versions[&id].clone());
                 let writable = self.perm(space, path, who) >= Some(Perm::Write);
@@ -189,17 +197,18 @@ impl Model {
             }
             Request::SetAttr {
                 space,
-                path,
+                entry,
                 mode,
                 mtime_ms,
             } => {
-                let node = self.node_mut(space, path);
+                let path = self.node_by_id(space, *entry).expect("changed").0.clone();
+                let node = self.node_mut(space, &path);
                 node.mode = mode.unwrap_or(node.mode);
                 node.mtime_ms = mtime_ms.unwrap_or(node.mtime_ms);
                 assert_eq!(
                     *reply,
                     Response::Entry {
-                        entry: self.entry(space, path)
+                        entry: self.entry(space, &path)
                     }
                 );
             }
@@ -223,14 +232,12 @@ impl Model {
             }
         }
     }
-
     fn node_mut(&mut self, space: &str, path: &SpacePath) -> &mut Node {
         self.spaces
             .get_mut(space)
             .and_then(|space| space.nodes.get_mut(path))
             .expect("node exists")
     }
-
     fn add(&mut self, space: &str, path: &SpacePath, reply: &Response, node: Node) {
         let Response::Entry { entry } = reply else {
             panic!("expected an entry, got {reply:?}")
@@ -242,25 +249,21 @@ impl Model {
         assert_eq!(*entry, self.entry(space, path));
         self.touch_parent(space, path, created_ms);
     }
-
     /// A directory's mtime moves when an entry is added to it or taken from it.
     fn touch_parent(&mut self, space: &str, path: &SpacePath, now_ms: i64) {
         let Some(parent) = path.parent() else { return };
         self.node_mut(space, &parent).mtime_ms = now_ms;
     }
-
     fn remove(&mut self, space: &str, path: &SpacePath) {
         let nodes = &mut self.spaces.get_mut(space).expect("space exists").nodes;
         let node = nodes.remove(path).expect("node exists");
         self.forget(&node.history);
         self.commits.retain(|_, (entry, ..)| *entry != node.id);
     }
-
     /// Versions are gone; the request ids that made them stay with their entry.
     pub fn forget(&mut self, gone: &[VersionId]) {
         self.acked.retain(|version, _| !gone.contains(version));
     }
-
     fn rename(&mut self, space: &str, from: &SpacePath, to: &SpacePath, now_ms: i64) {
         if from == to {
             return;
@@ -281,7 +284,6 @@ impl Model {
         self.touch_parent(space, from, now_ms);
         self.touch_parent(space, to, now_ms);
     }
-
     fn check_list(&self, space: &str, dir: &SpacePath, reply: &Response) {
         let Response::Entries { entries } = reply else {
             panic!("List answered {reply:?}")

@@ -57,18 +57,19 @@ impl Drop for Handle {
 impl Space {
     pub async fn open(self: Arc<Self>, ino: INodeNo, flags: OpenFlags, pid: u32) -> Result<u64> {
         let entry = self.entry_id(ino);
-        let path = self.located(ino).await?;
         let mode = OpenMode::for_open(flags);
         let (writable, truncate) = (mode.writes(), mode.truncates());
         let handle = Handle::new(entry, writable, &self.inodes);
         let mut upgrade = None;
         // Every open for writing asks for write access, over pending changes too (C1, C4a); one
         // for reading needs no head while this client holds changes, which every handle reads.
-        if (writable || self.changes(entry).is_none())
-            && let Some(file) = self.head(entry, &path, mode).await?
-            && !writable
-        {
-            upgrade = self.start(&file, &path, pid, &handle);
+        if writable || self.changes(entry).is_none() {
+            let (file, path) = self.head(entry, mode).await?;
+            if let Some(file) = file
+                && !writable
+            {
+                upgrade = self.start(&file, &path, pid, &handle);
+            }
         }
         if truncate {
             self.prepare(entry, true).await?;
@@ -166,7 +167,7 @@ impl Space {
         let _short = Handle::new(entry, true, &self.inodes);
         if handle.is_none() {
             let mode = OpenMode::for_set_len(size);
-            self.head(entry, &self.located(ino).await?, mode).await?;
+            self.head(entry, mode).await?;
         }
         self.prepare(entry, size == 0).await?;
         self.local(entry, |local| local.set_len(&self.journal, entry, size))?;

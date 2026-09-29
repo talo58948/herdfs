@@ -76,20 +76,24 @@ pub enum Request {
         space: String,
         path: SpacePath,
     },
-    /// The entry with this id, at its current path, so a client can follow
-    /// renames made elsewhere. Needs read on that path.
+    /// The entry at this id's current path. Needs read there.
     Locate {
         space: String,
         entry: EntryId,
     },
+    Lookup {
+        space: String,
+        parent: EntryId,
+        name: String,
+    },
     List {
         space: String,
-        path: SpacePath,
+        entry: EntryId,
     },
     /// The entry and its head version, including the chunk list.
     Open {
         space: String,
-        path: SpacePath,
+        entry: EntryId,
     },
     /// Presigned download URLs for chunks of `version`, by chunk index.
     /// `version` must belong to `entry`, and the caller needs read on the
@@ -143,7 +147,7 @@ pub enum Request {
     },
     SetAttr {
         space: String,
-        path: SpacePath,
+        entry: EntryId,
         mode: Option<u32>,
         mtime_ms: Option<i64>,
     },

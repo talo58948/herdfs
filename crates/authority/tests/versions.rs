@@ -125,11 +125,11 @@ fn grants_cover_chunks_of_a_version_of_that_entry_wherever_it_moved() {
 #[test]
 fn open_says_whether_the_caller_may_commit() {
     let mut fx = Fixture::new();
-    fx.create(&alice(), "f").unwrap();
+    let file = fx.create(&alice(), "f").unwrap();
     fx.set_acl("", "user:bob", Some(Perm::Read));
     let open = || Request::Open {
         space: SPACE.into(),
-        path: path("f"),
+        entry: file.id,
     };
     let writable = |reply| matches!(reply, Ok(Response::Opened { writable: true, .. }));
     assert!(writable(fx.call(&alice(), open())));

@@ -121,7 +121,6 @@ fn open_existing(lab: &Lab, trial: usize, moving: bool) -> Result<(std::io::Resu
 /// while it moves. The control opens the same kind of entry with its parent fixed.
 // contract: C7
 #[test]
-#[ignore = "ROUND27: O_CREAT loses a continuously renamed held parent when the child exists"]
 fn open_with_create_follows_a_parent_that_keeps_moving() -> Result<()> {
     let Some(lab) = start()? else {
         return Ok(());
@@ -185,7 +184,6 @@ fn remove_child(lab: &Lab, trial: usize, moving: bool) -> Result<(std::io::Resul
 /// The control removes a child with its parent fixed.
 // contract: C7
 #[test]
-#[ignore = "ROUND27: lookup loses a continuously renamed held parent before unlink"]
 fn unlink_follows_a_parent_that_keeps_moving() -> Result<()> {
     let Some(lab) = start()? else {
         return Ok(());

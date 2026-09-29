@@ -189,7 +189,7 @@ fn parent_state(lab: &Lab) -> Result<[Result<Response, ErrorCode>; 3]> {
     let requests = [
         Request::List {
             space: space(),
-            path: path("")?,
+            entry: entry_at(lab, "")?,
         },
         Request::History {
             space: space(),

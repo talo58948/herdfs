@@ -174,7 +174,12 @@ impl Sim {
         let got = self.authority.handle(&principal, request.clone(), self.now_ms);
         let by_id = matches!(
             request,
-            Request::Commit { .. } | Request::Grant { .. } | Request::Locate { .. }
+            Request::Commit { .. }
+                | Request::Grant { .. }
+                | Request::Locate { .. }
+                | Request::List { .. }
+                | Request::Open { .. }
+                | Request::SetAttr { .. }
         );
         if let (true, Err(error)) = (by_id, &got) {
             self.check_refusal(&principal, &error.message);

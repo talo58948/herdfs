@@ -11,7 +11,6 @@ use herdfs_core::ChunkId;
 use herdfs_core::proto::{Request, Response};
 use herdfs_lab::{SPACE, STORE_CREDENTIALS, sweep};
 use reqwest::{StatusCode, Url};
-use serde_json::json;
 
 use crate::{ALICE, BOB, EACCES, Reply, Scene, assert_same, contains, errno, set_acl};
 
@@ -140,8 +139,11 @@ fn revocation_stops_new_grants_at_once() -> Result<()> {
             StatusCode::FORBIDDEN
         );
     }
-    let open = json!({"op": "open", "space": SPACE, "path": "eng/plan.txt"});
-    assert_eq!(scene.attacker.rpc(&open)?.status, StatusCode::FORBIDDEN);
+    let open = Request::Open {
+        space: SPACE.into(),
+        entry: scene.plan.version.entry,
+    };
+    assert_eq!(scene.attacker.call(&open)?.status, StatusCode::FORBIDDEN);
     assert_eq!(errno(fs::read(scene.bob_mount("eng/plan.txt"))), EACCES);
     // An outstanding URL stays good until it expires, within the TTL of its grant, as S4
     // allows; `an_outstanding_grant_url_dies_with_its_ttl` waits for that.

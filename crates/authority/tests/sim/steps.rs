@@ -161,23 +161,22 @@ impl Sim {
         let parent = child.parent().unwrap_or_default();
         self.model.node(space, &parent).map_or(NO_ENTRY, |node| node.id)
     }
-
     pub fn set_attr(&mut self) {
         let (who, space) = (self.actor(), self.space());
         let path = self.existing_path(&space);
+        let entry = self.model.node(&space, &path).map_or(NO_ENTRY, |node| node.id);
         let mode = self.rng.chance(50).then_some(0o600);
         let mtime_ms = self.rng.chance(50).then_some(self.rng.below(1 << 30) as i64);
         self.send(
             who,
             &Request::SetAttr {
                 space,
-                path,
+                entry,
                 mode,
                 mtime_ms,
             },
         );
     }
-
     /// Grants a user read or write on a file with history, then has them read
     /// it and commit on its oldest version reusing its chunks: versions from
     /// before the grant stay hidden and unusable (S6, S8).
@@ -240,13 +239,11 @@ impl Sim {
         self.sent.push((who, commit.clone()));
         self.send(who, &commit);
     }
-
     pub fn purge(&mut self) {
         let (who, space) = (self.actor(), self.space());
         let path = self.existing_path(&space);
         self.send(who, &Request::Purge { space, path });
     }
-
     /// Deletes a space; space `s` comes back at once, empty, so the run goes on.
     pub fn delete_space(&mut self) {
         let (who, space) = (self.actor(), self.space());
@@ -284,12 +281,18 @@ impl Sim {
         let (who, space) = (self.actor(), self.space());
         let path = self.existing_path(&space);
         let entry = self.model.node(&space, &path).map_or(NO_ENTRY, |node| node.id);
-        let request = match self.rng.below(6) {
+        let parent = self.parent(&space, &path);
+        let request = match self.rng.below(7) {
             0 => Request::Stat { space, path },
-            1 => Request::List { space, path },
-            2 => Request::Open { space, path },
+            1 => Request::List { space, entry },
+            2 => Request::Open { space, entry },
             3 => Request::History { space, path },
             4 => Request::Locate { space, entry },
+            5 => Request::Lookup {
+                space,
+                parent,
+                name: path.name().into(),
+            },
             _ => Request::Whoami,
         };
         self.send(who, &request);

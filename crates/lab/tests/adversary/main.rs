@@ -150,9 +150,19 @@ fn write_as_alice(lab: &Lab, path: &str, bytes: Vec<u8>) -> Result<Target> {
     file.sync_all()?;
     drop(file);
     let path = SpacePath::try_from(path)?;
+    let Response::Entry { entry } = lab.rpc(
+        ALICE,
+        &Request::Stat {
+            space: SPACE.into(),
+            path: path.clone(),
+        },
+    )?
+    else {
+        bail!("{path} was not an entry");
+    };
     let open = Request::Open {
         space: SPACE.into(),
-        path: path.clone(),
+        entry: entry.id,
     };
     let Response::Opened {
         version: Some(version),

@@ -115,8 +115,9 @@ impl Call<'_> {
             Request::Fork { space, name } => self.fork(&space, &name)?,
             Request::Stat { space, path } => self.stat(&space, &path)?,
             Request::Locate { space, entry } => self.locate(&space, entry)?,
-            Request::List { space, path } => self.list(&space, &path)?,
-            Request::Open { space, path } => self.open(&space, &path)?,
+            Request::Lookup { space, parent, name } => self.lookup(&space, parent, &name)?,
+            Request::List { space, entry } => self.list(&space, entry)?,
+            Request::Open { space, entry } => self.open(&space, entry)?,
             Request::Grant {
                 space,
                 entry,
@@ -160,10 +161,10 @@ impl Call<'_> {
             } => self.rename(&space, from_parent, &from_name, to_parent, &to_name)?,
             Request::SetAttr {
                 space,
-                path,
+                entry,
                 mode,
                 mtime_ms,
-            } => self.set_attr(&space, &path, mode, mtime_ms)?,
+            } => self.set_attr(&space, entry, mode, mtime_ms)?,
             Request::Commit {
                 space,
                 entry,
