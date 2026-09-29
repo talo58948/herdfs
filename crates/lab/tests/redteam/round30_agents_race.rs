@@ -42,7 +42,6 @@ fn wait_for(path: &Path, wanted: &str) -> Result<()> {
 /// status into the host filesystem outside the public mount.
 // contract: A1
 #[test]
-#[ignore = "ROUND30: a claimed session can redirect final status outside the mount"]
 fn a_claimed_session_cannot_redirect_status_outside_the_mount() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");
@@ -71,8 +70,8 @@ fn a_claimed_session_cannot_redirect_status_outside_the_mount() -> Result<()> {
         wait_for(&session.join("status"), "running")?;
         fs::rename(&session, &moved)?;
         symlink(&outside, &session)?;
-        wait_for(&outside.join("status"), "done")?;
-        redirected += usize::from(fs::read_to_string(moved.join("status"))?.trim() == "running");
+        wait_for(&moved.join("status"), "done")?;
+        redirected += usize::from(outside.join("status").exists());
     }
 
     assert_eq!(

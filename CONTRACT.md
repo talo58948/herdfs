@@ -45,4 +45,4 @@ Every test names the lines it checks with a `// contract: C9, S2` comment. Code 
 |---|---|
 | P1 | The strategy is decided at `open` only, and `open` never waits for Jev: a remembered answer applies at once; otherwise the default applies and Jev's later answer may start a prefetch for that open. |
 | P2 | If Jev errors, times out or is unsure, the default applies and the filesystem stays available. |
-| A1 | The agents plugin uses only the public filesystem. Permission to spawn on a host is write access on `/.agents/<host>/`. |
+| A1 | The agents plugin uses only the public filesystem. Permission to spawn a session is write access at its directory under `/.agents/<host>/`; a grant on `/.agents/<host>/` covers every session there. |

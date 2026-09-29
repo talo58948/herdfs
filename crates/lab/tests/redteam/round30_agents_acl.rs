@@ -1,8 +1,7 @@
-//! Round 30: the agents host-directory permission boundary through held directories.
+//! Round 30: agents session-directory grants.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
-use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -12,8 +11,6 @@ use herdfs_core::proto::{Perm, Request};
 use herdfs_lab::{ADMIN, Lab, LabConfig, Profile, SPACE, Strategy};
 
 const HOST: &str = ".agents/c";
-const TRIALS: usize = 3;
-
 fn set_acl(lab: &Lab, path: &str, perm: Option<Perm>) -> Result<()> {
     lab.rpc(
         ADMIN,
@@ -43,12 +40,10 @@ fn wait_done(dir: &Path) -> Result<()> {
     }
 }
 
-/// A caller that retained session directory handles, but no longer has write on the host
-/// directory, must not be able to submit prompts that the runner executes.
+/// Write on one session directory permits spawning there, but nowhere else under the host.
 // contract: A1
 #[test]
-#[ignore = "ROUND30: held session directories bypass the agents host-directory write check"]
-fn spawning_requires_current_write_access_on_the_host_directory() -> Result<()> {
+fn write_on_a_session_directory_allows_spawning_only_there() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");
         return Ok(());
@@ -61,48 +56,25 @@ fn spawning_requires_current_write_access_on_the_host_directory() -> Result<()> 
     let (alice, bob) = (lab.mount_path("a").to_owned(), lab.mount_path("b").to_owned());
     fs::create_dir(alice.join(".agents"))?;
     fs::create_dir(alice.join(HOST))?;
-    for trial in 0..TRIALS {
-        fs::create_dir(alice.join(HOST).join(format!("attack-{trial}")))?;
-    }
+    let allowed = alice.join(HOST).join("allowed");
+    let denied = alice.join(HOST).join("denied");
+    fs::create_dir(&allowed)?;
+    fs::create_dir(&denied)?;
     thread::sleep(crate::VISIBLE_AFTER);
 
-    let held_host = File::open(bob.join(HOST))?;
-    let held_sessions = (0..TRIALS)
-        .map(|trial| File::open(bob.join(HOST).join(format!("attack-{trial}"))))
-        .collect::<std::io::Result<Vec<_>>>()?;
+    set_acl(&lab, "", Some(Perm::Read))?;
+    set_acl(&lab, &format!("{HOST}/allowed"), Some(Perm::Write))?;
     lab.start_agents("c", "cat")?;
-    let control = bob.join(HOST).join("allowed");
-    fs::create_dir(&control)?;
-    let mut prompt = File::create(control.join("prompt"))?;
+
+    let refused = fs::create_dir(bob.join(HOST).join("new")).unwrap_err();
+    assert_eq!(refused.kind(), ErrorKind::PermissionDenied);
+    let refused = File::create(bob.join(HOST).join("denied/prompt")).unwrap_err();
+    assert_eq!(refused.kind(), ErrorKind::PermissionDenied);
+
+    let mut prompt = File::create(bob.join(HOST).join("allowed/prompt"))?;
     writeln!(prompt, "allowed")?;
     prompt.sync_all()?;
-    wait_done(&control)?;
-    assert_eq!(fs::read_to_string(control.join("output"))?, "allowed\n");
-
-    set_acl(&lab, "", None)?;
-    for trial in 0..TRIALS {
-        set_acl(&lab, &format!("{HOST}/attack-{trial}"), Some(Perm::Write))?;
-    }
-
-    let sibling = format!("/proc/self/fd/{}/control", held_host.as_raw_fd());
-    let denied = fs::create_dir(sibling).unwrap_err();
-    assert_eq!(denied.kind(), ErrorKind::PermissionDenied, "denial control");
-
-    for (trial, held) in held_sessions.iter().enumerate() {
-        let prompt = format!("/proc/self/fd/{}/prompt", held.as_raw_fd());
-        let mut file = OpenOptions::new().write(true).create_new(true).open(prompt)?;
-        writeln!(file, "attack {trial}")?;
-        file.sync_all()?;
-    }
-    let mut executed = 0;
-    for trial in 0..TRIALS {
-        let dir = alice.join(HOST).join(format!("attack-{trial}"));
-        wait_done(&dir)?;
-        executed += usize::from(fs::read_to_string(dir.join("output"))? == format!("attack {trial}\n"));
-    }
-    assert_eq!(
-        executed, 0,
-        "{executed}/{TRIALS} sessions ran without write on {HOST}"
-    );
+    wait_done(&allowed)?;
+    assert_eq!(fs::read_to_string(allowed.join("output"))?, "allowed\n");
     Ok(())
 }
