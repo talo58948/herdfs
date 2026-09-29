@@ -21,7 +21,6 @@ fn policy() -> Policy {
 /// that old has stopped being younger and must be pruned.
 // contract: C14
 #[test]
-#[ignore = "ROUND32: a version exactly retention-age old is retained"]
 fn exact_retention_age_is_not_retained_as_younger() {
     let mut retained = 0;
     for trial in 0..3 {
@@ -44,7 +43,6 @@ fn exact_retention_age_is_not_retained_as_younger() {
 /// longer a recent upload and must leave the live set.
 // contract: C15
 #[test]
-#[ignore = "ROUND32: an upload exactly grace old remains live"]
 fn exact_upload_grace_is_not_recent() {
     let mut retained = 0;
     for trial in 0..3 {

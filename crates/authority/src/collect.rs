@@ -33,18 +33,18 @@ pub struct Collected {
     pub live: BTreeSet<ChunkId>,
 }
 
-/// Versions past the newest `?1` of their entry, older than `?2`, and not its head.
+/// Versions past the newest `?1` of their entry, created at or before `?2`, and not its head.
 const PRUNE: &str = "DELETE FROM versions WHERE id IN (
     SELECT id FROM (
         SELECT v.id, v.created_ms, e.head,
                row_number() OVER (PARTITION BY v.entry ORDER BY v.id DESC) AS newest
         FROM versions v JOIN entries e ON e.id = v.entry)
-    WHERE newest > ?1 AND created_ms < ?2 AND id IS NOT head)";
+    WHERE newest > ?1 AND created_ms <= ?2 AND id IS NOT head)";
 
-/// Uploads for commits whose newest upload is older than `?1`. A commit's uploads go together,
+/// Uploads for commits whose newest upload is at or before `?1`. A commit's uploads go together,
 /// so a file that takes longer than the grace to upload keeps its first chunks (C4a).
 const STALE_UPLOADS: &str = "DELETE FROM uploads WHERE (principal, request_id) IN (
-    SELECT principal, request_id FROM uploads GROUP BY principal, request_id HAVING max(at_ms) < ?1)";
+    SELECT principal, request_id FROM uploads GROUP BY principal, request_id HAVING max(at_ms) <= ?1)";
 
 /// Request ids are kept at least this long, whatever the retention, so a client that lost a
 /// commit's answer and returns within it confirms that commit instead of committing it again.

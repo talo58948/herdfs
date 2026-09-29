@@ -129,8 +129,8 @@ fn odd_request_ids_keep_uploads_live_for_the_grace_only() {
         })
         .collect();
     uploaded.sort();
-    assert_eq!(live(&mut fx, UPLOADED_MS + GRACE_MS), uploaded);
-    assert_eq!(live(&mut fx, UPLOADED_MS + GRACE_MS + 1), []);
+    assert_eq!(live(&mut fx, UPLOADED_MS + GRACE_MS - 1), uploaded);
+    assert_eq!(live(&mut fx, UPLOADED_MS + GRACE_MS), []);
 }
 
 /// bob reads `f` from v1 on. A fork of the space has the head only: bob sees just that, and no

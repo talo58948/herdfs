@@ -49,13 +49,14 @@ impl Agent {
 
     async fn execute(&self, session: &Session) -> anyhow::Result<()> {
         let cwd = self.cwd(session).await?;
+        let cwd_path = PathBuf::from(format!("/proc/self/fd/{}", cwd.as_raw_fd()));
         let prompt = open(session, "prompt", libc::O_RDONLY).await?;
         let output = open(session, "output", libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND).await?;
         let stdout = output.try_clone().await?.into_std().await;
         let exit = Command::new("sh")
             .arg("-c")
             .arg(&self.command)
-            .current_dir(cwd)
+            .current_dir(cwd_path)
             .env("HERDFS_SESSION_DIR", &session.dir)
             .env("HERDFS_MOUNT", &self.mount)
             .stdin(prompt.into_std().await)
@@ -64,6 +65,7 @@ impl Agent {
             .status()
             .await
             .context("spawn")?;
+        drop(cwd);
         // On herdfs, fsync means committed: other hosts must never see the session end
         // before they can see all of its output.
         output.sync_all().await.context("sync output")?;
@@ -73,18 +75,33 @@ impl Agent {
     }
 
     /// The directory named by the session's `cwd` file, or the mount root without one.
-    async fn cwd(&self, session: &Session) -> anyhow::Result<PathBuf> {
+    async fn cwd(&self, session: &Session) -> anyhow::Result<std::fs::File> {
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        let mut dir = OpenOptions::new()
+            .read(true)
+            .custom_flags(flags)
+            .open(&self.mount)
+            .await
+            .context("cwd")?
+            .into_std()
+            .await;
         let Some(text) = read(session, "cwd").await? else {
-            return Ok(self.mount.clone());
+            return Ok(dir);
         };
         let relative = Path::new(text.trim());
-        let plain = relative
-            .components()
-            .all(|part| matches!(part, Component::Normal(_) | Component::CurDir));
-        ensure!(plain, OUTSIDE_MOUNT);
-        let resolved = fs::canonicalize(self.mount.join(relative)).await.context("cwd")?;
-        ensure!(resolved.starts_with(&self.mount), OUTSIDE_MOUNT);
-        Ok(resolved)
+        for component in relative.components() {
+            let Component::Normal(name) = component else {
+                ensure!(component == Component::CurDir, OUTSIDE_MOUNT);
+                continue;
+            };
+            dir = match open_at(&dir, name, flags, 0).await {
+                Err(err) if matches!(err.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) => {
+                    bail!(OUTSIDE_MOUNT)
+                }
+                opened => opened.context("cwd")?.into_std().await,
+            };
+        }
+        Ok(dir)
     }
 }
 

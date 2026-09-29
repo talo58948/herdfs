@@ -90,7 +90,6 @@ fn wait_finished(sessions: &[PathBuf]) -> Result<()> {
 /// symlink must never let the command start outside the public mount.
 // contract: A1
 #[test]
-#[ignore = "ROUND32: a checked cwd can be swapped outside the mount"]
 fn a_checked_session_cwd_cannot_be_swapped_outside_the_mount() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");
