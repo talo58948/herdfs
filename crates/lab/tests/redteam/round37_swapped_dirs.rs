@@ -73,7 +73,6 @@ fn swap_and_write(
 /// Refreshing each held inode must carry each known subtree to the entry's new path.
 // contract: C7, C12
 #[test]
-#[ignore = "ROUND37: observing one of two exchanged directories loses the other's known subtree"]
 fn both_known_subtrees_follow_exchanged_directory_paths() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());

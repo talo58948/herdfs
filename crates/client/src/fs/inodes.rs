@@ -1,6 +1,5 @@
-//! The entries this client knows: each one's path, bound one to one with its id under one lock,
-//! so that no decision about an entry is taken from a path another entry now holds (C7), and
-//! the kernel's references to its inode. What is known of each entry is its `Inode`.
+//! Entries this client knows: paths bound one-to-one with ids under one lock (C7), kernel
+//! references to their inodes, and what is known of each entry in its `Inode`.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -23,23 +22,34 @@ pub struct Inodes(Mutex<Table>);
 struct Table {
     nodes: HashMap<EntryId, Node>,
     by_path: HashMap<SpacePath, EntryId>,
-    /// The nodes the kernel holds no reference to, the next to go first; those with local
-    /// state stay.
+    /// Unheld nodes, next to go first; those with local state stay.
     idle: Lru<EntryId, ()>,
 }
 
 struct Node {
     /// The entry's path, and when the authority confirmed it: `None` once another entry took it.
     bound: Option<(SpacePath, Instant)>,
+    /// The path and time at which it became unbound.
+    last_path: Option<(SpacePath, Instant)>,
     /// References the kernel holds, which `forget` lowers.
     lookups: u64,
     inode: Arc<Inode>,
 }
 
+impl Node {
+    fn source(&self, at: Instant) -> Option<(SpacePath, Instant)> {
+        let bound = self.bound.as_ref().map(|(path, _)| (path.clone(), at));
+        bound.or_else(|| self.last_path.clone())
+    }
+
+    fn unbind(&mut self, at: Instant) {
+        self.last_path = self.bound.take().map(|(path, _)| (path, at));
+    }
+}
+
 impl Inodes {
-    /// Takes an answer of the authority asked for at `asked`: the entry's attributes, unless ones
-    /// asked for later are held, and its path, unless the authority confirmed a binding of the
-    /// entry or the path since (C7). A listing's entries (`cold`) go first unless used (C12).
+    /// Takes an authority answer asked for at `asked`, unless later attributes or bindings are held
+    /// (C7). A listing's entries (`cold`) go first unless used (C12).
     pub fn observe(&self, entry: &Entry, asked: Instant, cold: bool) {
         lock(&self.0).observe(entry, asked, cold);
     }
@@ -142,7 +152,7 @@ impl Inodes {
         if let Some(id) = table.by_path.remove(path)
             && let Some(node) = table.nodes.get_mut(&id)
         {
-            node.bound = None;
+            node.unbind(Instant::now());
         }
     }
 
@@ -160,20 +170,16 @@ impl Inodes {
         let mut table = lock(&self.0);
         let table = &mut *table;
         let moved_at = Instant::now();
-        let source = table
-            .nodes
-            .get(&entry.id)
-            .and_then(|node| node.bound.as_ref())
-            .map(|(path, _)| path.clone());
+        let source = table.nodes.get(&entry.id).and_then(|node| node.source(moved_at));
         if let Some(replaced) = table
             .by_path
             .remove(&entry.path)
             .and_then(|id| table.nodes.get_mut(&id))
         {
-            replaced.bound = None;
+            replaced.unbind(moved_at);
         }
-        if let Some(source) = source {
-            table.rebase(&source, &entry.path, moved_at);
+        if let Some((source, at)) = source {
+            table.rebase(&source, &entry.path, at);
         }
         for node in table.nodes.values_mut() {
             let Some((path, _)) = &node.bound else {
@@ -181,7 +187,7 @@ impl Inodes {
             };
             if path.is_within(from) {
                 table.by_path.remove(path);
-                node.bound = None;
+                node.unbind(moved_at);
             }
         }
         table.observe(entry, moved_at, false);
@@ -205,6 +211,7 @@ impl Table {
         let inode = Arc::new(Inode::new(entry, asked));
         let node = Node {
             bound: None,
+            last_path: None,
             lookups: 0,
             inode: inode.clone(),
         };
@@ -217,7 +224,7 @@ impl Table {
         let (same_path, source, inode) = match self.nodes.get(&entry.id) {
             Some(node) => (
                 node.bound.as_ref().is_some_and(|(path, _)| path == &entry.path),
-                node.bound.as_ref().map(|(path, _)| path.clone()),
+                node.source(asked),
                 node.inode.clone(),
             ),
             None => (false, None, self.add(entry.id, Some(entry.clone()), asked)),
@@ -227,9 +234,9 @@ impl Table {
         let bound = !(cold && same_path) && self.bind(entry.id, &entry.path, asked);
         if bound
             && entry.kind == Kind::Dir
-            && let Some(source) = source.filter(|source| source != &entry.path)
+            && let Some((source, at)) = source.filter(|(source, _)| source != &entry.path)
         {
-            self.rebase(&source, &entry.path, asked);
+            self.rebase(&source, &entry.path, at);
         }
         if self.idle.contains(&entry.id) {
             match cold {
@@ -251,7 +258,7 @@ impl Table {
             return false;
         }
         if let Some(holder) = holder.and_then(|holder| self.nodes.get_mut(&holder)) {
-            holder.bound = None;
+            holder.unbind(at);
         }
         let Some(node) = self.nodes.get_mut(&id) else {
             return false;
@@ -261,6 +268,7 @@ impl Table {
         {
             self.by_path.remove(&old);
         }
+        node.last_path = None;
         self.by_path.insert(path.clone(), id);
         true
     }
