@@ -116,7 +116,11 @@ impl Space {
     /// Seals the handle's writes. Runs on flush, which close(2) waits for, so a write
     /// survives a crash once close returns (C4a).
     pub async fn flush(self: Arc<Self>, fh: u64) -> Result<()> {
-        self.seal(&*self.handle(fh)?, false)
+        let handle = self.handle(fh)?;
+        if !handle.dirty.load(Relaxed) && handle.truncated.load(Relaxed) {
+            return self.defer(handle.entry);
+        }
+        self.seal(&handle, false)
     }
 
     pub async fn release(self: Arc<Self>, fh: u64) -> Result<()> {
@@ -251,7 +255,17 @@ impl Space {
         }
         // Sealing fsyncs the copy, which may take a while for a large file.
         let sealed = tokio::task::block_in_place(|| self.seal_entry(handle.entry));
-        Ok(sealed.inspect_err(|_| handle.dirty.store(true, Relaxed))?)
+        sealed.inspect_err(|_| handle.dirty.store(true, Relaxed))?;
+        if last {
+            self.local(handle.entry, |local| local.activate(&self.journal, handle.entry))?;
+        }
+        Ok(())
+    }
+
+    fn defer(&self, entry: EntryId) -> Result<()> {
+        let deferred =
+            tokio::task::block_in_place(|| self.local(entry, |local| local.defer(&self.journal, entry)));
+        Ok(deferred?)
     }
 
     pub(super) fn register(&self, handle: Handle) -> u64 {

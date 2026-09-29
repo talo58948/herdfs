@@ -129,6 +129,15 @@ impl Local {
     /// Makes the working copy durable, renames it to the next sealed file, and records that for
     /// the committer (C3, C4a). Under the inode's lock, which only this file's calls wait for.
     pub fn seal(&mut self, journal: &Journal, entry: EntryId) -> io::Result<()> {
+        self.seal_as(journal, entry, false)
+    }
+
+    /// Persists a truncate-only close without letting the live committer publish it yet.
+    pub fn defer(&mut self, journal: &Journal, entry: EntryId) -> io::Result<()> {
+        self.seal_as(journal, entry, true)
+    }
+
+    fn seal_as(&mut self, journal: &Journal, entry: EntryId, deferred: bool) -> io::Result<()> {
         let Some(working) = self.working.clone() else {
             return Ok(());
         };
@@ -143,6 +152,7 @@ impl Local {
         let record = Record {
             entry,
             seal,
+            deferred,
             base: self.base.clone(),
             mtime_ms: working.metadata()?.modified().ok().map(crate::unix_ms),
             request_id: format!("{:032x}", rand::random::<u128>()),
@@ -157,7 +167,8 @@ impl Local {
     }
 
     /// Takes a sealed write recovered from the journal after a restart (C4a).
-    pub fn recovered(&mut self, journal: &Journal, record: Record, sealed: Arc<File>) {
+    pub fn recovered(&mut self, journal: &Journal, mut record: Record, sealed: Arc<File>) {
+        record.deferred = false;
         (self.base, self.seals) = (record.base.clone(), record.seal);
         self.queue(journal, record, sealed);
     }
@@ -165,10 +176,28 @@ impl Local {
     /// Makes `record` the pending write, in place of any older one, and wakes the committer.
     fn queue(&mut self, journal: &Journal, record: Record, sealed: Arc<File>) {
         let entry = record.entry;
+        let deferred = record.deferred;
         self.pending = Some((record, sealed));
+        if !deferred && !std::mem::replace(&mut self.committing, true) {
+            journal.wake(entry);
+        }
+    }
+
+    /// Lets the live committer take a truncate that flush made durable.
+    pub fn activate(&mut self, journal: &Journal, entry: EntryId) -> io::Result<()> {
+        let Some((record, _)) = self.pending.as_mut().filter(|(record, _)| record.deferred) else {
+            return Ok(());
+        };
+        let active = Record {
+            deferred: false,
+            ..record.clone()
+        };
+        write_record(&journal.record_path(entry), &active)?;
+        *record = active;
         if !std::mem::replace(&mut self.committing, true) {
             journal.wake(entry);
         }
+        Ok(())
     }
 
     /// Records a modification time for the next commit to keep, if one will come that has not

@@ -188,6 +188,10 @@ impl Committer {
                 local.committing = false;
                 return None;
             };
+            if record.deferred {
+                local.committing = false;
+                return None;
+            }
             let job = Job {
                 record: record.clone(),
                 sealed: self.space.journal.sealed_path(entry, record.seal),

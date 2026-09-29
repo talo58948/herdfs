@@ -89,7 +89,6 @@ fn create_existing_opens_a_recreated_listed_name() -> Result<()> {
 /// (`fs/handles.rs`), which the kernel may deliver after close has returned.
 // contract: C4a, C12
 #[test]
-#[ignore = "ROUND39: truncate-only close can be killed before release journals it"]
 fn truncate_only_close_survives_an_immediate_client_crash() -> Result<()> {
     let Some(mut lab) = two_clients()? else {
         return Ok(());
@@ -170,7 +169,6 @@ fn offline_child_after_create(
 /// stationary-parent control rewrites and commits the child offline.
 // contract: C7, C12
 #[test]
-#[ignore = "ROUND39: child answer does not rebase its held moved parent"]
 fn a_child_created_below_a_moved_parent_can_be_reopened_offline() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());

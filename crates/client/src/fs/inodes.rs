@@ -29,6 +29,18 @@ impl Inodes {
         lock(&self.0).observe(entry, asked, cold);
     }
 
+    /// Takes a child answer and confirms the path of the parent id named in its request too.
+    pub fn observe_child(&self, parent: EntryId, entry: &Entry, asked: Instant) {
+        let mut table = lock(&self.0);
+        table.confirm_parent(parent, &entry.path, asked);
+        table.observe(entry, asked, false);
+    }
+
+    /// Confirms the path of the parent id named in an answer about its child.
+    pub fn confirm_parent(&self, parent: EntryId, child: &SpacePath, asked: Instant) {
+        lock(&self.0).confirm_parent(parent, child, asked);
+    }
+
     /// As `observe`, for an answer that hands the kernel a reference to the entry's inode.
     pub fn looked_up(&self, entry: &Entry, asked: Instant) {
         let mut table = lock(&self.0);
@@ -141,9 +153,10 @@ impl Inodes {
     }
 
     /// Binds the entry this client's rename moved and moves its known subtree with it (C7).
-    pub fn moved(&self, from: &SpacePath, entry: &Entry) {
+    pub fn moved(&self, parent: EntryId, from: &SpacePath, entry: &Entry, asked: Instant) {
         let mut table = lock(&self.0);
         let table = &mut *table;
+        table.confirm_parent(parent, &entry.path, asked);
         let moved_at = Instant::now();
         let source = table.nodes.get(&entry.id).and_then(|node| node.source(moved_at));
         if let Some(replaced) = table
