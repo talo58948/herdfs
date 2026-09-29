@@ -94,7 +94,7 @@ impl Server {
                     .map_err(unavailable)
             })
             .await?;
-        let expired = |id: &ChunkId| since.get(id).is_some_and(|at| *at < started - policy.grace_ms);
+        let expired = |id: &ChunkId| since.get(id).is_some_and(|at| *at <= started - policy.grace_ms);
         let mut doomed: Vec<_> = stored
             .into_iter()
             .filter(|(id, _)| !collected.live.contains(id) && expired(id))

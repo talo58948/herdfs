@@ -52,14 +52,14 @@ impl Model {
         {
             let (len, head) = (node.history.len(), node.history.last().copied());
             let kept = |(index, id): &(usize, _)| {
-                len - index <= keep || versions[id].created_ms >= cutoff || Some(*id) == head
+                len - index <= keep || versions[id].created_ms > cutoff || Some(*id) == head
             };
             let (kept, gone): (Vec<_>, Vec<_>) = node.history.iter().copied().enumerate().partition(kept);
             node.history = kept.into_iter().map(|(_, id)| id).collect();
             pruned.extend(gone.into_iter().map(|(_, id)| id));
         }
         self.uploads
-            .retain(|_, (_, at_ms)| *at_ms >= now_ms - policy.grace_ms);
+            .retain(|_, (_, at_ms)| *at_ms > now_ms - policy.grace_ms);
         self.forget(&pruned);
         let forgotten = now_ms
             .saturating_sub(policy.max_age_ms.max(REQUEST_MEMORY_MS))

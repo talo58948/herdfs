@@ -64,13 +64,13 @@ async fn a_sweep_deletes_only_chunks_unreferenced_for_the_grace() {
         grace_ms: keep_all.grace_ms,
     };
     let swept = lab.server.sweep(collected_at + 60_000, &head_only).await.unwrap();
-    assert_eq!((swept.pruned, swept.deleted), (1, 0));
+    assert_eq!((swept.pruned, swept.deleted, swept.bytes), (1, 2, 24));
     let swept = lab
         .server
-        .sweep(collected_at + keep_all.grace_ms + 1, &head_only)
+        .sweep(collected_at + keep_all.grace_ms, &head_only)
         .await
         .unwrap();
-    assert_eq!((swept.pruned, swept.deleted, swept.bytes), (0, 3, 37));
+    assert_eq!((swept.pruned, swept.deleted, swept.bytes), (0, 1, 13));
     let mut expected = vec![key(b"second version"), "herdfs/chunks/not-a-chunk".to_owned()];
     expected.sort();
     assert_eq!(left(), expected);
