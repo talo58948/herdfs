@@ -125,39 +125,67 @@ impl Model {
             }
             Request::Grant { .. } => panic!("Grant answered {reply:?}"),
             Request::Create {
-                space, path, mode, ..
+                space,
+                parent,
+                name,
+                mode,
             } => {
-                self.add(space, path, reply, node(Kind::File, *mode, None, now_ms));
+                let path = self.child_path(space, *parent, name).expect("created").0;
+                self.add(space, &path, reply, node(Kind::File, *mode, None, now_ms));
             }
             Request::Mkdir {
-                space, path, mode, ..
+                space,
+                parent,
+                name,
+                mode,
             } => {
-                self.add(space, path, reply, node(Kind::Dir, *mode, None, now_ms));
+                let path = self.child_path(space, *parent, name).expect("successful mkdir").0;
+                self.add(space, &path, reply, node(Kind::Dir, *mode, None, now_ms));
             }
             Request::Symlink {
-                space, path, target, ..
+                space,
+                parent,
+                name,
+                target,
             } => {
+                let path = self.child_path(space, *parent, name).expect("linked").0;
                 self.add(
                     space,
-                    path,
+                    &path,
                     reply,
                     node(Kind::Symlink, 0o777, Some(target), now_ms),
                 );
             }
-            Request::Remove { space, path, .. } => {
+            Request::Remove { space, parent, name } => {
                 // The answer is the entry as it was, so a client drops exactly its state.
+                let path = self.child_path(space, *parent, name).expect("removed").0;
+                let Response::Entry { entry } = reply else {
+                    panic!("Remove answered {reply:?}")
+                };
+                assert_eq!(*entry, self.entry(space, &path));
+                self.remove(space, &path);
+                self.touch_parent(space, &path, now_ms);
+            }
+            Request::Rename {
+                space,
+                from_parent,
+                from_name,
+                to_parent,
+                to_name,
+            } => {
+                let from = self
+                    .child_path(space, *from_parent, from_name)
+                    .expect("renamed")
+                    .0;
+                let to = self.child_path(space, *to_parent, to_name).expect("renamed").0;
                 assert_eq!(
                     *reply,
-                    Response::Entry {
-                        entry: self.entry(space, path)
+                    Response::Renamed {
+                        from: from.clone(),
+                        to: to.clone()
                     }
                 );
-                self.remove(space, path);
-                self.touch_parent(space, path, now_ms);
-            }
-            Request::Rename { space, from, to, .. } => {
-                assert_eq!(*reply, Response::Done);
-                self.rename(space, from, to, now_ms);
+                self.rename(space, &from, &to, now_ms);
             }
             Request::SetAttr {
                 space,

@@ -142,42 +142,42 @@ impl Model {
                 ensure(chunks.iter().all(|&index| (index as usize) < count), Invalid)
             }
             Request::Create {
-                space, path, parent, ..
+                space, parent, name, ..
             }
             | Request::Mkdir {
-                space, path, parent, ..
+                space, parent, name, ..
             }
             | Request::Symlink {
-                space, path, parent, ..
+                space, parent, name, ..
             } => {
-                self.require(who, space, path, Perm::Write)?;
-                self.expect_parent(space, path, *parent)?;
-                ensure(self.node(space, path).is_err(), Exists)?;
-                self.parent_dir(space, path)
+                let (path, kind) = self.child_path(space, *parent, name)?;
+                self.require(who, space, &path, Perm::Write)?;
+                ensure(kind == Kind::Dir, NotFound)?;
+                ensure(self.node(space, &path).is_err(), Exists)
             }
-            Request::Remove { space, path, parent } => {
-                self.require(who, space, path, Perm::Write)?;
-                self.expect_parent(space, path, *parent)?;
-                ensure(!path.is_root(), Invalid)?;
-                let node = self.node(space, path)?;
+            Request::Remove { space, parent, name } => {
+                let (path, kind) = self.child_path(space, *parent, name)?;
+                self.require(who, space, &path, Perm::Write)?;
+                ensure(kind == Kind::Dir, NotFound)?;
+                let node = self.node(space, &path)?;
                 ensure(
-                    node.kind != Kind::Dir || !self.has_children(space, path),
+                    node.kind != Kind::Dir || !self.has_children(space, &path),
                     NotEmpty,
                 )
             }
             Request::Rename {
                 space,
-                from,
                 from_parent,
-                to,
+                from_name,
                 to_parent,
+                to_name,
             } => {
-                // Refusals for access come before any hint of what the parent paths name.
-                self.require(who, space, from, Perm::Write)?;
-                self.require(who, space, to, Perm::Write)?;
-                self.expect_parent(space, from, *from_parent)?;
-                self.expect_parent(space, to, *to_parent)?;
-                self.rename_outcome(who, space, from, to)
+                let (from, from_kind) = self.child_path(space, *from_parent, from_name)?;
+                let (to, to_kind) = self.child_path(space, *to_parent, to_name)?;
+                self.require(who, space, &from, Perm::Write)?;
+                self.require(who, space, &to, Perm::Write)?;
+                ensure(from_kind == Kind::Dir && to_kind == Kind::Dir, NotFound)?;
+                self.rename_outcome(space, &from, &to)
             }
             Request::SetAttr { space, path, .. } => {
                 self.require(who, space, path, Perm::Write)?;
@@ -226,25 +226,20 @@ impl Model {
         }
     }
 
-    fn parent_dir(&self, space: &str, path: &SpacePath) -> Outcome {
-        let parent = path.parent().unwrap_or_default();
-        match self.node(space, &parent)?.kind {
-            Kind::Dir => Ok(()),
-            _ => Err(ErrorCode::NotDir),
-        }
+    pub fn child_path(
+        &self,
+        space: &str,
+        parent: EntryId,
+        name: &str,
+    ) -> Result<(SpacePath, Kind), ErrorCode> {
+        let (path, node) = self.node_by_id(space, parent).ok_or(ErrorCode::NotFound)?;
+        let name = SpacePath::try_from(name).map_err(|_| ErrorCode::Invalid)?;
+        ensure(name.parent() == Some(SpacePath::root()), ErrorCode::Invalid)?;
+        let path = path.join(name.as_str()).map_err(|_| ErrorCode::Invalid)?;
+        Ok((path, node.kind))
     }
 
-    fn expect_parent(&self, space: &str, path: &SpacePath, expected: EntryId) -> Outcome {
-        let parent = path.parent().unwrap_or_default();
-        ensure(
-            self.node(space, &parent).map(|node| node.id) == Ok(expected),
-            ErrorCode::NotFound,
-        )
-    }
-
-    fn rename_outcome(&self, who: &Principal, space: &str, from: &SpacePath, to: &SpacePath) -> Outcome {
-        self.require(who, space, from, Perm::Write)?;
-        self.require(who, space, to, Perm::Write)?;
+    fn rename_outcome(&self, space: &str, from: &SpacePath, to: &SpacePath) -> Outcome {
         let source = self.node(space, from)?;
         if from == to {
             return Ok(());
@@ -259,7 +254,7 @@ impl Model {
             ErrorCode::Invalid,
         )?;
         let Ok(target) = self.node(space, to) else {
-            return self.parent_dir(space, to);
+            return Ok(());
         };
         match (source.kind == Kind::Dir, target.kind == Kind::Dir) {
             (true, false) => Err(ErrorCode::NotDir),

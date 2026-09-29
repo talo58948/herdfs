@@ -226,8 +226,8 @@ fn create(lab: &Lab, user: &str, space: &str, path: &str) -> Result<EntryId> {
     };
     let create = Request::Create {
         space: space.into(),
-        path,
         parent: parent.id,
+        name: path.name().into(),
         mode: 0o644,
     };
     match lab.rpc(user, &create)? {

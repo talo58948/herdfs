@@ -49,83 +49,82 @@ impl Call<'_> {
     pub(crate) fn make(
         &self,
         space: &str,
-        path: &SpacePath,
         parent: EntryId,
+        name: &str,
         kind: Kind,
         mode: u32,
         target: Option<&str>,
     ) -> Result<Response> {
-        self.require(space, path, Perm::Write)?;
-        self.expect_parent(space, path, parent)?;
-        if self.find(space, path)?.is_some() {
+        let (path, parent_kind) = self.child_path(space, parent, name)?;
+        self.require(space, &path, Perm::Write)?;
+        self.require_directory(parent_kind, parent)?;
+        if self.find(space, &path)?.is_some() {
             return Err(refuse(ErrorCode::Exists, format!("{path} exists")));
         }
-        self.require_parent_dir(space, path)?;
         self.db
             .prepare_cached(
                 "INSERT INTO entries (space, path, kind, mode, mtime_ms, target) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?
             .execute(params![space, path.as_str(), kind_name(kind), mode, self.now_ms, target])?;
-        self.touch_parent(space, path)?;
+        self.touch_parent(space, &path)?;
         Ok(Response::Entry {
-            entry: self.entry(space, path)?,
+            entry: self.entry(space, &path)?,
         })
     }
 
-    pub(crate) fn remove(&self, space: &str, path: &SpacePath, parent: EntryId) -> Result<Response> {
-        self.require(space, path, Perm::Write)?;
-        self.expect_parent(space, path, parent)?;
-        if path.is_root() {
-            return Err(refuse(ErrorCode::Invalid, "the root cannot be removed"));
-        }
-        let entry = self.entry(space, path)?;
+    pub(crate) fn remove(&self, space: &str, parent: EntryId, name: &str) -> Result<Response> {
+        let (path, parent_kind) = self.child_path(space, parent, name)?;
+        self.require(space, &path, Perm::Write)?;
+        self.require_directory(parent_kind, parent)?;
+        let entry = self.entry(space, &path)?;
         self.delete(space, &entry)?;
-        self.touch_parent(space, path)?;
+        self.touch_parent(space, &path)?;
         Ok(Response::Entry { entry })
     }
 
     pub(crate) fn rename(
         &self,
         space: &str,
-        from: &SpacePath,
         from_parent: EntryId,
-        to: &SpacePath,
+        from_name: &str,
         to_parent: EntryId,
+        to_name: &str,
     ) -> Result<Response> {
-        self.require(space, from, Perm::Write)?;
-        self.require(space, to, Perm::Write)?;
-        self.expect_parent(space, from, from_parent)?;
-        self.expect_parent(space, to, to_parent)?;
-        let source = self.entry(space, from)?;
+        let (from, from_kind) = self.child_path(space, from_parent, from_name)?;
+        let (to, to_kind) = self.child_path(space, to_parent, to_name)?;
+        self.require(space, &from, Perm::Write)?;
+        self.require(space, &to, Perm::Write)?;
+        self.require_directory(from_kind, from_parent)?;
+        self.require_directory(to_kind, to_parent)?;
+        let source = self.entry(space, &from)?;
         if from == to {
-            return Ok(Response::Done);
+            return Ok(Response::Renamed { from, to });
         }
-        if to.is_within(from) {
+        if to.is_within(&from) {
             return Err(refuse(
                 ErrorCode::Invalid,
                 format!("cannot move {from} into itself"),
             ));
         }
         // Every path below `from` must stay within the path limit once moved.
-        if self.longest_within(space, from)?.rebase(from, to).is_none() {
+        if self.longest_within(space, &from)?.rebase(&from, &to).is_none() {
             let message = format!("moving {from} to {to} makes a path too long");
             return Err(refuse(ErrorCode::Invalid, message));
         }
-        match self.find(space, to)? {
-            Some(target) => self.replace(space, &source, &target)?,
-            None => self.require_parent_dir(space, to)?,
+        if let Some(target) = self.find(space, &to)? {
+            self.replace(space, &source, &target)?;
         }
         // `from` is not the root here, since everything is within the root.
-        let (lo, hi) = below(from);
+        let (lo, hi) = below(&from);
         self.db
             .prepare_cached(
                 "UPDATE entries SET path = ?3 || substr(path, length(?2) + 1)
                  WHERE space = ?1 AND (path = ?2 OR (path > ?4 AND path < ?5))",
             )?
             .execute(params![space, from.as_str(), to.as_str(), lo, hi])?;
-        self.touch_parent(space, from)?;
-        self.touch_parent(space, to)?;
-        Ok(Response::Done)
+        self.touch_parent(space, &from)?;
+        self.touch_parent(space, &to)?;
+        Ok(Response::Renamed { from, to })
     }
 
     pub(crate) fn set_attr(
@@ -199,27 +198,29 @@ impl Call<'_> {
         Ok(())
     }
 
-    /// Callers pass a path that does not exist, so never the root.
-    fn require_parent_dir(&self, space: &str, path: &SpacePath) -> Result<()> {
-        let parent = path.parent().unwrap_or_default();
-        match self.find(space, &parent)? {
-            None => Err(refuse(ErrorCode::NotFound, format!("{parent} does not exist"))),
-            Some(dir) if dir.kind != Kind::Dir => {
-                Err(refuse(ErrorCode::NotDir, format!("{parent} is not a directory")))
-            }
-            Some(_) => Ok(()),
-        }
+    fn child_path(&self, space: &str, parent: EntryId, name: &str) -> Result<(SpacePath, Kind)> {
+        let parent_entry = self.entry_by_id(space, parent)?;
+        let name = SpacePath::try_from(name)
+            .ok()
+            .filter(|name| name.parent() == Some(SpacePath::root()))
+            .ok_or_else(|| refuse(ErrorCode::Invalid, format!("invalid name {name:?}")))?;
+        let path = parent_entry.path.join(name.as_str()).map_err(|_| {
+            refuse(
+                ErrorCode::Invalid,
+                format!("path below entry {} is too long", parent.0),
+            )
+        })?;
+        Ok((path, parent_entry.kind))
     }
 
-    /// Refuses a path whose parent no longer names the entry the client holds.
-    fn expect_parent(&self, space: &str, path: &SpacePath, expected: EntryId) -> Result<()> {
-        let parent = path.parent().unwrap_or_default();
-        match self.find(space, &parent)? {
-            Some(entry) if entry.id == expected => Ok(()),
-            _ => Err(refuse(
+    fn require_directory(&self, kind: Kind, parent: EntryId) -> Result<()> {
+        if kind == Kind::Dir {
+            Ok(())
+        } else {
+            Err(refuse(
                 ErrorCode::NotFound,
-                format!("{parent} no longer names entry {}", expected.0),
-            )),
+                format!("entry {} is not a directory", parent.0),
+            ))
         }
     }
 }

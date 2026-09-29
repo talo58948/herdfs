@@ -56,8 +56,8 @@ fn a_fork_takes_linear_time_and_leaves_its_parent_alone() -> Result<()> {
             ADMIN,
             &Request::Mkdir {
                 space,
-                path,
                 parent: root,
+                name: path.name().into(),
                 mode,
             },
         )?
@@ -120,8 +120,8 @@ fn fill(lab: &Lab, dirs: &[EntryId], files: Range<usize>) -> Result<()> {
 fn add_file(lab: &Lab, token: &str, dirs: &[EntryId], n: usize) -> Result<()> {
     let create = Request::Create {
         space: SPACE.into(),
-        path: path(&format!("d{:02}/f{n}", n % DIRS))?,
         parent: dirs[n % DIRS],
+        name: format!("f{n}"),
         mode: 0o644,
     };
     let Response::Entry { entry } = lab.rpc_with(token, &create)? else {

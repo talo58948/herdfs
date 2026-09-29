@@ -82,8 +82,8 @@ impl Fixture {
             who,
             Request::Mkdir {
                 space: SPACE.into(),
-                path,
                 parent,
+                name: path.name().into(),
                 mode: 0o755,
             },
         )
@@ -96,8 +96,8 @@ impl Fixture {
             who,
             Request::Create {
                 space: SPACE.into(),
-                path,
                 parent,
+                name: path.name().into(),
                 mode: 0o644,
             },
         )
@@ -110,8 +110,8 @@ impl Fixture {
             who,
             Request::Remove {
                 space: SPACE.into(),
-                path,
                 parent,
+                name: path.name().into(),
             },
         )
     }
@@ -123,10 +123,10 @@ impl Fixture {
             who,
             Request::Rename {
                 space: SPACE.into(),
-                from,
                 from_parent,
-                to,
+                from_name: from.name().into(),
                 to_parent,
+                to_name: to.name().into(),
             },
         )
     }

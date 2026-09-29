@@ -103,43 +103,43 @@ pub enum Request {
     /// Creates an empty file entry with no version yet.
     Create {
         space: String,
-        path: SpacePath,
-        /// The entry that `path`'s parent path must name.
         parent: EntryId,
+        /// One name within `parent`.
+        name: String,
         mode: u32,
     },
     Mkdir {
         space: String,
-        path: SpacePath,
-        /// The entry that `path`'s parent path must name.
         parent: EntryId,
+        /// One name within `parent`.
+        name: String,
         mode: u32,
     },
     Symlink {
         space: String,
-        path: SpacePath,
-        /// The entry that `path`'s parent path must name.
         parent: EntryId,
+        /// One name within `parent`.
+        name: String,
         target: String,
     },
     /// Removes a file, a symlink or an empty directory. Answers with the
     /// removed entry, so a client knows exactly which entry went.
     Remove {
         space: String,
-        path: SpacePath,
-        /// The entry that `path`'s parent path must name.
         parent: EntryId,
+        /// One name within `parent`.
+        name: String,
     },
     /// Moves an entry, or a directory with its subtree, in one step.
-    /// Replaces an existing file, or an empty directory, at `to`.
+    /// Replaces an existing file, or an empty directory, at the destination.
     Rename {
         space: String,
-        from: SpacePath,
-        /// The entry that `from`'s parent path must name.
         from_parent: EntryId,
-        to: SpacePath,
-        /// The entry that `to`'s parent path must name.
+        /// One name within `from_parent`.
+        from_name: String,
         to_parent: EntryId,
+        /// One name within `to_parent`.
+        to_name: String,
     },
     SetAttr {
         space: String,
@@ -230,6 +230,11 @@ pub enum Response {
     },
     History {
         versions: Vec<Version>,
+    },
+    /// The paths an entry moved from and to, resolved in the rename transaction.
+    Renamed {
+        from: SpacePath,
+        to: SpacePath,
     },
     Done,
 }

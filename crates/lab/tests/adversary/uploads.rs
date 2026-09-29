@@ -31,8 +31,7 @@ fn bob_cannot_commit_alices_chunks_without_uploading_them() -> Result<()> {
     let Response::Entry { entry: eng } = scene.lab.rpc(ALICE, &stat)? else {
         bail!("stat answers with the entry")
     };
-    let create =
-        json!({"op": "create", "space": SPACE, "path": "eng/claim", "parent": eng.id, "mode": 0o644});
+    let create = json!({"op": "create", "space": SPACE, "parent": eng.id, "name": "claim", "mode": 0o644});
     let created = scene.attacker.rpc(&create)?;
     let Response::Entry { entry: claim } = serde_json::from_slice(&created.body)? else {
         bail!("create answers with the entry");

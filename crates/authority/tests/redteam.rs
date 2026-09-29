@@ -143,7 +143,7 @@ async fn a_commit_of_a_large_file_is_accepted() {
     let lab = Lab::start().await;
     let alice = lab.user("alice");
     let root = lab.create_space(&alice, "team").await;
-    let create = json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420});
+    let create = json!({"op": "create", "space": "team", "parent": root, "name": "f", "mode": 420});
     let (_, created) = lab.rpc(&alice, &create).await;
     let chunk = vec![7; 1 << 20];
     let id = herdfs_core::ChunkId::of(&chunk);
@@ -232,7 +232,7 @@ async fn a_commit_of_a_file_over_350_gib_is_accepted() {
     let lab = Lab::start().await;
     let alice = lab.user("alice");
     let root = lab.create_space(&alice, "team").await;
-    let create = json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420});
+    let create = json!({"op": "create", "space": "team", "parent": root, "name": "f", "mode": 420});
     let (_, created) = lab.rpc(&alice, &create).await;
     let chunk = vec![7; 1 << 20];
     let id = herdfs_core::ChunkId::of(&chunk);

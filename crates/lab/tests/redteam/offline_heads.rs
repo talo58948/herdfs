@@ -65,8 +65,8 @@ fn an_offline_append_after_listing_a_big_directory_is_committed() -> Result<()> 
             ADMIN,
             &Request::Create {
                 space,
-                path,
                 parent,
+                name: path.name().into(),
                 mode,
             },
         )?;
@@ -98,8 +98,8 @@ fn mkdir(lab: &herdfs_lab::Lab, at: &str) -> Result<EntryId> {
         ADMIN,
         &Request::Mkdir {
             space,
-            path,
             parent: root.id,
+            name: path.name().into(),
             mode,
         },
     )?
