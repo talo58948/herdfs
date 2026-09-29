@@ -20,12 +20,7 @@ const DIR_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
-const FILE_MODE: Mode = Mode::RUSR
-    .union(Mode::WUSR)
-    .union(Mode::RGRP)
-    .union(Mode::WGRP)
-    .union(Mode::ROTH)
-    .union(Mode::WOTH);
+const FILE_MODE: Mode = Mode::from_raw_mode(0o666);
 
 /// A prompt's size and mtime. Unchanged across two polls means its writer is done.
 #[derive(Clone, Copy, PartialEq)]
@@ -190,6 +185,7 @@ async fn open(session: &Session, name: &str, flags: OFlags) -> io::Result<File> 
 }
 
 async fn session(dir: &Path) -> io::Result<Session> {
+    // `<mount>/.agents/<host>/<session>`: walked from the mount, so no component may be a symlink.
     let root = dir
         .ancestors()
         .nth(3)
