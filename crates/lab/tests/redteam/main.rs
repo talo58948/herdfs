@@ -57,6 +57,7 @@ mod round31_offline_held;
 mod round31_pending_pin;
 mod round32_agents_cwd;
 mod round33_relocated_child;
+mod round35_held_entries;
 mod saved_mtime;
 mod scratch_files;
 mod shared_appends;
