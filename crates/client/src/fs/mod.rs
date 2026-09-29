@@ -140,10 +140,11 @@ impl Space {
     }
 
     /// Records an entry this client just made, whose reply hands the kernel its inode.
-    fn added(&self, entry: &Entry) -> FileAttr {
+    fn added(&self, parent: EntryId, entry: &Entry, asked: Instant) -> FileAttr {
+        self.inodes.confirm_parent(parent, &entry.path, asked);
         self.inodes.stale(&entry.path);
         let (entry, local) = self.inodes.view(entry.clone());
-        self.looked_up(&entry, Instant::now(), local.as_deref())
+        self.looked_up(&entry, asked, local.as_deref())
     }
 
     /// Drops the kernel's `lookups` references to `ino`.

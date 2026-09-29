@@ -110,6 +110,18 @@ impl Table {
         true
     }
 
+    pub(super) fn confirm_parent(&mut self, id: EntryId, child: &SpacePath, at: Instant) {
+        let Some(path) = child.parent() else {
+            return;
+        };
+        let source = self.nodes.get(&id).and_then(|node| node.source(at));
+        if self.bind(id, &path, at)
+            && let Some((source, confirmed)) = source.filter(|(source, _)| source != &path)
+        {
+            self.rebase(&source, &path, confirmed);
+        }
+    }
+
     pub(super) fn rebase(&mut self, source: &SpacePath, destination: &SpacePath, at: Instant) {
         let moved: Vec<_> = self
             .nodes

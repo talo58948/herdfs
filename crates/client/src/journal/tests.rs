@@ -111,6 +111,10 @@ impl Mount {
         self.local(|local, journal| local.seal(journal, ENTRY)).unwrap();
     }
 
+    fn defer(&self) {
+        self.local(|local, journal| local.defer(journal, ENTRY)).unwrap();
+    }
+
     fn changes(&self) -> Option<Arc<File>> {
         self.inodes.local(ENTRY, false, |local| local.copy()).flatten()
     }
@@ -164,6 +168,26 @@ fn a_sealed_write_is_recovered_after_a_restart_and_an_unclosed_one_dropped() {
     assert_eq!(fs::read(job.sealed).unwrap(), b"closed");
     assert_eq!(read(&mount), b"closed");
     assert!(!dir.path().join("7.work").exists());
+}
+
+// contract: C3, C4a
+#[test]
+fn a_deferred_truncate_waits_live_and_commits_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mount, mut woken) = Mount::open(dir.path());
+    mount.opened();
+    mount.install(Some(&base()));
+    mount.truncate();
+    mount.defer();
+    assert!(woken.try_recv().is_err(), "the live committer waits for release");
+    assert!(mount.committer.take(ENTRY).is_none());
+    drop(mount);
+
+    let (mount, mut woken) = Mount::open(dir.path());
+    assert_eq!(woken.try_recv().unwrap(), ENTRY);
+    let job = mount.committer.take(ENTRY).unwrap();
+    assert!(!job.record.deferred);
+    assert_eq!(fs::read(job.sealed).unwrap(), b"");
 }
 
 // contract: C3

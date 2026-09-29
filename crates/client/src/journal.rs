@@ -35,6 +35,9 @@ const LONGEST_QUIET: Duration = Duration::from_secs(1);
 pub struct Record {
     pub entry: EntryId,
     pub seal: u64,
+    /// A truncate-only flush is durable but waits for release before the live committer starts.
+    #[serde(default)]
+    pub deferred: bool,
     pub base: Option<Version>,
     /// The file's modification time, which the commit keeps: the time of its last write on
     /// this client, or one set on it (`cp -p`).

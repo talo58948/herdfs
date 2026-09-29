@@ -24,8 +24,14 @@ impl Space {
         let asked = Instant::now();
         let parent_id = self.entry_id(parent);
         let (held, reuse) = self.held_child(parent, &name)?;
-        self.answer(held, reuse, asked, self.remote.lookup(parent_id, name))
-            .await
+        self.answer(
+            held,
+            reuse,
+            asked,
+            Some(parent_id),
+            self.remote.lookup(parent_id, name),
+        )
+        .await
     }
 
     /// A fresh child held under a fresh parent, without asking the authority.
@@ -48,7 +54,7 @@ impl Space {
         let id = self.entry_id(ino);
         let held = self.inodes.with(id, |state| state.cached()).flatten();
         let ask = async { self.remote.locate(id).await.map_err(|err| self.gone(ino, err)) };
-        self.answer(held, true, asked, ask).await
+        self.answer(held, true, asked, None, ask).await
     }
 
     async fn answer(
@@ -56,6 +62,7 @@ impl Space {
         held: Option<Held>,
         reuse: bool,
         asked: Instant,
+        parent: Option<EntryId>,
         ask: impl Future<Output = Result<Entry>>,
     ) -> Result<(Entry, Instant, Option<Arc<File>>)> {
         // A listing leaves entries it never followed.
@@ -69,7 +76,10 @@ impl Space {
         }
         let (entry, at) = match ask.await {
             Ok(entry) => {
-                self.follow(&entry, asked).await;
+                match parent {
+                    Some(parent) => self.follow_child(parent, &entry, asked).await,
+                    None => self.follow(&entry, asked).await,
+                }
                 (entry, asked)
             }
             Err(err) if err.is_offline() => held.map(|(entry, at, _)| (entry, at)).ok_or(err)?,
@@ -103,6 +113,12 @@ impl Space {
     /// newer head it names, so every handle reads it from its next read (C3).
     pub(super) async fn follow(&self, entry: &Entry, asked: Instant) {
         self.inodes.observe(entry, asked, false);
+        self.move_on(entry).await;
+    }
+
+    /// Takes a child answer and the parent id used to ask for it (C7).
+    pub(super) async fn follow_child(&self, parent: EntryId, entry: &Entry, asked: Instant) {
+        self.inodes.observe_child(parent, entry, asked);
         self.move_on(entry).await;
     }
 

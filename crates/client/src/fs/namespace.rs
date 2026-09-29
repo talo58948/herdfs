@@ -36,6 +36,7 @@ impl Space {
         let exclusive = flags & libc::O_EXCL != 0;
         let parent_id = self.entry_id(parent);
         let name = child_name(&name)?;
+        let asked = Instant::now();
         let created = self
             .remote
             .create(parent_id, name.clone(), mode & PERMISSIONS)
@@ -49,7 +50,7 @@ impl Space {
             }
             created => created?,
         };
-        let attr = self.added(&entry);
+        let attr = self.added(parent_id, &entry, asked);
         self.inodes.with(entry.id, |state| state.switch((None, true)));
         let fh = self.register(Handle::new(entry.id, true, &self.inodes));
         Ok((attr, fh))
@@ -114,11 +115,12 @@ impl Space {
 
     pub async fn mkdir(self: Arc<Self>, parent: INodeNo, name: OsString, mode: u32) -> Result<FileAttr> {
         let parent_id = self.entry_id(parent);
+        let asked = Instant::now();
         let entry = self
             .remote
             .mkdir(parent_id, child_name(&name)?, mode & PERMISSIONS)
             .await?;
-        Ok(self.added(&entry))
+        Ok(self.added(parent_id, &entry, asked))
     }
 
     pub async fn symlink(
@@ -129,8 +131,9 @@ impl Space {
     ) -> Result<FileAttr> {
         let target = target.into_os_string().into_string().map_err(|_| Errno::EINVAL)?;
         let parent_id = self.entry_id(parent);
+        let asked = Instant::now();
         let entry = self.remote.symlink(parent_id, child_name(&name)?, target).await?;
-        Ok(self.added(&entry))
+        Ok(self.added(parent_id, &entry, asked))
     }
 
     /// Unlinks a file or symlink, or removes an empty directory.
@@ -159,20 +162,20 @@ impl Space {
         let held = self.fresh_child(from.0, &from_name).await?;
         let asked = Instant::now();
         let current = self.remote.lookup(parents.0, from_name.clone()).await?;
-        self.follow(&current, asked).await;
+        self.follow_child(parents.0, &current, asked).await;
         let source = match held {
             Some(held) if held.id != current.id => return Err(Errno::ESTALE.into()),
-            Some(held) => held,
-            None => current,
+            _ => current,
         };
         self.settle(&source.path).await?;
+        let asked = Instant::now();
         let (from, moved) = self
             .remote
             .rename(parents.0, from_name, parents.1, to_name)
             .await?;
         self.inodes.stale(&from);
         self.inodes.stale(&moved.path);
-        self.inodes.moved(&from, &moved);
+        self.inodes.moved(parents.1, &from, &moved, asked);
         Ok((source.id != moved.id).then_some(source.id))
     }
 
