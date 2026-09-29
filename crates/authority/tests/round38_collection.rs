@@ -62,7 +62,6 @@ fn deleted_upload(at_ms: i64, trial: usize, label: &str) -> (Fixture, ChunkId) {
 /// a normal upload once a full grace has elapsed; otherwise a deleted space's bytes stay live.
 // contract: C15, S7
 #[test]
-#[ignore = "ROUND38: future upload timestamps survive collection after the clock is corrected"]
 fn a_corrected_forward_clock_step_does_not_keep_deleted_uploads_live() {
     let mut retained = 0;
     for trial in 0..3 {

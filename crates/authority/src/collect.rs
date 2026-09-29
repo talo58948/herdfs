@@ -31,18 +31,19 @@ pub struct Collected {
     pub live: BTreeSet<ChunkId>,
 }
 
-/// Versions past the newest `?1` of their entry, created at or before `?2`, and not its head.
+/// Versions past the newest `?1` of their entry, outside the age window, and not its head.
 const PRUNE: &str = "DELETE FROM versions WHERE id IN (
     SELECT id FROM (
         SELECT v.id, v.created_ms, e.head,
                row_number() OVER (PARTITION BY v.entry ORDER BY v.id DESC) AS newest
         FROM versions v JOIN entries e ON e.id = v.entry)
-    WHERE newest > ?1 AND created_ms <= ?2 AND id IS NOT head)";
+    WHERE newest > ?1 AND (created_ms <= ?2 OR created_ms > ?3) AND id IS NOT head)";
 
-/// Uploads for commits whose newest upload is at or before `?1`. A commit's uploads go together,
-/// so a file that takes longer than the grace to upload keeps its first chunks (C4a).
+/// Uploads for commits whose newest upload is outside the grace window. A commit's uploads go
+/// together, so a file that takes longer than the grace to upload keeps its first chunks (C4a).
 const STALE_UPLOADS: &str = "DELETE FROM uploads WHERE (principal, request_id) IN (
-    SELECT principal, request_id FROM uploads GROUP BY principal, request_id HAVING max(at_ms) <= ?1)";
+    SELECT principal, request_id FROM uploads GROUP BY principal, request_id
+    HAVING max(at_ms) <= ?1 OR max(at_ms) > ?2)";
 
 /// Request ids are kept at least this long, whatever the retention, so a client that lost a
 /// commit's answer and returns within it confirms that commit instead of committing it again.
@@ -53,12 +54,15 @@ impl Authority {
     /// ids that nothing needs, and returns the chunks still live, across every space.
     pub fn collect(&mut self, now_ms: i64, policy: &Policy) -> anyhow::Result<Collected> {
         let tx = self.db.transaction()?;
-        let pruned = tx.execute(PRUNE, params![policy.versions, now_ms - policy.max_age_ms])?;
+        let pruned = tx.execute(
+            PRUNE,
+            params![policy.versions, now_ms - policy.max_age_ms, now_ms],
+        )?;
         let dropped = tx.execute(
             "DELETE FROM manifests WHERE hash NOT IN (SELECT manifest FROM versions)",
             [],
         )?;
-        tx.execute(STALE_UPLOADS, [now_ms - policy.grace_ms])?;
+        tx.execute(STALE_UPLOADS, params![now_ms - policy.grace_ms, now_ms])?;
         let forgotten = now_ms
             .saturating_sub(policy.max_age_ms.max(REQUEST_MEMORY_MS))
             .saturating_sub(policy.grace_ms);
