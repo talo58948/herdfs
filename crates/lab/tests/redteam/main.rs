@@ -48,6 +48,7 @@ mod round23_local_pin;
 mod round23_rename_settle;
 mod round23_reused_parent;
 mod round25_moving_parent;
+mod round27_parent_ops;
 mod saved_mtime;
 mod scratch_files;
 mod shared_appends;
