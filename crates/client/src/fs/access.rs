@@ -35,12 +35,12 @@ impl Space {
     pub(super) fn start(
         &self,
         file: Option<&Arc<OpenVersion>>,
-        path: &SpacePath,
+        path: Option<&SpacePath>,
         pid: u32,
         handle: &Handle,
     ) -> Option<Upgrade> {
         let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
-        let extension = std::path::Path::new(path.name()).extension();
+        let extension = path.and_then(|path| std::path::Path::new(path.name()).extension());
         let context = OpenContext {
             size: file.map_or(0, |file| file.version.size),
             extension: extension.map(|extension| extension.to_string_lossy().into()),
@@ -52,7 +52,7 @@ impl Space {
         };
         let (strategy, upgrade) = lock(&self.decider).decide(&context);
         self.stats.decided(strategy);
-        tracing::debug!(%path, ?strategy, ?context, "access strategy");
+        tracing::debug!(?path, ?strategy, ?context, "access strategy");
         self.begin(strategy, file, handle);
         upgrade
     }

@@ -39,7 +39,6 @@ fn reads_without_store(lab: &Lab, file: &File, bytes: &[u8]) -> Result<bool> {
 /// control.
 // contract: C1, C3, P1 (Pin is chosen at open and is never evicted while its handle is open)
 #[test]
-#[ignore = "ROUND31: a read-only open on pending changes never chooses Pin"]
 fn a_pin_handle_opened_on_pending_changes_keeps_the_committed_version_pinned() -> Result<()> {
     let Some(lab) = start()? else {
         return Ok(());

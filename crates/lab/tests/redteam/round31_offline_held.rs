@@ -56,7 +56,6 @@ fn write_held_offline(lab: &Lab, trial: usize, moved: bool) -> Result<(std::io::
 /// reused. The same reopen without a rename is the control.
 // contract: C7, C12
 #[test]
-#[ignore = "ROUND31: offline reopen of a held relocated entry fails without a path binding"]
 fn an_offline_write_through_a_held_relocated_entry_is_journaled() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
