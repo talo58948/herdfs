@@ -15,6 +15,12 @@ const FILE_LEN: usize = 256 << 10;
 const DECISION_BUDGET: Duration = Duration::from_millis(300);
 /// Longer than the client waits for Jev.
 const SLOW: Duration = Duration::from_secs(5);
+/// Keeps Jev's round-trip and download-time phrases stable under build-box load.
+const STABLE_CONTEXT: Profile = Profile::Custom {
+    round_trip_ms: 200,
+    kilobytes_per_sec: 5_000,
+    store_first_byte_ms: 0,
+};
 
 fn writer_and(readers: &[(&str, Strategy)]) -> LabConfig {
     let config = LabConfig::default().client("w", "alice", &[], Profile::Lan, Strategy::Stream);
@@ -55,7 +61,10 @@ fn reads_keep_their_latency_and_bytes_while_jev_is_slow_or_down() -> Result<()> 
 #[test]
 fn a_second_open_of_the_same_context_takes_jevs_remembered_answer() -> Result<()> {
     // contract: P1
-    let Some(lab) = start(writer_and(&[("jev", Strategy::Jev)]))? else {
+    let config = LabConfig::default()
+        .client("w", "alice", &[], Profile::Lan, Strategy::Stream)
+        .client("jev", "jev", &[], STABLE_CONTEXT, Strategy::Jev);
+    let Some(lab) = start(config)? else {
         return Ok(());
     };
     // The rule would fetch files this small, so a pin can only come from Jev.
