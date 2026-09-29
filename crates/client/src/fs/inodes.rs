@@ -155,27 +155,42 @@ impl Inodes {
         table.idle.remove(&id);
     }
 
-    /// Moves every path at or below `from` to `to`, after this client's rename; an entry `to`
-    /// named before loses its path, which `Locate` finds if it lives on elsewhere (C7).
-    pub fn moved(&self, from: &SpacePath, to: &SpacePath) {
+    /// Binds the entry this client's rename moved and moves its known subtree with it (C7).
+    pub fn moved(&self, from: &SpacePath, entry: &Entry) {
         let mut table = lock(&self.0);
         let table = &mut *table;
         let moved_at = Instant::now();
-        if let Some(replaced) = table.by_path.remove(to).and_then(|id| table.nodes.get_mut(&id)) {
+        let source = table
+            .nodes
+            .get(&entry.id)
+            .and_then(|node| node.bound.as_ref())
+            .map(|(path, _)| path.clone());
+        if let Some(replaced) = table
+            .by_path
+            .remove(&entry.path)
+            .and_then(|id| table.nodes.get_mut(&id))
+        {
             replaced.bound = None;
         }
         let mut rebound = Vec::new();
         for (id, node) in &mut table.nodes {
-            if let Some((path, confirmed)) = &mut node.bound
-                && let Some(moved) = path.rebase(from, to)
+            let Some((path, _)) = &node.bound else {
+                continue;
+            };
+            if let Some(moved) = source
+                .as_ref()
+                .and_then(|source| path.rebase(source, &entry.path))
             {
                 table.by_path.remove(path);
                 rebound.push((moved.clone(), *id));
-                *path = moved;
-                *confirmed = moved_at;
+                node.bound = Some((moved, moved_at));
+            } else if path.is_within(from) {
+                table.by_path.remove(path);
+                node.bound = None;
             }
         }
         table.by_path.extend(rebound);
+        table.observe(entry, moved_at, false);
     }
 
     /// Marks the entries at or below `path`, which this client just added, moved or removed, and

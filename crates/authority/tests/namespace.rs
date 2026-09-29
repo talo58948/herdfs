@@ -36,11 +36,15 @@ fn rename_moves_a_directory_with_its_subtree() {
     fx.mkdir(&alice(), "a").unwrap();
     fx.mkdir(&alice(), "a/b").unwrap();
     let (file, version) = fx.file("a/b/f", b"bytes");
+    let directory = fx.stat(&alice(), "a").unwrap();
     assert_eq!(
         fx.rename(&alice(), "a", "moved"),
         Ok(Response::Renamed {
             from: support::path("a"),
-            to: support::path("moved")
+            entry: herdfs_core::proto::Entry {
+                path: support::path("moved"),
+                ..directory
+            }
         })
     );
     let moved = fx.stat(&alice(), "moved/b/f").unwrap();

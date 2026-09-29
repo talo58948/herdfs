@@ -157,8 +157,23 @@ impl Filesystem for Fuse {
         if !flags.is_empty() {
             return reply.error(Errno::EINVAL);
         }
-        let (from, to) = ((parent, name.to_owned()), (new_parent, new_name.to_owned()));
-        self.spawn(reply, self.space().rename(from, to));
+        let destination = new_name.to_owned();
+        let (from, to) = ((parent, name.to_owned()), (new_parent, destination.clone()));
+        let space = self.space();
+        self.runtime.spawn(async move {
+            match space.clone().rename(from, to).await {
+                Ok(stale) => {
+                    reply.ok();
+                    if let Some(stale) = stale {
+                        space.kernel.invalidate_entry(new_parent, stale, &destination);
+                    }
+                }
+                Err(err) => {
+                    tracing::debug!(%err, "request failed");
+                    reply.error(err.errno());
+                }
+            }
+        });
     }
 
     fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {

@@ -111,7 +111,7 @@ impl Call<'_> {
         self.require_directory(to_kind, to_parent)?;
         let source = self.entry(space, &from)?;
         if from == to {
-            return Ok(Response::Renamed { from, to });
+            return Ok(Response::Renamed { from, entry: source });
         }
         if to.is_within(&from) {
             return Err(refuse(
@@ -137,7 +137,10 @@ impl Call<'_> {
             .execute(params![space, from.as_str(), to.as_str(), lo, hi])?;
         self.touch_parent(space, &from)?;
         self.touch_parent(space, &to)?;
-        Ok(Response::Renamed { from, to })
+        Ok(Response::Renamed {
+            from,
+            entry: Entry { path: to, ..source },
+        })
     }
 
     pub(crate) fn set_attr(

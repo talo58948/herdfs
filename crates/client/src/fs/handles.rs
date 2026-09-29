@@ -65,10 +65,8 @@ impl Space {
         // for reading needs no head while this client holds changes, which every handle reads.
         if writable || self.changes(entry).is_none() {
             let (file, path) = self.head(entry, mode).await?;
-            if let Some(file) = file
-                && !writable
-            {
-                upgrade = self.start(&file, &path, pid, &handle);
+            if !writable {
+                upgrade = self.start(file.as_ref(), &path, pid, &handle);
             }
         }
         if truncate {

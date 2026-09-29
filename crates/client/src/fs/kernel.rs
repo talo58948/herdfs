@@ -1,6 +1,6 @@
 //! The kernel's side of the mount: inode numbers and cached attributes.
 
-use std::sync::OnceLock;
+use std::{ffi::OsStr, sync::OnceLock};
 
 use fuser::{INodeNo, Notifier};
 use herdfs_core::proto::EntryId;
@@ -39,5 +39,11 @@ impl Kernel {
         let ino = self.ino(entry);
         // A negative offset asks Linux to invalidate attributes without touching mapped pages.
         let _ = notifier.inval_inode(ino, -1, 0);
+    }
+
+    pub fn invalidate_entry(&self, parent: INodeNo, entry: EntryId, name: &OsStr) {
+        if let Some(notifier) = self.notifier.get() {
+            let _ = notifier.delete(parent, self.ino(entry), name);
+        }
     }
 }
