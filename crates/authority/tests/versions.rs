@@ -223,8 +223,8 @@ fn an_older_database_is_recreated_on_open() {
     };
     let create = Request::Create {
         space: SPACE.into(),
-        path: path("f"),
         parent: root.id,
+        name: "f".into(),
         mode: 0o644,
     };
     let Ok(Outcome::Reply(Response::Entry { entry })) = call(create) else {

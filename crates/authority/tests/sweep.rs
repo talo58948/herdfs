@@ -33,7 +33,7 @@ async fn a_sweep_deletes_only_chunks_unreferenced_for_the_grace() {
     let (_, file) = lab
         .rpc(
             &alice,
-            &json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420}),
+            &json!({"op": "create", "space": "team", "parent": root, "name": "f", "mode": 420}),
         )
         .await;
     for (index, chunk) in bytes[..2].iter().enumerate() {
@@ -87,7 +87,7 @@ async fn a_purged_chunk_goes_on_the_first_sweep_after_the_grace() {
     let (_, file) = lab
         .rpc(
             &alice,
-            &json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420}),
+            &json!({"op": "create", "space": "team", "parent": root, "name": "f", "mode": 420}),
         )
         .await;
     let chunks: [&[u8]; 2] = [b"purged", b"head"];
@@ -136,7 +136,7 @@ async fn collection_runs_periodically() {
     let (_, file) = lab
         .rpc(
             &alice,
-            &json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420}),
+            &json!({"op": "create", "space": "team", "parent": root, "name": "f", "mode": 420}),
         )
         .await;
     let chunks: [&[u8]; 2] = [b"pruned", b"head"];

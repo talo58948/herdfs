@@ -117,31 +117,31 @@ impl Remote {
         }
     }
 
-    pub async fn create(&self, path: SpacePath, parent: EntryId, mode: u32) -> Result<Entry> {
+    pub async fn create(&self, parent: EntryId, name: String, mode: u32) -> Result<Entry> {
         self.entry(|space| Request::Create {
             space,
-            path,
             parent,
+            name,
             mode,
         })
         .await
     }
 
-    pub async fn mkdir(&self, path: SpacePath, parent: EntryId, mode: u32) -> Result<Entry> {
+    pub async fn mkdir(&self, parent: EntryId, name: String, mode: u32) -> Result<Entry> {
         self.entry(|space| Request::Mkdir {
             space,
-            path,
             parent,
+            name,
             mode,
         })
         .await
     }
 
-    pub async fn symlink(&self, path: SpacePath, parent: EntryId, target: String) -> Result<Entry> {
+    pub async fn symlink(&self, parent: EntryId, name: String, target: String) -> Result<Entry> {
         self.entry(|space| Request::Symlink {
             space,
-            path,
             parent,
+            name,
             target,
         })
         .await
@@ -157,27 +157,29 @@ impl Remote {
         .await
     }
 
-    /// Removes the entry at `path`, and answers with it.
-    pub async fn remove(&self, path: SpacePath, parent: EntryId) -> Result<Entry> {
-        self.entry(|space| Request::Remove { space, path, parent }).await
+    /// Removes the named entry within `parent`, and answers with it.
+    pub async fn remove(&self, parent: EntryId, name: String) -> Result<Entry> {
+        self.entry(|space| Request::Remove { space, parent, name }).await
     }
 
     pub async fn rename(
         &self,
-        from: SpacePath,
         from_parent: EntryId,
-        to: SpacePath,
+        from_name: String,
         to_parent: EntryId,
-    ) -> Result<()> {
-        self.call(|space| Request::Rename {
+        to_name: String,
+    ) -> Result<(SpacePath, SpacePath)> {
+        let request = |space| Request::Rename {
             space,
-            from,
             from_parent,
-            to,
+            from_name,
             to_parent,
-        })
-        .await?;
-        Ok(())
+            to_name,
+        };
+        match self.call(request).await? {
+            Response::Renamed { from, to } => Ok((from, to)),
+            other => Err(unexpected(&other)),
+        }
     }
 
     /// Makes `chunks` the entry's head. Unguarded, so the last commit wins (C5).

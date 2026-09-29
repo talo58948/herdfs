@@ -35,16 +35,16 @@ fn moved_entry_after_a_remove(remove: bool) -> Result<Option<Vec<u8>>> {
     };
     let moved = Request::Rename {
         space: SPACE.into(),
-        from: p.clone(),
         from_parent: root.id,
-        to: q,
+        from_name: p.name().into(),
         to_parent: root.id,
+        to_name: q.name().into(),
     };
     lab.rpc(ADMIN, &moved)?;
     let created = Request::Create {
         space: SPACE.into(),
-        path: p,
         parent: root.id,
+        name: p.name().into(),
         mode: 0o644,
     };
     lab.rpc(ADMIN, &created)?;

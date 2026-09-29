@@ -159,8 +159,8 @@ fn dot_dot_symlinks_and_renames_do_not_reach_finance() -> Result<()> {
     symlink("../finance/q3.xlsx", &link)?;
     assert_eq!(errno(fs::read(&link)), EACCES);
     let finance = parent_id(&scene, "finance/link")?;
-    let planted = json!({"op": "symlink", "space": SPACE, "path": "finance/link",
-        "parent": finance, "target": "../eng"});
+    let planted = json!({"op": "symlink", "space": SPACE, "parent": finance,
+        "name": "link", "target": "../eng"});
     assert_eq!(scene.attacker.rpc(&planted)?.status, StatusCode::FORBIDDEN);
 
     // A rename needs write on both sides, so nothing crosses the boundary either way.
@@ -173,8 +173,10 @@ fn dot_dot_symlinks_and_renames_do_not_reach_finance() -> Result<()> {
     ];
     for (from, to) in crossings {
         let (from_parent, to_parent) = (parent_id(&scene, from)?, parent_id(&scene, to)?);
-        let rename = json!({"op": "rename", "space": SPACE, "from": from,
-            "from_parent": from_parent, "to": to, "to_parent": to_parent});
+        let from_name = from.rsplit('/').next().unwrap();
+        let to_name = to.rsplit('/').next().unwrap();
+        let rename = json!({"op": "rename", "space": SPACE, "from_parent": from_parent,
+            "from_name": from_name, "to_parent": to_parent, "to_name": to_name});
         let reply = scene.attacker.rpc(&rename)?;
         assert_eq!(reply.status, StatusCode::FORBIDDEN, "{from} -> {to}");
     }
@@ -239,8 +241,7 @@ fn bob_cannot_start_a_session_on_another_host() -> Result<()> {
     assert_eq!(errno(fs::write(host.join("prompt"), "rm -rf /")), EACCES);
     let parent = parent_id(&scene, ".agents/C/t1")?;
     for op in ["mkdir", "create"] {
-        let request =
-            json!({"op": op, "space": SPACE, "path": ".agents/C/t1", "parent": parent, "mode": 0o755});
+        let request = json!({"op": op, "space": SPACE, "parent": parent, "name": "t1", "mode": 0o755});
         assert_eq!(
             scene.attacker.rpc(&request)?.status,
             StatusCode::FORBIDDEN,

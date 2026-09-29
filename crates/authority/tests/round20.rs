@@ -82,7 +82,7 @@ async fn bytes_stored_for_an_upload_revoked_in_flight_are_swept() {
     let (_, file) = lab
         .rpc(
             &bob,
-            &json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420}),
+            &json!({"op": "create", "space": "team", "parent": root, "name": "f", "mode": 420}),
         )
         .await;
     let chunk = json!({"id": ChunkId::of(&bytes).to_string(), "len": bytes.len()});
@@ -140,7 +140,7 @@ async fn a_stalled_upload_with_write_kept_commits_and_stays() {
     let (_, file) = lab
         .rpc(
             &bob,
-            &json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420}),
+            &json!({"op": "create", "space": "team", "parent": root, "name": "f", "mode": 420}),
         )
         .await;
     let chunk = json!({"id": ChunkId::of(&bytes).to_string(), "len": bytes.len()});
@@ -166,7 +166,7 @@ async fn a_url_granted_just_before_its_version_leaves_retention_keeps_its_chunk(
     let (_, file) = lab
         .rpc(
             &alice,
-            &json!({"op": "create", "space": "team", "path": "f", "parent": root, "mode": 420}),
+            &json!({"op": "create", "space": "team", "parent": root, "name": "f", "mode": 420}),
         )
         .await;
     let commit = |request_id: &str, bytes: &[u8]| {

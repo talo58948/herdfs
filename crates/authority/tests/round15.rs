@@ -51,8 +51,8 @@ fn collect_after_clock_change(backward: bool) -> (usize, usize) {
             &mut authority,
             Request::Create {
                 space: "clock".into(),
-                path,
                 parent: root.id,
+                name: path.name().into(),
                 mode: 0o644,
             },
             wall_ms,

@@ -93,8 +93,8 @@ pub fn mkdir(lab: &Lab, at: &str) -> Result<()> {
         ADMIN,
         &Request::Mkdir {
             space,
-            path,
             parent: parent.id,
+            name: path.name().into(),
             mode,
         },
     )?;

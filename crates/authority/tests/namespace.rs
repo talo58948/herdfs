@@ -15,7 +15,7 @@ fn creation_needs_a_directory_parent_and_a_free_name() {
     let mut fx = Fixture::new();
     assert_eq!(fx.create(&alice(), "a/f"), Err(ErrorCode::NotFound));
     fx.create(&alice(), "f").unwrap();
-    assert_eq!(fx.create(&alice(), "f/g"), Err(ErrorCode::NotDir));
+    assert_eq!(fx.create(&alice(), "f/g"), Err(ErrorCode::NotFound));
     assert_eq!(fx.mkdir(&alice(), "f"), Err(ErrorCode::Exists));
 }
 
@@ -36,10 +36,39 @@ fn rename_moves_a_directory_with_its_subtree() {
     fx.mkdir(&alice(), "a").unwrap();
     fx.mkdir(&alice(), "a/b").unwrap();
     let (file, version) = fx.file("a/b/f", b"bytes");
-    fx.rename(&alice(), "a", "moved").unwrap();
+    assert_eq!(
+        fx.rename(&alice(), "a", "moved"),
+        Ok(Response::Renamed {
+            from: support::path("a"),
+            to: support::path("moved")
+        })
+    );
     let moved = fx.stat(&alice(), "moved/b/f").unwrap();
     assert_eq!((moved.id, moved.head), (file.id, Some(version.id)));
     assert_eq!(fx.stat(&alice(), "a/b/f"), Err(ErrorCode::NotFound));
+}
+
+#[test]
+fn namespace_requests_follow_a_renamed_parent_entry() {
+    // contract: C7
+    let mut fx = Fixture::new();
+    let parent = fx.mkdir(&alice(), "a").unwrap();
+    fx.rename(&alice(), "a", "moved").unwrap();
+    let made = fx
+        .call(
+            &alice(),
+            Request::Create {
+                space: SPACE.into(),
+                parent: parent.id,
+                name: "f".into(),
+                mode: 0o644,
+            },
+        )
+        .unwrap();
+    let Response::Entry { entry } = made else {
+        panic!("create answers with an entry")
+    };
+    assert_eq!(entry.path, support::path("moved/f"));
 }
 
 #[test]

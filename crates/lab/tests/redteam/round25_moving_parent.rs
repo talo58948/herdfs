@@ -68,7 +68,6 @@ fn make_child(lab: &Lab, trial: usize, moving: bool) -> Result<(std::io::Result<
 /// than twice before the operation can reach the authority. The control leaves its parent fixed.
 // contract: C7
 #[test]
-#[ignore = "ROUND25: repeated parent moves exhaust namespace retries"]
 fn a_namespace_call_follows_a_parent_that_moves_repeatedly() -> Result<()> {
     let Some(lab) = start()? else {
         return Ok(());

@@ -33,8 +33,8 @@ impl Sim {
         let mut deepest = top.clone();
         let mut mkdir = Request::Mkdir {
             space: space.clone(),
-            path: deepest.clone(),
             parent: self.parent(&space, &deepest),
+            name: deepest.name().into(),
             mode: 0o755,
         };
         self.send(0, &mkdir);
@@ -42,8 +42,8 @@ impl Sim {
             deepest = deepest.join(&long).unwrap();
             mkdir = Request::Mkdir {
                 space: space.clone(),
-                path: deepest.clone(),
                 parent: self.parent(&space, &deepest),
+                name: deepest.name().into(),
                 mode: 0o755,
             };
             self.send(0, &mkdir);
@@ -55,7 +55,7 @@ impl Sim {
             &Request::Create {
                 space: space.clone(),
                 parent: self.parent(&space, &file),
-                path: file,
+                name: file.name().into(),
                 mode: 0o644,
             },
         );
@@ -68,10 +68,10 @@ impl Sim {
         // contract: C7
         let rename = Request::Rename {
             space: space.clone(),
-            from: top.clone(),
             from_parent: self.parent(&space, &top),
-            to: to.clone(),
+            from_name: top.name().into(),
             to_parent: self.parent(&space, &to),
+            to_name: to.name().into(),
         };
         self.send(0, &rename);
         // Take the chain down again, deepest first: every later check would walk it.
@@ -88,8 +88,8 @@ impl Sim {
                 0,
                 &Request::Remove {
                     space: space.clone(),
-                    path,
                     parent,
+                    name: path.name().into(),
                 },
             );
         }
@@ -104,20 +104,20 @@ impl Sim {
         let request = match self.rng.below(20) {
             0..=9 => Request::Create {
                 space,
-                path,
                 parent,
+                name: path.name().into(),
                 mode: 0o644,
             },
             10..=16 => Request::Mkdir {
                 space,
-                path,
                 parent,
+                name: path.name().into(),
                 mode: 0o755,
             },
             _ => Request::Symlink {
                 space,
-                path,
                 parent,
+                name: path.name().into(),
                 target: "../elsewhere".into(),
             },
         };
@@ -128,7 +128,14 @@ impl Sim {
         let (who, space) = (self.actor(), self.space());
         let path = self.existing_path(&space);
         let parent = self.parent(&space, &path);
-        self.send(who, &Request::Remove { space, path, parent });
+        self.send(
+            who,
+            &Request::Remove {
+                space,
+                parent,
+                name: path.name().into(),
+            },
+        );
     }
 
     pub fn rename(&mut self) {
@@ -140,10 +147,10 @@ impl Sim {
         });
         let request = Request::Rename {
             space: space.clone(),
-            from: from.clone(),
             from_parent: self.parent(&space, &from),
-            to: to.clone(),
+            from_name: from.name().into(),
             to_parent: self.parent(&space, &to),
+            to_name: to.name().into(),
         };
         if self.exec(who, &request).is_ok() && from != to {
             self.check_rename(&space, &from, &to, &moved);

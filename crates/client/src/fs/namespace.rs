@@ -2,13 +2,16 @@
 
 use std::sync::{Arc, atomic::Ordering::Relaxed};
 use std::time::{Duration, Instant};
-use std::{ffi::OsString, path::PathBuf};
+use std::{
+    ffi::{OsStr, OsString},
+    path::PathBuf,
+};
 
 use fuser::{Errno, FileAttr, INodeNo, OpenFlags, ReplyDirectory};
 use herdfs_core::SpacePath;
 use herdfs_core::proto::ErrorCode;
 
-use super::{PERMISSIONS, Space, TTL, handles::Handle};
+use super::{MAX_NAME, PERMISSIONS, Space, TTL, handles::Handle};
 use crate::{Error, Result, journal::Local, lock};
 
 pub struct AttrChange {
@@ -32,21 +35,18 @@ impl Space {
     ) -> Result<(FileAttr, u64)> {
         let exclusive = flags & libc::O_EXCL != 0;
         let parent_id = self.entry_id(parent);
-        let (paths, created) = self
-            .namespace(&[(parent, &name)], |paths| {
-                let created = self
-                    .remote
-                    .create(paths[0].clone(), parent_id, mode & PERMISSIONS);
-                async {
-                    match created.await {
-                        Err(Error::Api(error)) if error.code == ErrorCode::Exists && !exclusive => Ok(None),
-                        created => created.map(Some),
-                    }
-                }
-            })
-            .await?;
+        let name = child_name(&name)?;
+        let created = self
+            .remote
+            .create(parent_id, name.clone(), mode & PERMISSIONS)
+            .await;
+        let created = match created {
+            Err(Error::Api(error)) if error.code == ErrorCode::Exists && !exclusive => None,
+            created => Some(created?),
+        };
         let Some(entry) = created else {
-            let entry = self.remote.stat(paths[0].clone()).await?;
+            let path = self.located_child(parent, OsStr::new(&name)).await?;
+            let entry = self.remote.stat(path).await?;
             let attr = self.added(&entry);
             let open = self.clone().open(self.ino(entry.id), OpenFlags(flags), pid);
             return Ok((attr, open.await?));
@@ -134,10 +134,9 @@ impl Space {
 
     pub async fn mkdir(self: Arc<Self>, parent: INodeNo, name: OsString, mode: u32) -> Result<FileAttr> {
         let parent_id = self.entry_id(parent);
-        let (_, entry) = self
-            .namespace(&[(parent, &name)], |paths| {
-                self.remote.mkdir(paths[0].clone(), parent_id, mode & PERMISSIONS)
-            })
+        let entry = self
+            .remote
+            .mkdir(parent_id, child_name(&name)?, mode & PERMISSIONS)
             .await?;
         Ok(self.added(&entry))
     }
@@ -150,23 +149,15 @@ impl Space {
     ) -> Result<FileAttr> {
         let target = target.into_os_string().into_string().map_err(|_| Errno::EINVAL)?;
         let parent_id = self.entry_id(parent);
-        let (_, entry) = self
-            .namespace(&[(parent, &name)], |paths| {
-                self.remote.symlink(paths[0].clone(), parent_id, target.clone())
-            })
-            .await?;
+        let entry = self.remote.symlink(parent_id, child_name(&name)?, target).await?;
         Ok(self.added(&entry))
     }
 
     /// Unlinks a file or symlink, or removes an empty directory.
     pub async fn remove(self: Arc<Self>, parent: INodeNo, name: OsString) -> Result<()> {
         let parent_id = self.entry_id(parent);
-        let (paths, removed) = self
-            .namespace(&[(parent, &name)], |paths| {
-                self.remote.remove(paths[0].clone(), parent_id)
-            })
-            .await?;
-        let path = &paths[0];
+        let removed = self.remote.remove(parent_id, child_name(&name)?).await?;
+        let path = &removed.path;
         // The removed entry's changes are moot: deletion wins (C10), for it alone (C4a).
         let discard = |local: &mut Local| local.discard(&self.journal, removed.id);
         self.inodes.local(removed.id, false, discard);
@@ -179,21 +170,16 @@ impl Space {
 
     /// Renames at the authority, atomically there (C7), then moves every known path below.
     pub async fn rename(self: Arc<Self>, from: (INodeNo, OsString), to: (INodeNo, OsString)) -> Result<()> {
-        let from_child = (from.0, from.1.as_os_str());
-        let to_child = (to.0, to.1.as_os_str());
         let parents = (self.entry_id(from.0), self.entry_id(to.0));
-        let from = self.located_child(from.0, &from.1).await?;
-        self.settle(&from).await?;
-        let (paths, ()) = self
-            .namespace(&[from_child, to_child], |paths| {
-                self.remote
-                    .rename(paths[0].clone(), parents.0, paths[1].clone(), parents.1)
-            })
+        let from_path = self.located_child(from.0, &from.1).await?;
+        self.settle(&from_path).await?;
+        let (from, to) = self
+            .remote
+            .rename(parents.0, child_name(&from.1)?, parents.1, child_name(&to.1)?)
             .await?;
-        let (from, to) = (&paths[0], &paths[1]);
-        self.inodes.stale(from);
-        self.inodes.stale(to);
-        self.inodes.moved(from, to);
+        self.inodes.stale(&from);
+        self.inodes.stale(&to);
+        self.inodes.moved(&from, &to);
         Ok(())
     }
 
@@ -245,4 +231,16 @@ impl Space {
     pub fn releasedir(&self, handle: u64) {
         lock(&self.listings).remove(&handle);
     }
+}
+
+fn child_name(name: &OsStr) -> Result<String> {
+    if name.len() > MAX_NAME {
+        return Err(Errno::ENAMETOOLONG.into());
+    }
+    let name = name.to_str().ok_or(Errno::EINVAL)?;
+    let path = SpacePath::try_from(name).map_err(|_| Errno::EINVAL)?;
+    if path.parent() != Some(SpacePath::root()) {
+        return Err(Errno::EINVAL.into());
+    }
+    Ok(name.to_owned())
 }

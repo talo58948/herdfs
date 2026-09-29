@@ -12,8 +12,6 @@ use herdfs_core::proto::{Entry, EntryId};
 use super::{MAX_NAME, OpenMode, Space, TTL};
 use crate::{Error, Result, reader::Head};
 
-const MOVED_PATH_RETRIES: usize = 2;
-
 #[derive(Clone, Copy)]
 enum Follow {
     Head,
@@ -63,44 +61,6 @@ impl Space {
         }
         let (name, parent) = (name.to_str().ok_or(Errno::EINVAL)?, self.located(parent).await?);
         Ok(parent.join(name).map_err(|_| Errno::EINVAL)?)
-    }
-
-    /// Runs a namespace call below held directories, following parents renamed during the call.
-    pub(super) async fn namespace<T, F, Fut>(
-        &self,
-        children: &[(INodeNo, &OsStr)],
-        mut call: F,
-    ) -> Result<(Vec<SpacePath>, T)>
-    where
-        F: FnMut(Vec<SpacePath>) -> Fut,
-        Fut: Future<Output = Result<T>>,
-    {
-        let mut paths = Vec::with_capacity(children.len());
-        for &(parent, name) in children {
-            paths.push(self.located_child(parent, name).await?);
-        }
-        let mut retries = 0;
-        loop {
-            match call(paths.clone()).await {
-                Err(err) if err.is_not_found() && retries < MOVED_PATH_RETRIES => {
-                    retries += 1;
-                    let mut moved = Vec::with_capacity(children.len());
-                    for &(parent, name) in children {
-                        let parent = self.relocate_for(parent, Follow::PathOnly).await?.path;
-                        moved.push(
-                            parent
-                                .join(name.to_str().ok_or(Errno::EINVAL)?)
-                                .map_err(|_| Errno::EINVAL)?,
-                        );
-                    }
-                    if moved == paths {
-                        return Err(err);
-                    }
-                    paths = moved;
-                }
-                answer => return answer.map(|answer| (paths, answer)),
-            }
-        }
     }
 
     /// The entry at `path`, when it was asked for, and its journal copy while it holds changes:
