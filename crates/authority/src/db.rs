@@ -134,11 +134,16 @@ impl Call<'_> {
     }
 
     pub(crate) fn entry_by_id(&self, space: &str, id: EntryId) -> Result<Entry> {
+        let not_found = || refuse(ErrorCode::NotFound, format!("no entry {}", id.0));
+        // Ids the database never hands out (above i64::MAX) name nothing.
+        let Ok(row_id) = i64::try_from(id.0) else {
+            return Err(not_found());
+        };
         let mut query = self.db.prepare_cached(&format!("{ENTRY} AND e.id = ?2"))?;
         query
-            .query_row(params![space, id.0], entry_row)
+            .query_row(params![space, row_id], entry_row)
             .optional()?
-            .ok_or_else(|| refuse(ErrorCode::NotFound, format!("no entry {}", id.0)))
+            .ok_or_else(not_found)
     }
 
     pub(crate) fn children(&self, space: &str, dir: &SpacePath) -> Result<Vec<Entry>> {
@@ -161,8 +166,11 @@ impl Call<'_> {
     }
 
     pub(crate) fn version(&self, id: VersionId) -> Result<Option<Version>> {
+        let Ok(row_id) = i64::try_from(id.0) else {
+            return Ok(None);
+        };
         let mut query = self.db.prepare_cached(&format!("{VERSION} WHERE v.id = ?1"))?;
-        Ok(query.query_row([id.0], version_row).optional()?)
+        Ok(query.query_row([row_id], version_row).optional()?)
     }
 
     /// Versions of `entry`, oldest first.

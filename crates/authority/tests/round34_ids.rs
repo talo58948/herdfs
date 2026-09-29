@@ -9,7 +9,6 @@ use support::{Fixture, SPACE, alice};
 /// Unknown ids within SQLite's integer range get their specified domain errors. The same
 /// protocol-valid ids just above that range must not turn into an internal database failure.
 // contract: C14 (docs/architecture.md: an unknown entry id says so)
-#[ignore = "ROUND34: protocol-valid u64 ids above SQLite's range return Unavailable"]
 #[test]
 fn unsigned_ids_are_not_database_failures() {
     let mut entry_failures = 0;
