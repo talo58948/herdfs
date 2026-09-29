@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use herdfs_core::SpacePath;
-use herdfs_core::proto::{Entry, EntryId};
+use herdfs_core::proto::{Entry, EntryId, Kind};
 
 use super::inode::{Inode, State};
 use crate::{journal::Local, lock, lru::Lru};
@@ -172,24 +172,18 @@ impl Inodes {
         {
             replaced.bound = None;
         }
-        let mut rebound = Vec::new();
-        for (id, node) in &mut table.nodes {
+        if let Some(source) = source {
+            table.rebase(&source, &entry.path, moved_at);
+        }
+        for node in table.nodes.values_mut() {
             let Some((path, _)) = &node.bound else {
                 continue;
             };
-            if let Some(moved) = source
-                .as_ref()
-                .and_then(|source| path.rebase(source, &entry.path))
-            {
-                table.by_path.remove(path);
-                rebound.push((moved.clone(), *id));
-                node.bound = Some((moved, moved_at));
-            } else if path.is_within(from) {
+            if path.is_within(from) {
                 table.by_path.remove(path);
                 node.bound = None;
             }
         }
-        table.by_path.extend(rebound);
         table.observe(entry, moved_at, false);
     }
 
@@ -220,17 +214,22 @@ impl Table {
     }
 
     fn observe(&mut self, entry: &Entry, asked: Instant, cold: bool) {
-        let (same_path, inode) = match self.nodes.get(&entry.id) {
+        let (same_path, source, inode) = match self.nodes.get(&entry.id) {
             Some(node) => (
                 node.bound.as_ref().is_some_and(|(path, _)| path == &entry.path),
+                node.bound.as_ref().map(|(path, _)| path.clone()),
                 node.inode.clone(),
             ),
-            None => (false, self.add(entry.id, Some(entry.clone()), asked)),
+            None => (false, None, self.add(entry.id, Some(entry.clone()), asked)),
         };
         inode.state().observe(entry, asked);
         // A listing binds new or relocated entries, but does not refresh an unchanged binding (C7).
-        if !(cold && same_path) {
-            self.bind(entry.id, &entry.path, asked);
+        let bound = !(cold && same_path) && self.bind(entry.id, &entry.path, asked);
+        if bound
+            && entry.kind == Kind::Dir
+            && let Some(source) = source.filter(|source| source != &entry.path)
+        {
+            self.rebase(&source, &entry.path, asked);
         }
         if self.idle.contains(&entry.id) {
             match cold {
@@ -242,20 +241,20 @@ impl Table {
     }
 
     /// Binds `path` to `id` as confirmed `at`, unless a binding of either was confirmed later.
-    fn bind(&mut self, id: EntryId, path: &SpacePath, at: Instant) {
+    fn bind(&mut self, id: EntryId, path: &SpacePath, at: Instant) -> bool {
         let later = |node: Option<&Node>| {
             let bound = node.and_then(|node| node.bound.as_ref());
             bound.is_some_and(|(_, confirmed)| *confirmed >= at)
         };
         let holder = self.by_path.get(path).copied().filter(|holder| *holder != id);
         if later(self.nodes.get(&id)) || later(holder.and_then(|holder| self.nodes.get(&holder))) {
-            return;
+            return false;
         }
         if let Some(holder) = holder.and_then(|holder| self.nodes.get_mut(&holder)) {
             holder.bound = None;
         }
         let Some(node) = self.nodes.get_mut(&id) else {
-            return;
+            return false;
         };
         if let Some((old, _)) = node.bound.replace((path.clone(), at))
             && old != *path
@@ -263,6 +262,21 @@ impl Table {
             self.by_path.remove(&old);
         }
         self.by_path.insert(path.clone(), id);
+        true
+    }
+
+    fn rebase(&mut self, source: &SpacePath, destination: &SpacePath, at: Instant) {
+        let moved: Vec<_> = self
+            .nodes
+            .iter()
+            .filter_map(|(id, node)| {
+                let path = &node.bound.as_ref()?.0;
+                Some((*id, path.rebase(source, destination)?))
+            })
+            .collect();
+        for (id, path) in moved {
+            self.bind(id, &path, at);
+        }
     }
 
     /// Drops the least recently used entries that nothing holds, past `IDLE`.
