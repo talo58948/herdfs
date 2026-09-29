@@ -14,10 +14,10 @@ use crate::{Call, Outcome, Result, refuse};
 const MAX_GRANT: usize = 4096;
 
 impl Call<'_> {
-    pub(crate) fn open(&self, space: &str, path: &SpacePath) -> Result<Response> {
-        self.require(space, path, Perm::Read)?;
-        let writable = self.may(space, path, Perm::Write)?;
-        let entry = self.entry(space, path)?;
+    pub(crate) fn open(&self, space: &str, id: EntryId) -> Result<Response> {
+        let entry = self.entry_by_id(space, id)?;
+        self.require(space, &entry.path, Perm::Read)?;
+        let writable = self.may(space, &entry.path, Perm::Write)?;
         let version = match entry.head {
             Some(head) => self.version(head)?,
             None => None,

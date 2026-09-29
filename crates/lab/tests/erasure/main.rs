@@ -156,9 +156,19 @@ fn wait_erased(lab: &Lab, chunks: &[ChunkRef], canary: &str) -> Result<()> {
 
 /// The head of `path` in `space`, as `user` opens it.
 fn head_in(lab: &Lab, user: &str, space: &str, path: &str) -> Result<Version> {
+    let Response::Entry { entry } = lab.rpc(
+        user,
+        &Request::Stat {
+            space: space.into(),
+            path: SpacePath::try_from(path)?,
+        },
+    )?
+    else {
+        bail!("{space}:{path} was not an entry")
+    };
     let open = Request::Open {
         space: space.into(),
-        path: SpacePath::try_from(path)?,
+        entry: entry.id,
     };
     match lab.rpc(user, &open)? {
         Response::Opened {

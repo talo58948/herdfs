@@ -45,9 +45,8 @@ impl Space {
             created => Some(created?),
         };
         let Some(entry) = created else {
-            let path = self.located_child(parent, OsStr::new(&name)).await?;
-            let entry = self.remote.stat(path).await?;
-            let attr = self.added(&entry);
+            let (entry, asked, local) = self.child(parent, name).await?;
+            let attr = self.looked_up(&entry, asked, local.as_deref());
             let open = self.clone().open(self.ino(entry.id), OpenFlags(flags), pid);
             return Ok((attr, open.await?));
         };
@@ -58,28 +57,14 @@ impl Space {
     }
 
     pub async fn lookup(self: Arc<Self>, parent: INodeNo, name: OsString) -> Result<(FileAttr, Duration)> {
-        let (entry, asked, local) = self.entry(&self.located_child(parent, &name).await?).await?;
+        let (entry, asked, local) = self.child(parent, child_name(&name)?).await?;
         let attr = self.looked_up(&entry, asked, local.as_deref());
         Ok((attr, TTL.saturating_sub(asked.elapsed())))
     }
 
-    /// The inode's attributes. If its path names another entry or none, the entry has moved,
-    /// or is gone and its name may now be another's, which ESTALE sends the kernel to look up
-    /// (C7).
+    /// The held inode's attributes, wherever another client has moved it (C7).
     pub async fn getattr(self: Arc<Self>, ino: INodeNo) -> Result<(FileAttr, Duration)> {
-        let found = match self.path(ino)? {
-            Some(path) => self.entry(&path).await.map(Some),
-            None => Ok(None),
-        };
-        let (entry, asked, local) = match found {
-            Ok(Some(found)) if self.ino(found.0.id) == ino => found,
-            Err(err) if !err.is_not_found() => return Err(err),
-            _ => {
-                let asked = Instant::now();
-                let (entry, local) = self.inodes.view(self.relocate(ino).await?);
-                (entry, asked, local)
-            }
-        };
+        let (entry, asked, local) = self.entry(ino).await?;
         let attr = self.attr(&entry, local.as_deref());
         Ok((attr, TTL.saturating_sub(asked.elapsed())))
     }
@@ -89,10 +74,9 @@ impl Space {
         if foreign(change.uid, self.owner.0) || foreign(change.gid, self.owner.1) {
             return Err(Errno::EPERM.into());
         }
-        let path = self.located(ino).await?;
         // Answered from the entry held, which offline lets a truncation go on (C12), and found
         // before anything is journaled, so a failure changes nothing.
-        let (entry, ..) = self.entry(&path).await?;
+        let (entry, ..) = self.entry(ino).await?;
         self.expect(ino, &entry)?;
         if let Some(size) = change.size {
             self.truncate(ino, size, change.fh).await?;
@@ -114,7 +98,7 @@ impl Space {
         }
         let entry = if mode.is_some() || mtime_ms.is_some() {
             let asked = Instant::now();
-            let entry = self.remote.set_attr(path, mode, mtime_ms).await?;
+            let entry = self.remote.set_attr(entry_id, mode, mtime_ms).await?;
             self.inodes.observe(&entry, asked, false);
             self.expect(ino, &entry)?;
             entry
@@ -127,7 +111,7 @@ impl Space {
     }
 
     pub async fn readlink(self: Arc<Self>, ino: INodeNo) -> Result<Vec<u8>> {
-        let (entry, ..) = self.entry(&self.located(ino).await?).await?;
+        let (entry, ..) = self.entry(ino).await?;
         self.expect(ino, &entry)?;
         Ok(entry.target.ok_or(Errno::EINVAL)?.into_bytes())
     }
@@ -171,11 +155,12 @@ impl Space {
     /// Renames at the authority, atomically there (C7), then moves every known path below.
     pub async fn rename(self: Arc<Self>, from: (INodeNo, OsString), to: (INodeNo, OsString)) -> Result<()> {
         let parents = (self.entry_id(from.0), self.entry_id(to.0));
-        let from_path = self.located_child(from.0, &from.1).await?;
-        self.settle(&from_path).await?;
+        let (from_name, to_name) = (child_name(&from.1)?, child_name(&to.1)?);
+        let (source, ..) = self.child(from.0, from_name.clone()).await?;
+        self.settle(&source.path).await?;
         let (from, to) = self
             .remote
-            .rename(parents.0, child_name(&from.1)?, parents.1, child_name(&to.1)?)
+            .rename(parents.0, from_name, parents.1, to_name)
             .await?;
         self.inodes.stale(&from);
         self.inodes.stale(&to);
@@ -200,9 +185,8 @@ impl Space {
 
     /// Lists the directory once, for the readdir calls on this handle to page through.
     pub async fn opendir(self: Arc<Self>, ino: INodeNo) -> Result<u64> {
-        let path = self.located(ino).await?;
         let asked = Instant::now();
-        let entries = self.remote.list(path).await?;
+        let entries = self.remote.list(self.entry_id(ino)).await?;
         let listed = |entry| {
             self.inodes.observe(entry, asked, true);
             let attr = self.attr(entry, None);

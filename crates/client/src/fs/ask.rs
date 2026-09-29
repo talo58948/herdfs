@@ -1,74 +1,63 @@
 //! What the client asks the authority about entries, and how it takes the answers into what it
 //! knows (fs/inodes.rs): paths other clients may have moved (C7), entries it reuses for TTL (C2),
-//! and the version open files read, which an open or a stat moves on (C3, C12, C14).
+//! and the version open files read, which an open or attribute refresh moves on (C3, C12, C14).
 
 use std::time::Instant;
-use std::{ffi::OsStr, fs::File, future::Future, sync::Arc};
+use std::{fs::File, future::Future, sync::Arc};
 
 use fuser::{Errno, INodeNo};
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{Entry, EntryId};
 
-use super::{MAX_NAME, OpenMode, Space, TTL};
+use super::{OpenMode, Space, TTL};
 use crate::{Error, Result, reader::Head};
 
-#[derive(Clone, Copy)]
-enum Follow {
-    Head,
-    PathOnly,
-}
-
 impl Space {
-    /// The inode's path, which another client may have moved: once older than TTL or taken by
-    /// another entry, asked of the authority by entry id (C7). Offline, the path held.
-    pub(super) async fn located(&self, ino: INodeNo) -> Result<SpacePath> {
-        self.located_for(ino, Follow::Head).await
-    }
-
-    async fn located_for(&self, ino: INodeNo, follow: Follow) -> Result<SpacePath> {
-        let held = match self.bound(ino)? {
-            Some((path, confirmed)) if confirmed.elapsed() < TTL => return Ok(path),
-            held => held.map(|(path, _)| path),
-        };
-        match self.relocate_for(ino, follow).await {
-            Err(err) if err.is_offline() => held.ok_or(err),
-            located => Ok(located?.path),
-        }
-    }
-
-    /// The entry of the inode, wherever it is now.
-    pub(super) async fn relocate(&self, ino: INodeNo) -> Result<Entry> {
-        self.relocate_for(ino, Follow::Head).await
-    }
-
-    async fn relocate_for(&self, ino: INodeNo, follow: Follow) -> Result<Entry> {
+    /// The child in `parent`, when it was asked for, and its journal copy while it holds changes.
+    pub(super) async fn child(
+        &self,
+        parent: INodeNo,
+        name: String,
+    ) -> Result<(Entry, Instant, Option<Arc<File>>)> {
         let asked = Instant::now();
-        let entry = match self.remote.locate(self.entry_id(ino)).await {
-            Err(err) => return Err(self.gone(self.path(ino)?.as_ref(), err)),
-            located => located?,
+        let parent_id = self.entry_id(parent);
+        let bound = self.bound(parent)?;
+        let path = bound.as_ref().and_then(|(path, _)| path.join(&name).ok());
+        let held = path.as_ref().and_then(|path| self.inodes.at(path));
+        let fresh_parent = bound.is_some_and(|(_, at)| at.elapsed() < TTL);
+        let found = match held
+            .clone()
+            .filter(|(_, at, current)| fresh_parent && *current && at.elapsed() < TTL)
+        {
+            Some((entry, at, _)) => {
+                self.move_on(&entry).await;
+                Ok((entry, at, false))
+            }
+            None => self
+                .remote
+                .lookup(parent_id, name)
+                .await
+                .map(|entry| (entry, asked, true)),
         };
-        self.inodes.observe(&entry, asked, false);
-        if matches!(follow, Follow::Head) {
-            self.move_on(&entry).await;
+        let (entry, at, fetched) = match found {
+            Err(err) if err.is_offline() => held.map(|(entry, at, _)| (entry, at, false)).ok_or(err)?,
+            found => found?,
+        };
+        if fetched {
+            self.follow(&entry, asked).await;
         }
-        Ok(entry)
+        let (entry, local) = self.inodes.view(entry);
+        Ok((entry, at, local))
     }
 
-    /// The path of `name` in the directory `parent`, wherever that is now.
-    pub(super) async fn located_child(&self, parent: INodeNo, name: &OsStr) -> Result<SpacePath> {
-        if name.len() > MAX_NAME {
-            return Err(Errno::ENAMETOOLONG.into());
-        }
-        let (name, parent) = (name.to_str().ok_or(Errno::EINVAL)?, self.located(parent).await?);
-        Ok(parent.join(name).map_err(|_| Errno::EINVAL)?)
-    }
-
-    /// The entry at `path`, when it was asked for, and its journal copy while it holds changes:
+    /// The held entry, when it was asked for, and its journal copy while it holds changes:
     /// what this client knows for TTL after that, so opens see commits (C2), else the authority's
     /// answer; either way one snapshot of its inode (C1). Offline, the last entry seen, however
     /// old, keeps cached reads and writes working (C12).
-    pub(super) async fn entry(&self, path: &SpacePath) -> Result<(Entry, Instant, Option<Arc<File>>)> {
-        let (asked, held) = (Instant::now(), self.inodes.at(path));
+    pub(super) async fn entry(&self, ino: INodeNo) -> Result<(Entry, Instant, Option<Arc<File>>)> {
+        let asked = Instant::now();
+        let id = self.entry_id(ino);
+        let held = self.inodes.with(id, |state| state.cached()).flatten();
         let found = match held
             .clone()
             .filter(|(_, at, current)| *current && at.elapsed() < TTL)
@@ -78,7 +67,7 @@ impl Space {
                 self.move_on(&entry).await;
                 Ok((entry, at))
             }
-            None => self.fetch(path, asked).await,
+            None => self.fetch(ino, asked).await,
         };
         let (entry, at) = match found {
             Err(err) if err.is_offline() => held.map(|(entry, at, _)| (entry, at)).ok_or(err)?,
@@ -88,8 +77,12 @@ impl Space {
         Ok((entry, at, local))
     }
 
-    async fn fetch(&self, path: &SpacePath, asked: Instant) -> Result<(Entry, Instant)> {
-        let entry = self.remote.stat(path.clone()).await?;
+    async fn fetch(&self, ino: INodeNo, asked: Instant) -> Result<(Entry, Instant)> {
+        let entry = self
+            .remote
+            .locate(self.entry_id(ino))
+            .await
+            .map_err(|err| self.gone(self.path(ino).ok().flatten().as_ref(), err))?;
         self.follow(&entry, asked).await;
         Ok((entry, asked))
     }
@@ -117,7 +110,7 @@ impl Space {
     /// read an older one (C3).
     pub(super) async fn move_on(&self, entry: &Entry) {
         if self.inodes.with(entry.id, |state| state.behind()) == Some(true) {
-            let _ = self.head(entry.id, &entry.path, OpenMode::Read).await;
+            let _ = self.head(entry.id, OpenMode::Read).await;
         }
     }
 
@@ -126,20 +119,24 @@ impl Space {
         if let Some((file, _)) = self.inodes.with(entry, |state| state.known()).flatten() {
             return Ok(file);
         }
-        let path = self.located_for(self.ino(entry), Follow::PathOnly).await?;
-        self.head(entry, &path, OpenMode::Read).await
+        self.head(entry, OpenMode::Read).await.map(|(head, _)| head)
     }
 
     /// The entry's current head, which its open files then follow. Every open asks, for
     /// close-to-open consistency (C2), and one for writing needs write access (C1, C4a).
-    pub(super) async fn head(&self, entry: EntryId, path: &SpacePath, mode: OpenMode) -> Result<Head> {
+    pub(super) async fn head(&self, entry: EntryId, mode: OpenMode) -> Result<(Head, SpacePath)> {
         let asked = Instant::now();
-        let (found, head, writable) = match self.remote.open(path.clone()).await {
+        let (found, head, writable) = match self.remote.open(entry).await {
             Err(err) if err.is_offline() => {
                 let held = self.inodes.with(entry, |state| state.offline(mode));
-                return Ok(held.flatten().ok_or(err)??);
+                let head = held.flatten().ok_or(err)??;
+                let path = self.path(self.ino(entry))?.ok_or(Errno::ENOENT)?;
+                return Ok((head, path));
             }
-            opened => opened.map_err(|err| self.gone(Some(path), err))?,
+            opened => {
+                let path = self.path(self.ino(entry))?;
+                opened.map_err(|err| self.gone(path.as_ref(), err))?
+            }
         };
         self.inodes.observe(&found, asked, false);
         self.expect(self.ino(entry), &found)?;
@@ -153,7 +150,8 @@ impl Space {
         if mode.writes() && !writable {
             return Err(Errno::EACCES.into());
         }
-        Ok(self.inodes.with(entry, |state| state.followed()).flatten())
+        let head = self.inodes.with(entry, |state| state.followed()).flatten();
+        Ok((head, found.path))
     }
 
     /// Runs `with` on the version the entry's open files read, and once more on its head if the
@@ -174,14 +172,7 @@ impl Space {
                         err
                     }
                 };
-                let path = self
-                    .located_for(self.ino(entry), Follow::PathOnly)
-                    .await
-                    .map_err(final_error)?;
-                let head = self
-                    .head(entry, &path, OpenMode::Read)
-                    .await
-                    .map_err(final_error)?;
+                let head = self.head(entry, OpenMode::Read).await.map_err(final_error)?.0;
                 let used = with(head).await;
                 used.map_err(|err| {
                     if err.is_not_found() {

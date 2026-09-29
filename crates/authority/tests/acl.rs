@@ -108,9 +108,10 @@ fn any_grant_in_a_space_shows_its_root_but_listing_it_needs_read() {
     fx.mkdir(&alice(), "eng").unwrap();
     fx.set_acl("eng", "group:eng", Some(Perm::Read));
     assert!(fx.stat(&carol(), "").is_ok());
+    let root = fx.stat(&alice(), "").unwrap();
     let list = Request::List {
         space: SPACE.into(),
-        path: path(""),
+        entry: root.id,
     };
     assert_eq!(fx.call(&carol(), list), Err(ErrorCode::Denied));
     assert_eq!(fx.stat(&bob(), ""), Err(ErrorCode::Denied));

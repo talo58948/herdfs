@@ -15,11 +15,11 @@ use axum::{Json, Router, http::StatusCode, routing::get};
 use http::{KEY, KEY_X, Lab, PUBLIC_S3, ROGUE_KEY, now};
 use herdfs_authority::{Authority, server::Server};
 use herdfs_core::ChunkRef;
-use herdfs_core::proto::{ErrorCode, Request};
+use herdfs_core::proto::{EntryId, ErrorCode, Request};
 use reqwest::Url;
 use rusty_s3::{Bucket, Credentials, UrlStyle};
 use serde_json::{Value, json};
-use support::{Fixture, SPACE, alice, path};
+use support::{Fixture, SPACE, alice};
 
 /// The public half of `ROGUE_KEY`, as a JWK's base64url `x`.
 const ROGUE_X: &str = "-jl_MBKrPoUjksv6ut9S1AkaQKUq-12zE9Lh4rS2aqs";
@@ -122,9 +122,12 @@ fn a_rename_leaves_every_path_below_it_usable() {
 
     let top = "b".repeat(255);
     let renamed = fx.rename(&alice(), "a", &top);
+    let listed_id = fx
+        .stat(&alice(), &deepest.replacen('a', &top, 1))
+        .map(|entry| entry.id);
     let list = Request::List {
         space: SPACE.into(),
-        path: path(&deepest.replacen('a', &top, 1)),
+        entry: listed_id.unwrap_or(EntryId(0)),
     };
     let listed = fx.call(&alice(), list).map(drop);
     assert!(

@@ -164,7 +164,7 @@ fn a_late_writer_cannot_restore_or_see_earlier_versions() {
     // Open and Locate describe the head alone: its id, size and time, nothing of v1.
     let open = Request::Open {
         space: SPACE.into(),
-        path: path("f"),
+        entry: file.id,
     };
     let Response::Opened {
         entry,

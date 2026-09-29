@@ -69,6 +69,12 @@ fn namespace_requests_follow_a_renamed_parent_entry() {
         panic!("create answers with an entry")
     };
     assert_eq!(entry.path, support::path("moved/f"));
+    let lookup = Request::Lookup {
+        space: SPACE.into(),
+        parent: parent.id,
+        name: "f".into(),
+    };
+    assert_eq!(fx.call(&alice(), lookup), Ok(Response::Entry { entry }));
 }
 
 #[test]

@@ -35,13 +35,26 @@ impl Call<'_> {
         Ok(Response::Entry { entry })
     }
 
-    pub(crate) fn list(&self, space: &str, path: &SpacePath) -> Result<Response> {
-        self.require(space, path, Perm::Read)?;
-        if self.entry(space, path)?.kind != Kind::Dir {
-            return Err(refuse(ErrorCode::NotDir, format!("{path} is not a directory")));
+    pub(crate) fn lookup(&self, space: &str, parent: EntryId, name: &str) -> Result<Response> {
+        let (path, parent_kind) = self.child_path(space, parent, name, Perm::Read)?;
+        self.require(space, &path, Perm::Read)?;
+        self.require_directory(parent_kind, parent)?;
+        Ok(Response::Entry {
+            entry: self.entry(space, &path)?,
+        })
+    }
+
+    pub(crate) fn list(&self, space: &str, id: EntryId) -> Result<Response> {
+        let entry = self.entry_by_id(space, id)?;
+        self.require(space, &entry.path, Perm::Read)?;
+        if entry.kind != Kind::Dir {
+            return Err(refuse(
+                ErrorCode::NotDir,
+                format!("entry {} is not a directory", id.0),
+            ));
         }
         Ok(Response::Entries {
-            entries: self.children(space, path)?,
+            entries: self.children(space, &entry.path)?,
         })
     }
 
@@ -55,7 +68,7 @@ impl Call<'_> {
         mode: u32,
         target: Option<&str>,
     ) -> Result<Response> {
-        let (path, parent_kind) = self.child_path(space, parent, name)?;
+        let (path, parent_kind) = self.child_path(space, parent, name, Perm::Write)?;
         self.require(space, &path, Perm::Write)?;
         self.require_directory(parent_kind, parent)?;
         if self.find(space, &path)?.is_some() {
@@ -73,7 +86,7 @@ impl Call<'_> {
     }
 
     pub(crate) fn remove(&self, space: &str, parent: EntryId, name: &str) -> Result<Response> {
-        let (path, parent_kind) = self.child_path(space, parent, name)?;
+        let (path, parent_kind) = self.child_path(space, parent, name, Perm::Write)?;
         self.require(space, &path, Perm::Write)?;
         self.require_directory(parent_kind, parent)?;
         let entry = self.entry(space, &path)?;
@@ -90,8 +103,8 @@ impl Call<'_> {
         to_parent: EntryId,
         to_name: &str,
     ) -> Result<Response> {
-        let (from, from_kind) = self.child_path(space, from_parent, from_name)?;
-        let (to, to_kind) = self.child_path(space, to_parent, to_name)?;
+        let (from, from_kind) = self.child_path(space, from_parent, from_name, Perm::Write)?;
+        let (to, to_kind) = self.child_path(space, to_parent, to_name, Perm::Write)?;
         self.require(space, &from, Perm::Write)?;
         self.require(space, &to, Perm::Write)?;
         self.require_directory(from_kind, from_parent)?;
@@ -130,12 +143,12 @@ impl Call<'_> {
     pub(crate) fn set_attr(
         &self,
         space: &str,
-        path: &SpacePath,
+        id: EntryId,
         mode: Option<u32>,
         mtime_ms: Option<i64>,
     ) -> Result<Response> {
-        self.require(space, path, Perm::Write)?;
-        let entry = self.entry(space, path)?;
+        let entry = self.entry_by_id(space, id)?;
+        self.require(space, &entry.path, Perm::Write)?;
         let entry = Entry {
             mode: mode.unwrap_or(entry.mode),
             mtime_ms: mtime_ms.unwrap_or(entry.mtime_ms),
@@ -198,14 +211,20 @@ impl Call<'_> {
         Ok(())
     }
 
-    fn child_path(&self, space: &str, parent: EntryId, name: &str) -> Result<(SpacePath, Kind)> {
+    fn child_path(
+        &self,
+        space: &str,
+        parent: EntryId,
+        name: &str,
+        reveal: Perm,
+    ) -> Result<(SpacePath, Kind)> {
         let parent_entry = self.entry_by_id(space, parent)?;
         let name = SpacePath::try_from(name)
             .ok()
             .filter(|name| name.parent() == Some(SpacePath::root()))
             .ok_or_else(|| refuse(ErrorCode::Invalid, format!("invalid name {name:?}")))?;
         let Ok(path) = parent_entry.path.join(name.as_str()) else {
-            self.require(space, &parent_entry.path, Perm::Write)?;
+            self.require(space, &parent_entry.path, reveal)?;
             return Err(refuse(
                 ErrorCode::Invalid,
                 format!("path below entry {} is too long", parent.0),

@@ -113,19 +113,28 @@ impl Model {
                 let (path, _) = self.node_by_id(space, *entry).ok_or(NotFound)?;
                 self.require(who, space, path, Perm::Read)
             }
+            Request::Lookup { space, parent, name } => {
+                let (path, kind) = self.child_path(space, *parent, name)?;
+                self.require(who, space, &path, Perm::Read)?;
+                ensure(kind == Kind::Dir, NotFound)?;
+                self.node(space, &path).map(drop)
+            }
             Request::Stat { space, path } if path.is_root() => {
                 self.require_somewhere(who, space, Perm::Read)?;
                 self.node(space, path).map(drop)
             }
-            Request::Stat { space, path }
-            | Request::Open { space, path }
-            | Request::History { space, path } => {
+            Request::Stat { space, path } | Request::History { space, path } => {
                 self.require(who, space, path, Perm::Read)?;
                 self.node(space, path).map(drop)
             }
-            Request::List { space, path } => {
+            Request::Open { space, entry } => {
+                let (path, _) = self.node_by_id(space, *entry).ok_or(NotFound)?;
+                self.require(who, space, path, Perm::Read)
+            }
+            Request::List { space, entry } => {
+                let (path, node) = self.node_by_id(space, *entry).ok_or(NotFound)?;
                 self.require(who, space, path, Perm::Read)?;
-                ensure(self.node(space, path)?.kind == Kind::Dir, NotDir)
+                ensure(node.kind == Kind::Dir, NotDir)
             }
             Request::Grant {
                 space,
@@ -179,9 +188,10 @@ impl Model {
                 ensure(from_kind == Kind::Dir && to_kind == Kind::Dir, NotFound)?;
                 self.rename_outcome(space, &from, &to)
             }
-            Request::SetAttr { space, path, .. } => {
+            Request::SetAttr { space, entry, .. } => {
+                let (path, _) = self.node_by_id(space, *entry).ok_or(NotFound)?;
                 self.require(who, space, path, Perm::Write)?;
-                self.node(space, path).map(drop)
+                Ok(())
             }
             Request::Commit {
                 space,

@@ -13,9 +13,19 @@ impl Lab {
     /// The head version of `path` in [`SPACE`], with its chunk list, as `user` opens it.
     pub fn head(&self, user: &str, path: &str) -> Result<Version> {
         let path = SpacePath::try_from(path)?;
+        let Response::Entry { entry } = self.rpc(
+            user,
+            &Request::Stat {
+                space: SPACE.into(),
+                path: path.clone(),
+            },
+        )?
+        else {
+            bail!("{path} was not an entry")
+        };
         let open = Request::Open {
             space: SPACE.into(),
-            path: path.clone(),
+            entry: entry.id,
         };
         match self.rpc(user, &open)? {
             Response::Opened {
