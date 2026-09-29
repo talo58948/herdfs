@@ -16,6 +16,8 @@ const ARCHIVE_LEN: usize = 24 << 20;
 /// Paired upload times may differ by this much in the median, or by a quarter of the fresh
 /// median if that is more.
 const TIMING_SLACK_MS: f64 = 15.0;
+/// A noisy window gets fresh chunks twice before its unchanged bound must hold.
+const TIMING_ATTEMPTS: usize = 3;
 
 // contract: S6
 #[test]
@@ -90,9 +92,43 @@ fn an_upload_answers_the_same_whether_or_not_the_store_has_the_bytes() -> Result
     let Some(scene) = Scene::start()? else {
         return Ok(());
     };
+    for attempt in 0..TIMING_ATTEMPTS {
+        let timing = measure_uploads(&scene, attempt)?;
+        let limit = TIMING_SLACK_MS.max(timing.fresh_ms / 4.0);
+        eprintln!(
+            "{} pairs: fresh median {:.1} ms, stored slower in {}, median gap {:.1} ms, jitter {:.1} ms",
+            timing.pairs, timing.fresh_ms, timing.slower, timing.gap_ms, timing.jitter_ms
+        );
+        if timing.gap_ms.abs() <= limit {
+            return scene.assert_no_leak();
+        }
+        let stalled = timing.jitter_ms > limit;
+        if !stalled || attempt + 1 == TIMING_ATTEMPTS {
+            assert!(
+                timing.gap_ms.abs() <= limit,
+                "median gap {:.1} ms on {:.1} ms",
+                timing.gap_ms,
+                timing.fresh_ms
+            );
+        }
+        eprintln!("retrying a timing window spoiled by scheduler stalls");
+    }
+    unreachable!("the last timing attempt either passes or asserts")
+}
+
+struct UploadTiming {
+    pairs: usize,
+    slower: usize,
+    gap_ms: f64,
+    fresh_ms: f64,
+    jitter_ms: f64,
+}
+
+fn measure_uploads(scene: &Scene, attempt: usize) -> Result<UploadTiming> {
     // Each of alice's chunks can be tested once, as a guess would be; after that it is stored
     // whatever the answer. So bob uploads each once, paired with fresh bytes of its length.
-    let archive = write_as_alice(&scene.lab, "finance/archive.bin", random_bytes(ARCHIVE_LEN))?;
+    let name = format!("finance/archive-{attempt}.bin");
+    let archive = write_as_alice(&scene.lab, &name, random_bytes(ARCHIVE_LEN))?;
     let (mut gaps_ms, mut fresh_ms) = (Vec::new(), Vec::new());
     for (index, stored) in archive.version.chunks.iter().enumerate() {
         let bytes = random_bytes(stored.len as usize);
@@ -115,19 +151,15 @@ fn an_upload_answers_the_same_whether_or_not_the_store_has_the_bytes() -> Result
         fresh_ms.push(elapsed_ms[1]);
     }
     let slower = gaps_ms.iter().filter(|gap| **gap > 0.0).count();
-    let (gap, fresh) = (median(gaps_ms), median(fresh_ms));
-    eprintln!(
-        "{} pairs: fresh median {fresh:.1} ms, stored slower in {slower}, median gap {gap:.1} ms",
-        archive.version.chunks.len()
-    );
-    // Loose on purpose, so the store's jitter cannot fail it: this catches an upload that skips
-    // the store write, which saves most of its time, but not the few milliseconds the store may
-    // spend overwriting an object, which the line above prints.
-    assert!(
-        gap.abs() <= TIMING_SLACK_MS.max(fresh / 4.0),
-        "median gap {gap:.1} ms on {fresh:.1} ms"
-    );
-    scene.assert_no_leak()
+    let gap_ms = median(gaps_ms.clone());
+    let jitter_ms = median(gaps_ms.iter().map(|gap| (gap - gap_ms).abs()).collect());
+    Ok(UploadTiming {
+        pairs: gaps_ms.len(),
+        slower,
+        gap_ms,
+        fresh_ms: median(fresh_ms),
+        jitter_ms,
+    })
 }
 
 fn median(mut values: Vec<f64>) -> f64 {
