@@ -58,6 +58,8 @@ mod round31_pending_pin;
 mod round32_agents_cwd;
 mod round33_relocated_child;
 mod round35_held_entries;
+mod round37_sequences;
+mod round37_swapped_dirs;
 mod saved_mtime;
 mod scratch_files;
 mod shared_appends;

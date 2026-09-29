@@ -2,39 +2,24 @@
 //! so that no decision about an entry is taken from a path another entry now holds (C7), and
 //! the kernel's references to its inode. What is known of each entry is its `Inode`.
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use herdfs_core::SpacePath;
-use herdfs_core::proto::{Entry, EntryId, Kind};
+use herdfs_core::proto::{Entry, EntryId};
 
-use super::inode::{Inode, State};
-use crate::{journal::Local, lock, lru::Lru};
+use super::inode::State;
+use crate::{journal::Local, lock};
+use table::{Node, Table};
+
+mod table;
 
 /// How many entries that nothing holds are kept, for lookups within TTL and while offline (C12).
 const IDLE: u64 = 4096;
 
 #[derive(Default)]
 pub struct Inodes(Mutex<Table>);
-
-#[derive(Default)]
-struct Table {
-    nodes: HashMap<EntryId, Node>,
-    by_path: HashMap<SpacePath, EntryId>,
-    /// The nodes the kernel holds no reference to, the next to go first; those with local
-    /// state stay.
-    idle: Lru<EntryId, ()>,
-}
-
-struct Node {
-    /// The entry's path, and when the authority confirmed it: `None` once another entry took it.
-    bound: Option<(SpacePath, Instant)>,
-    /// References the kernel holds, which `forget` lowers.
-    lookups: u64,
-    inode: Arc<Inode>,
-}
 
 impl Inodes {
     /// Takes an answer of the authority asked for at `asked`: the entry's attributes, unless ones
@@ -142,7 +127,7 @@ impl Inodes {
         if let Some(id) = table.by_path.remove(path)
             && let Some(node) = table.nodes.get_mut(&id)
         {
-            node.bound = None;
+            node.unbind(Instant::now());
         }
     }
 
@@ -160,20 +145,16 @@ impl Inodes {
         let mut table = lock(&self.0);
         let table = &mut *table;
         let moved_at = Instant::now();
-        let source = table
-            .nodes
-            .get(&entry.id)
-            .and_then(|node| node.bound.as_ref())
-            .map(|(path, _)| path.clone());
+        let source = table.nodes.get(&entry.id).and_then(|node| node.source(moved_at));
         if let Some(replaced) = table
             .by_path
             .remove(&entry.path)
             .and_then(|id| table.nodes.get_mut(&id))
         {
-            replaced.bound = None;
+            replaced.unbind(moved_at);
         }
-        if let Some(source) = source {
-            table.rebase(&source, &entry.path, moved_at);
+        if let Some((source, at)) = source {
+            table.rebase(&source, &entry.path, at);
         }
         for node in table.nodes.values_mut() {
             let Some((path, _)) = &node.bound else {
@@ -181,7 +162,7 @@ impl Inodes {
             };
             if path.is_within(from) {
                 table.by_path.remove(path);
-                node.bound = None;
+                node.unbind(moved_at);
             }
         }
         table.observe(entry, moved_at, false);
@@ -195,97 +176,6 @@ impl Inodes {
         for node in table.nodes.values() {
             if node.bound.as_ref().is_some_and(|(known, _)| changed(known)) {
                 node.inode.state().current = false;
-            }
-        }
-    }
-}
-
-impl Table {
-    fn add(&mut self, id: EntryId, entry: Option<Entry>, asked: Instant) -> Arc<Inode> {
-        let inode = Arc::new(Inode::new(entry, asked));
-        let node = Node {
-            bound: None,
-            lookups: 0,
-            inode: inode.clone(),
-        };
-        self.nodes.insert(id, node);
-        self.idle.insert(id, 1, ());
-        inode
-    }
-
-    fn observe(&mut self, entry: &Entry, asked: Instant, cold: bool) {
-        let (same_path, source, inode) = match self.nodes.get(&entry.id) {
-            Some(node) => (
-                node.bound.as_ref().is_some_and(|(path, _)| path == &entry.path),
-                node.bound.as_ref().map(|(path, _)| path.clone()),
-                node.inode.clone(),
-            ),
-            None => (false, None, self.add(entry.id, Some(entry.clone()), asked)),
-        };
-        inode.state().observe(entry, asked);
-        // A listing binds new or relocated entries, but does not refresh an unchanged binding (C7).
-        let bound = !(cold && same_path) && self.bind(entry.id, &entry.path, asked);
-        if bound
-            && entry.kind == Kind::Dir
-            && let Some(source) = source.filter(|source| source != &entry.path)
-        {
-            self.rebase(&source, &entry.path, asked);
-        }
-        if self.idle.contains(&entry.id) {
-            match cold {
-                true => self.idle.insert_cold(entry.id, 1, ()),
-                false => self.idle.insert(entry.id, 1, ()),
-            }
-        }
-        self.evict();
-    }
-
-    /// Binds `path` to `id` as confirmed `at`, unless a binding of either was confirmed later.
-    fn bind(&mut self, id: EntryId, path: &SpacePath, at: Instant) -> bool {
-        let later = |node: Option<&Node>| {
-            let bound = node.and_then(|node| node.bound.as_ref());
-            bound.is_some_and(|(_, confirmed)| *confirmed >= at)
-        };
-        let holder = self.by_path.get(path).copied().filter(|holder| *holder != id);
-        if later(self.nodes.get(&id)) || later(holder.and_then(|holder| self.nodes.get(&holder))) {
-            return false;
-        }
-        if let Some(holder) = holder.and_then(|holder| self.nodes.get_mut(&holder)) {
-            holder.bound = None;
-        }
-        let Some(node) = self.nodes.get_mut(&id) else {
-            return false;
-        };
-        if let Some((old, _)) = node.bound.replace((path.clone(), at))
-            && old != *path
-        {
-            self.by_path.remove(&old);
-        }
-        self.by_path.insert(path.clone(), id);
-        true
-    }
-
-    fn rebase(&mut self, source: &SpacePath, destination: &SpacePath, at: Instant) {
-        let moved: Vec<_> = self
-            .nodes
-            .iter()
-            .filter_map(|(id, node)| {
-                let path = &node.bound.as_ref()?.0;
-                Some((*id, path.rebase(source, destination)?))
-            })
-            .collect();
-        for (id, path) in moved {
-            self.bind(id, &path, at);
-        }
-    }
-
-    /// Drops the least recently used entries that nothing holds, past `IDLE`.
-    fn evict(&mut self) {
-        let nodes = &self.nodes;
-        let used = |id: &EntryId| nodes.get(id).is_some_and(|node| node.inode.in_use());
-        for id in self.idle.evict(IDLE, used) {
-            if let Some((path, _)) = self.nodes.remove(&id).and_then(|node| node.bound) {
-                self.by_path.remove(&path);
             }
         }
     }
