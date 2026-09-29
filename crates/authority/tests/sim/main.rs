@@ -16,8 +16,10 @@ mod check;
 mod choose;
 mod content;
 mod model;
+mod namespace;
 mod retention;
 mod steps;
+mod targeted;
 mod versions;
 
 use std::{

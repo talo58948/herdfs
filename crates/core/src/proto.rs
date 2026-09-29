@@ -76,11 +76,14 @@ pub enum Request {
         space: String,
         path: SpacePath,
     },
-    /// The entry at this id's current path. Needs read there.
+    /// The entry with this id, at its current path, so a client can follow
+    /// renames made elsewhere. Needs read on that path.
     Locate {
         space: String,
         entry: EntryId,
     },
+    /// The child named within `parent`. Needs read on its path; a parent that
+    /// is not a directory answers `NotFound`.
     Lookup {
         space: String,
         parent: EntryId,
@@ -275,26 +278,4 @@ impl Error {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn requests_are_tagged_by_op() {
-        let request = Request::Stat {
-            space: "team".into(),
-            path: SpacePath::try_from("a/b").unwrap(),
-        };
-        let json = serde_json::to_value(&request).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({"op": "stat", "space": "team", "path": "a/b"})
-        );
-        assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
-    }
-
-    #[test]
-    fn invalid_paths_fail_to_decode() {
-        let json = serde_json::json!({"op": "stat", "space": "team", "path": "../etc"});
-        assert!(serde_json::from_value::<Request>(json).is_err());
-    }
-}
+mod tests;
