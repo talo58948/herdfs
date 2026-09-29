@@ -12,6 +12,8 @@ use herdfs_core::proto::{Entry, EntryId};
 use super::{OpenMode, Space, TTL};
 use crate::{Error, Result, reader::Head};
 
+type Held = (Entry, Instant, bool);
+
 impl Space {
     /// The child in `parent`, when it was asked for, and its journal copy while it holds changes.
     pub(super) async fn child(
@@ -21,33 +23,20 @@ impl Space {
     ) -> Result<(Entry, Instant, Option<Arc<File>>)> {
         let asked = Instant::now();
         let parent_id = self.entry_id(parent);
-        let bound = self.bound(parent)?;
-        let path = bound.as_ref().and_then(|(path, _)| path.join(&name).ok());
-        let held = path.as_ref().and_then(|path| self.inodes.at(path));
-        let fresh_parent = bound.is_some_and(|(_, at)| at.elapsed() < TTL);
-        let found = match held
-            .clone()
-            .filter(|(_, at, current)| fresh_parent && *current && at.elapsed() < TTL)
-        {
-            Some((entry, at, _)) => {
-                self.move_on(&entry).await;
-                Ok((entry, at, false))
-            }
-            None => self
-                .remote
-                .lookup(parent_id, name)
-                .await
-                .map(|entry| (entry, asked, true)),
+        let (held, reuse) = self.held_child(parent, &name)?;
+        self.answer(held, reuse, asked, self.remote.lookup(parent_id, name))
+            .await
+    }
+
+    /// A fresh child held under a fresh parent, without asking the authority.
+    pub(super) async fn fresh_child(&self, parent: INodeNo, name: &str) -> Result<Option<Entry>> {
+        let (held, reuse) = self.held_child(parent, name)?;
+        let Some((entry, ..)) = held.filter(|(_, at, current)| reuse && *current && at.elapsed() < TTL)
+        else {
+            return Ok(None);
         };
-        let (entry, at, fetched) = match found {
-            Err(err) if err.is_offline() => held.map(|(entry, at, _)| (entry, at, false)).ok_or(err)?,
-            found => found?,
-        };
-        if fetched {
-            self.follow(&entry, asked).await;
-        }
-        let (entry, local) = self.inodes.view(entry);
-        Ok((entry, at, local))
+        self.move_on(&entry).await;
+        Ok(Some(entry))
     }
 
     /// The held entry, when it was asked for, and its journal copy while it holds changes:
@@ -58,43 +47,54 @@ impl Space {
         let asked = Instant::now();
         let id = self.entry_id(ino);
         let held = self.inodes.with(id, |state| state.cached()).flatten();
-        let found = match held
+        let ask = async { self.remote.locate(id).await.map_err(|err| self.gone(ino, err)) };
+        self.answer(held, true, asked, ask).await
+    }
+
+    async fn answer(
+        &self,
+        held: Option<Held>,
+        reuse: bool,
+        asked: Instant,
+        ask: impl Future<Output = Result<Entry>>,
+    ) -> Result<(Entry, Instant, Option<Arc<File>>)> {
+        // A listing leaves entries it never followed.
+        if let Some((entry, at, _)) = held
             .clone()
-            .filter(|(_, at, current)| *current && at.elapsed() < TTL)
+            .filter(|(_, at, current)| reuse && *current && at.elapsed() < TTL)
         {
-            // A listing leaves entries it never followed.
-            Some((entry, at, _)) => {
-                self.move_on(&entry).await;
-                Ok((entry, at))
+            self.move_on(&entry).await;
+            let (entry, local) = self.inodes.view(entry);
+            return Ok((entry, at, local));
+        }
+        let (entry, at) = match ask.await {
+            Ok(entry) => {
+                self.follow(&entry, asked).await;
+                (entry, asked)
             }
-            None => self.fetch(ino, asked).await,
-        };
-        let (entry, at) = match found {
             Err(err) if err.is_offline() => held.map(|(entry, at, _)| (entry, at)).ok_or(err)?,
-            found => found?,
+            Err(err) => return Err(err),
         };
         let (entry, local) = self.inodes.view(entry);
         Ok((entry, at, local))
     }
 
-    async fn fetch(&self, ino: INodeNo, asked: Instant) -> Result<(Entry, Instant)> {
-        let entry = self
-            .remote
-            .locate(self.entry_id(ino))
-            .await
-            .map_err(|err| self.gone(self.path(ino).ok().flatten().as_ref(), err))?;
-        self.follow(&entry, asked).await;
-        Ok((entry, asked))
+    fn held_child(&self, parent: INodeNo, name: &str) -> Result<(Option<Held>, bool)> {
+        let bound = self.bound(parent)?;
+        let path = bound.as_ref().and_then(|(path, _)| path.join(name).ok());
+        let held = path.as_ref().and_then(|path| self.inodes.at(path));
+        let reuse = bound.is_some_and(|(_, at)| at.elapsed() < TTL);
+        Ok((held, reuse))
     }
 
     /// ESTALE for an entry the authority no longer finds where it was looked for. Its path is
     /// unbound, so the lookup the kernel then makes asks the authority (C7).
-    pub(super) fn gone(&self, path: Option<&SpacePath>, err: Error) -> Error {
+    pub(super) fn gone(&self, ino: INodeNo, err: Error) -> Error {
         if !err.is_not_found() {
             return err;
         }
-        if let Some(path) = path {
-            self.inodes.unbind(path);
+        if let Ok(Some(path)) = self.path(ino) {
+            self.inodes.unbind(&path);
         }
         Errno::ESTALE.into()
     }
@@ -119,30 +119,23 @@ impl Space {
         if let Some((file, _)) = self.inodes.with(entry, |state| state.known()).flatten() {
             return Ok(file);
         }
-        self.head(entry, OpenMode::Read).await.map(|(head, _)| head)
+        self.head(entry, OpenMode::Read).await
     }
 
     /// The entry's current head, which its open files then follow. Every open asks, for
     /// close-to-open consistency (C2), and one for writing needs write access (C1, C4a).
-    pub(super) async fn head(&self, entry: EntryId, mode: OpenMode) -> Result<(Head, Option<SpacePath>)> {
+    pub(super) async fn head(&self, entry: EntryId, mode: OpenMode) -> Result<Head> {
         let asked = Instant::now();
         let (found, head, writable) = match self.remote.open(entry).await {
             Err(err) if err.is_offline() => {
                 let held = self.inodes.with(entry, |state| state.offline(mode));
                 let head = held.flatten().ok_or(err)??;
-                return Ok((head, self.path(self.ino(entry))?));
+                return Ok(head);
             }
-            opened => {
-                let path = self.path(self.ino(entry))?;
-                opened.map_err(|err| self.gone(path.as_ref(), err))?
-            }
+            opened => opened.map_err(|err| self.gone(self.ino(entry), err))?,
         };
         self.inodes.observe(&found, asked, false);
-        self.expect(self.ino(entry), &found)?;
-        let switched = self.switch_version(entry, |state| {
-            let switched = state.switch((head, writable));
-            Some((switched, switched))
-        });
+        let switched = self.switch_version(entry, |state| Some(state.switch((head, writable))));
         if switched == Some(true) {
             self.kernel.invalidate_attrs(entry);
         }
@@ -150,7 +143,7 @@ impl Space {
             return Err(Errno::EACCES.into());
         }
         let head = self.inodes.with(entry, |state| state.followed()).flatten();
-        Ok((head, Some(found.path)))
+        Ok(head)
     }
 
     /// Runs `with` on the version the entry's open files read, and once more on its head if the
@@ -171,7 +164,7 @@ impl Space {
                         err
                     }
                 };
-                let head = self.head(entry, OpenMode::Read).await.map_err(final_error)?.0;
+                let head = self.head(entry, OpenMode::Read).await.map_err(final_error)?;
                 let used = with(head).await;
                 used.map_err(|err| {
                     if err.is_not_found() {

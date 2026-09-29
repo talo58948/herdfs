@@ -40,15 +40,14 @@ impl Space {
             .remote
             .create(parent_id, name.clone(), mode & PERMISSIONS)
             .await;
-        let created = match created {
-            Err(Error::Api(error)) if error.code == ErrorCode::Exists && !exclusive => None,
-            created => Some(created?),
-        };
-        let Some(entry) = created else {
-            let (entry, asked, local) = self.child(parent, name).await?;
-            let attr = self.looked_up(&entry, asked, local.as_deref());
-            let open = self.clone().open(self.ino(entry.id), OpenFlags(flags), pid);
-            return Ok((attr, open.await?));
+        let entry = match created {
+            Err(Error::Api(error)) if error.code == ErrorCode::Exists && !exclusive => {
+                let (entry, asked, local) = self.child(parent, name).await?;
+                let attr = self.looked_up(&entry, asked, local.as_deref());
+                let open = self.clone().open(self.ino(entry.id), OpenFlags(flags), pid);
+                return Ok((attr, open.await?));
+            }
+            created => created?,
         };
         let attr = self.added(&entry);
         self.inodes.with(entry.id, |state| state.switch((None, true)));
@@ -77,7 +76,6 @@ impl Space {
         // Answered from the entry held, which offline lets a truncation go on (C12), and found
         // before anything is journaled, so a failure changes nothing.
         let (entry, ..) = self.entry(ino).await?;
-        self.expect(ino, &entry)?;
         if let Some(size) = change.size {
             self.truncate(ino, size, change.fh).await?;
         }
@@ -100,7 +98,6 @@ impl Space {
             let asked = Instant::now();
             let entry = self.remote.set_attr(entry_id, mode, mtime_ms).await?;
             self.inodes.observe(&entry, asked, false);
-            self.expect(ino, &entry)?;
             entry
         } else {
             entry
@@ -112,7 +109,6 @@ impl Space {
 
     pub async fn readlink(self: Arc<Self>, ino: INodeNo) -> Result<Vec<u8>> {
         let (entry, ..) = self.entry(ino).await?;
-        self.expect(ino, &entry)?;
         Ok(entry.target.ok_or(Errno::EINVAL)?.into_bytes())
     }
 
@@ -160,13 +156,15 @@ impl Space {
     ) -> Result<Option<EntryId>> {
         let parents = (self.entry_id(from.0), self.entry_id(to.0));
         let (from_name, to_name) = (child_name(&from.1)?, child_name(&to.1)?);
-        let (source, ..) = self.child(from.0, from_name.clone()).await?;
+        let held = self.fresh_child(from.0, &from_name).await?;
         let asked = Instant::now();
         let current = self.remote.lookup(parents.0, from_name.clone()).await?;
         self.follow(&current, asked).await;
-        if source.id != current.id {
-            return Err(Errno::ESTALE.into());
-        }
+        let source = match held {
+            Some(held) if held.id != current.id => return Err(Errno::ESTALE.into()),
+            Some(held) => held,
+            None => current,
+        };
         self.settle(&source.path).await?;
         let (from, moved) = self
             .remote

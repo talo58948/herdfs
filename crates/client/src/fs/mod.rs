@@ -15,15 +15,13 @@ use std::time::{Duration, Instant};
 use std::{collections::HashMap, fs::File, io, os::unix::fs::MetadataExt};
 
 pub use fuse::Fuse;
-use fuser::{Errno, FileAttr, FileType, INodeNo, Notifier, OpenAccMode, OpenFlags};
+use fuser::{FileAttr, FileType, INodeNo, Notifier, OpenAccMode, OpenFlags};
 use handles::Handle;
-pub(crate) use inode::State;
 pub use inodes::Inodes;
 pub use kernel::Kernel;
 use herdfs_core::proto::{Entry, EntryId, Kind};
 
 use crate::{
-    Result,
     cache::Cache,
     journal::{Journal, Local},
     lru::Lru,
@@ -73,16 +71,16 @@ impl OpenMode {
 }
 
 pub struct Space {
-    remote: Arc<Remote>,
+    pub(crate) remote: Arc<Remote>,
     reader: Arc<Reader>,
-    cache: Arc<Cache>,
-    journal: Arc<Journal>,
-    stats: Arc<Stats>,
+    pub(crate) cache: Arc<Cache>,
+    pub(crate) journal: Arc<Journal>,
+    pub(crate) stats: Arc<Stats>,
     decider: Mutex<Decider>,
-    kernel: Arc<Kernel>,
+    pub(crate) kernel: Arc<Kernel>,
     /// The mounting user and group, shown as the owner of every entry.
     owner: (u32, u32),
-    inodes: Arc<Inodes>,
+    pub(crate) inodes: Arc<Inodes>,
     /// Opens by entry and process name: how many in a row, and when the last was.
     opens: Mutex<Lru<(EntryId, String), (u32, Instant)>>,
     handles: Mutex<HashMap<u64, Arc<Handle>>>,
@@ -132,16 +130,6 @@ impl Space {
 
     pub fn mounted(&self, notifier: Notifier) {
         self.kernel.mounted(notifier);
-    }
-
-    /// ESTALE unless the authority answered for the inode's own entry: its path may name another
-    /// entry by now, which the kernel then looks up (C7).
-    fn expect(&self, ino: INodeNo, entry: &Entry) -> Result<()> {
-        if self.ino(entry.id) == ino {
-            Ok(())
-        } else {
-            Err(Errno::ESTALE.into())
-        }
     }
 
     /// Counts a reply that hands the kernel a reference to the entry's inode, and returns its

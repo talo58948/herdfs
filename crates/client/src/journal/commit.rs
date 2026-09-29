@@ -14,9 +14,9 @@ use herdfs_core::{ChunkId, chunk};
 use tokio::sync::mpsc;
 
 use super::{Journal, REJECTED, Record, write_record};
-use crate::fs::{Inodes, Kernel, Space};
-use crate::stats::{Stats, bump};
-use crate::{Error, Result, cache::Cache, remote::Remote};
+use crate::fs::Space;
+use crate::stats::bump;
+use crate::{Error, Result};
 
 const FIRST_RETRY: Duration = Duration::from_secs(1);
 const LAST_RETRY: Duration = Duration::from_secs(30);
@@ -39,13 +39,7 @@ pub enum Outcome {
 
 /// What the commit tasks share.
 pub struct Committer {
-    pub space: Arc<Space>,
-    pub journal: Arc<Journal>,
-    pub inodes: Arc<Inodes>,
-    pub remote: Arc<Remote>,
-    pub cache: Arc<Cache>,
-    pub stats: Arc<Stats>,
-    pub kernel: Arc<Kernel>,
+    pub(crate) space: Arc<Space>,
 }
 
 impl Committer {
@@ -65,7 +59,7 @@ impl Committer {
             let attempt = |record| self.attempt(&job.sealed, record);
             let outcome = match anew(&job.record, attempt).await {
                 Ok(version) => {
-                    bump(&self.stats.commits, 1);
+                    bump(&self.space.stats.commits, 1);
                     // Reads go on to the committed version once the journal drops the copy, as
                     // do offline opens and appends (C1, C12).
                     delay = FIRST_RETRY;
@@ -85,10 +79,10 @@ impl Committer {
             let retry = matches!(outcome, Outcome::Retrying);
             self.finish(&job, outcome);
             if !retry {
-                self.kernel.invalidate_attrs(entry);
+                self.space.kernel.invalidate_attrs(entry);
             }
             if retry {
-                let window = self.remote.link.remaining().unwrap_or_default();
+                let window = self.space.remote.link.remaining().unwrap_or_default();
                 tokio::time::sleep(window.max(delay)).await;
                 delay = (delay * 2).min(LAST_RETRY);
             }
@@ -98,8 +92,13 @@ impl Committer {
     /// The entry's next job, once its latest seal has been quiet a while or an fsync asks.
     async fn next(&self, entry: EntryId) -> Option<Job> {
         loop {
-            let urged = self.journal.urged.notified();
-            let Some(quiet) = self.inodes.local(entry, false, |local| local.quiet()).flatten() else {
+            let urged = self.space.journal.urged.notified();
+            let Some(quiet) = self
+                .space
+                .inodes
+                .local(entry, false, |local| local.quiet())
+                .flatten()
+            else {
                 return self.take(entry);
             };
             let _ = tokio::time::timeout(quiet, urged).await;
@@ -122,8 +121,8 @@ impl Committer {
         while let Some(chunk) = chunks.recv().await {
             let (chunk, bytes) = chunk?;
             // Reading the file back then needs no download of what was just uploaded.
-            if !self.cache.contains(&chunk.id)
-                && let Err(err) = self.cache.put(&chunk.id, &bytes)
+            if !self.space.cache.contains(&chunk.id)
+                && let Err(err) = self.space.cache.put(&chunk.id, &bytes)
             {
                 tracing::warn!(%err, "could not cache a chunk");
             }
@@ -131,6 +130,7 @@ impl Committer {
                 && !base.contains(&chunk.id)
                 && uploaded.insert(chunk.id)
                 && let Err(error) = self
+                    .space
                     .remote
                     .put_chunk(&record.request_id, chunk.id, Bytes::from(bytes))
                     .await
@@ -142,7 +142,7 @@ impl Committer {
         // A splitter that died early would otherwise commit a truncated file.
         splitter.await.map_err(io::Error::other)?;
         // A lost answer may have landed before revocation made a retry's uploads fail.
-        let committed = self.remote.commit(&record, refs).await;
+        let committed = self.space.remote.commit(&record, refs).await;
         match (upload_error, committed) {
             (_, Ok(version)) => Ok(version),
             (Some(upload), Err(Error::Api(commit)))
@@ -183,14 +183,14 @@ where
 impl Committer {
     /// The entry's latest sealed write still to commit. `None` ends its committer.
     pub(super) fn take(&self, entry: EntryId) -> Option<Job> {
-        let job = self.inodes.local(entry, false, |local| {
+        let job = self.space.inodes.local(entry, false, |local| {
             let Some((record, _)) = &local.pending else {
                 local.committing = false;
                 return None;
             };
             let job = Job {
                 record: record.clone(),
-                sealed: self.journal.sealed_path(entry, record.seal),
+                sealed: self.space.journal.sealed_path(entry, record.seal),
             };
             (local.reading, local.due) = (Some(job.record.seal), None);
             Some(job)
@@ -212,7 +212,7 @@ impl Committer {
             let (committed, version) = match outcome {
                 Outcome::Committed(version) => (true, version),
                 Outcome::Rejected => {
-                    self.journal.reject(job);
+                    self.space.journal.reject(job);
                     local.refused = local.settles;
                     (false, None)
                 }
@@ -225,7 +225,7 @@ impl Committer {
             let latest = local.pending.as_ref().map(|(record, _)| record.seal) == Some(seal);
             if settled && latest {
                 local.pending = None;
-                let _ = fs::remove_file(self.journal.record_path(entry));
+                let _ = fs::remove_file(self.space.journal.record_path(entry));
             }
             // Settled, or replaced by a newer seal: nothing reads this sealed copy any more. It goes
             // after the record, which recovery would otherwise find naming no copy (C4a).
@@ -233,7 +233,7 @@ impl Committer {
                 let _ = fs::remove_file(&job.sealed);
             }
             let switched = settled && state.settle(version.as_ref(), job.record.mtime_ms);
-            Some(((), switched))
+            Some(switched)
         });
         // This client removed the entry meanwhile, and its local state with it (C10).
         if settled.is_none() {
