@@ -1,0 +1,4 @@
+# Timing measurements are only meaningful on a quiet box, so they run with no other test.
+[[profile.default.overrides]]
+filter = 'test(an_upload_answers_the_same_whether_or_not_the_store_has_the_bytes)'
+threads-required = "num-test-threads"
