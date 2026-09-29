@@ -11,7 +11,6 @@ use support::{Fixture, SPACE, alice, bob};
 /// path limit.
 // contract: S3
 #[test]
-#[ignore = "ROUND28: child-path validation leaks an inaccessible parent path's length"]
 fn an_inaccessible_parent_id_reveals_no_hidden_path_length() {
     let mut fx = Fixture::new();
     let root = fx.stat(&alice(), "").unwrap();

@@ -124,6 +124,22 @@ impl Call<'_> {
         let version = self.add_version(&entry, chunks, mtime_ms.unwrap_or(self.now_ms))?;
         self.db
             .prepare_cached(
+                "DELETE FROM unreferenced WHERE chunk IN (
+                    SELECT json_extract(chunk.value, '$.id')
+                    FROM versions version
+                    JOIN manifests manifest ON manifest.hash = version.manifest,
+                         json_each(manifest.chunks) chunk
+                    WHERE version.id = ?1
+                    EXCEPT
+                    SELECT json_extract(chunk.value, '$.id')
+                    FROM versions version
+                    JOIN manifests manifest ON manifest.hash = version.manifest,
+                         json_each(manifest.chunks) chunk
+                    WHERE version.id = ?2)",
+            )?
+            .execute(params![version.id.0, base.map(|base| base.0)])?;
+        self.db
+            .prepare_cached(
                 "INSERT INTO commits (principal, request_id, entry, version, at_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
             )?
             .execute(params![self.who.user, request_id, entry.id.0, version.id.0, self.now_ms])?;

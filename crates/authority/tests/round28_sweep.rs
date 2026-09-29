@@ -62,7 +62,6 @@ async fn delete_space(lab: &Lab, alice: &str, space: &str) {
 /// at the preceding collection.
 // contract: S4, S7
 #[tokio::test]
-#[ignore = "ROUND28: a stale upload-only timestamp lets collection delete a freshly granted chunk"]
 async fn a_chunk_committed_between_collections_outlives_its_fresh_grant() {
     let lab = Lab::start_with_ttl(Duration::from_secs(5)).await;
     let alice = lab.user("alice");
