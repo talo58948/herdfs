@@ -49,7 +49,6 @@ fn replace_below_held(lab: &Lab, trial: usize, moved: bool) -> Result<(std::io::
 /// offline after another client moves the directory. Keeping the directory fixed is the control.
 // contract: C7, C12
 #[test]
-#[ignore = "ROUND33: moving a held directory strands its cached children for offline writes"]
 fn an_offline_replacement_below_a_relocated_held_directory_lands() -> Result<()> {
     let Some(lab) = two_clients()? else {
         return Ok(());
