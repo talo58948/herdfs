@@ -58,6 +58,9 @@ impl Model {
             node.history = kept.into_iter().map(|(_, id)| id).collect();
             pruned.extend(gone.into_iter().map(|(_, id)| id));
         }
+        for (_, at_ms) in self.uploads.values_mut() {
+            *at_ms = (*at_ms).min(now_ms);
+        }
         self.uploads
             .retain(|_, (_, at_ms)| *at_ms > now_ms - policy.grace_ms);
         self.forget(&pruned);
