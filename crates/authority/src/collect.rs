@@ -1,6 +1,6 @@
 //! Collection: pruning versions outside retention, and the chunks still live.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use herdfs_core::{ChunkId, ChunkRef};
 use rusqlite::{Connection, params};
@@ -22,8 +22,6 @@ pub struct Policy {
 /// What one collection pruned, and what it left live.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Collected {
-    /// When the preceding collection began, or when this database was created.
-    pub previous_ms: i64,
     pub pruned: usize,
     /// Chunk lists no remaining version used.
     pub dropped: usize,
@@ -55,11 +53,6 @@ impl Authority {
     /// ids that nothing needs, and returns the chunks still live, across every space.
     pub fn collect(&mut self, now_ms: i64, policy: &Policy) -> anyhow::Result<Collected> {
         let tx = self.db.transaction()?;
-        let previous_ms = tx.query_row(
-            "SELECT coalesce(started_ms, created_ms) FROM collection WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )?;
         let pruned = tx.execute(PRUNE, params![policy.versions, now_ms - policy.max_age_ms])?;
         let dropped = tx.execute(
             "DELETE FROM manifests WHERE hash NOT IN (SELECT manifest FROM versions)",
@@ -75,7 +68,6 @@ impl Authority {
         live.extend(uploaded(&tx, i64::MIN)?);
         tx.commit()?;
         Ok(Collected {
-            previous_ms,
             pruned,
             dropped,
             retained,
@@ -83,42 +75,46 @@ impl Authority {
         })
     }
 
-    /// Records the completed collection and `chunks` as unreferenced since `since_ms` unless
-    /// they already were, forgets the rest, and returns since when each has been unreferenced.
-    pub(crate) fn unreferenced(
+    /// Records a completed collection and returns chunks whose unreferenced grace has elapsed.
+    pub(crate) fn expired(
         &mut self,
-        chunks: &BTreeSet<ChunkId>,
-        started_ms: i64,
-        since_ms: i64,
-    ) -> anyhow::Result<BTreeMap<ChunkId, i64>> {
+        unretained: &BTreeSet<ChunkId>,
+        started: i64,
+        grace_ms: i64,
+        ttl_ms: i64,
+    ) -> anyhow::Result<BTreeSet<ChunkId>> {
         let tx = self.db.transaction()?;
-        tx.execute("UPDATE collection SET started_ms = ?1 WHERE id = 1", [started_ms])?;
-        let mut known = BTreeMap::new();
-        let mut query = tx.prepare("SELECT chunk, since_ms FROM unreferenced")?;
-        for row in query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))? {
-            let (chunk, since) = row?;
-            known.insert(chunk.parse::<ChunkId>()?, since);
-        }
+        let previous = tx.query_row(
+            "SELECT coalesce(started_ms, created_ms) FROM collection WHERE id = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let floor = started - grace_ms + ttl_ms;
+        let since = if previous > started {
+            floor
+        } else {
+            previous.max(floor)
+        };
+        let chunks = serde_json::to_string(unretained)?;
+        tx.execute("UPDATE collection SET started_ms = ?1 WHERE id = 1", [started])?;
+        tx.execute(
+            "DELETE FROM unreferenced
+             WHERE since_ms > ?2 OR chunk NOT IN (SELECT value FROM json_each(?1))",
+            params![chunks, started],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO unreferenced (chunk, since_ms)
+             SELECT value, ?2 FROM json_each(?1)",
+            params![chunks, since],
+        )?;
+        let mut query = tx.prepare("SELECT chunk FROM unreferenced WHERE since_ms <= ?1")?;
+        let rows = query.query_map([started - grace_ms], |row| row.get::<_, String>(0))?;
+        let expired = rows
+            .map(|chunk| Ok(chunk?.parse()?))
+            .collect::<anyhow::Result<_>>()?;
         drop(query);
-        let since: BTreeMap<_, _> = chunks
-            .iter()
-            .map(|id| {
-                let at = known
-                    .get(id)
-                    .copied()
-                    .filter(|at| *at <= started_ms)
-                    .unwrap_or(since_ms);
-                (*id, at)
-            })
-            .collect();
-        tx.execute("DELETE FROM unreferenced", [])?;
-        let mut insert = tx.prepare("INSERT INTO unreferenced (chunk, since_ms) VALUES (?1, ?2)")?;
-        for (id, at) in &since {
-            insert.execute(params![id.to_string(), at])?;
-        }
-        drop(insert);
         tx.commit()?;
-        Ok(since)
+        Ok(expired)
     }
 
     /// Chunks uploaded at or after `since_ms`.

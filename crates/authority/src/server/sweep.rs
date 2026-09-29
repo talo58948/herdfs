@@ -81,23 +81,17 @@ impl Server {
             .filter(|id| !collected.retained.contains(id))
             .collect();
         let ttl_ms = i64::try_from(self.grant_ttl.as_millis()).unwrap_or(i64::MAX);
-        let floor = started - policy.grace_ms + ttl_ms;
-        let since_ms = if collected.previous_ms > started {
-            floor
-        } else {
-            collected.previous_ms.max(floor)
-        };
-        let since = self
+        let grace_ms = policy.grace_ms;
+        let expired = self
             .run(move |authority, _| {
                 authority
-                    .unreferenced(&unreferenced, started, since_ms)
+                    .expired(&unreferenced, started, grace_ms, ttl_ms)
                     .map_err(unavailable)
             })
             .await?;
-        let expired = |id: &ChunkId| since.get(id).is_some_and(|at| *at <= started - policy.grace_ms);
         let mut doomed: Vec<_> = stored
             .into_iter()
-            .filter(|(id, _)| !collected.live.contains(id) && expired(id))
+            .filter(|(id, _)| !collected.live.contains(id) && expired.contains(id))
             .collect();
         // Chunks uploaded since the collection began are live again; no upload runs meanwhile.
         let _deleting = self.uploading.write().await;
