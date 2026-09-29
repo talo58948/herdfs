@@ -10,7 +10,6 @@ use support::{Fixture, alice, bob};
 /// version stays hidden and the current head stays readable as controls.
 // contract: S8
 #[test]
-#[ignore = "ROUND40: a re-granted reader cannot read their own retained version"]
 fn a_regranted_author_can_read_their_retained_version() {
     let mut failures = 0;
     for trial in 0..3 {

@@ -91,15 +91,22 @@ impl Model {
                     self.readable_after(space, path, who),
                 );
                 let mut versions = self.history(node);
-                versions.retain(|version| node.history.last() == Some(&version.id) || version.id.0 > after);
+                versions.retain(|version| {
+                    node.history.last() == Some(&version.id)
+                        || version.id.0 > after
+                        || version.author == who.user
+                });
                 assert_eq!(*reply, Response::History { versions });
-                // contract: S8 — history before the caller's access stays hidden, except the head.
+                // contract: S8 — history before the caller's access stays hidden, except the head
+                // and the caller's own versions.
                 let Response::History { versions } = reply else {
                     unreachable!()
                 };
-                let hidden = versions
-                    .iter()
-                    .find(|version| node.history.last() != Some(&version.id) && version.id.0 <= after);
+                let hidden = versions.iter().find(|version| {
+                    node.history.last() != Some(&version.id)
+                        && version.id.0 <= after
+                        && version.author != who.user
+                });
                 assert!(hidden.is_none(), "{} saw {hidden:?}", who.user);
             }
             Request::Purge { space, path } => {

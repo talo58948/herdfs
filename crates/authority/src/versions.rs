@@ -139,7 +139,7 @@ impl Call<'_> {
         let entry = self.entry(space, path)?;
         let after = self.readable_after(space, path)?;
         let mut versions = self.versions(entry.id)?;
-        versions.retain(|version| entry.head == Some(version.id) || version.id.0 > after as u64);
+        versions.retain(|version| self.visible(&entry, version, after));
         Ok(Response::History { versions })
     }
 
@@ -186,14 +186,19 @@ impl Call<'_> {
     }
 
     /// `id` as a version of `entry` the caller may see, or `None` just as if
-    /// it did not exist: under S8 a version older than the caller's access
-    /// to the entry's path is hidden, except the head.
+    /// it did not exist.
     fn visible_version(&self, space: &str, entry: &Entry, id: VersionId) -> Result<Option<Version>> {
         let Some(version) = self.version_of(entry, id)? else {
             return Ok(None);
         };
         let after = self.readable_after(space, &entry.path)?;
-        Ok((entry.head == Some(version.id) || version.id.0 > after as u64).then_some(version))
+        Ok(self.visible(entry, &version, after).then_some(version))
+    }
+
+    /// S8: a version older than the caller's access to the entry's path (`after`) is hidden,
+    /// except the head and the caller's own versions.
+    fn visible(&self, entry: &Entry, version: &Version, after: i64) -> bool {
+        entry.head == Some(version.id) || version.id.0 > after as u64 || version.author == self.who.user
     }
 
     /// The chunks of `base`. A base that is gone, of another entry, or hidden
