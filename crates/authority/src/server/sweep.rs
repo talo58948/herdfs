@@ -93,10 +93,11 @@ impl Server {
             .into_iter()
             .filter(|(id, _)| !collected.live.contains(id) && expired.contains(id))
             .collect();
-        // Chunks uploaded since the collection began are live again; no upload runs meanwhile.
+        // Chunks recorded after collection are live again; no upload runs meanwhile.
         let _deleting = self.uploading.write().await;
+        let upload_mark = collected.upload_mark;
         let fresh = self
-            .run(move |authority, _| authority.uploaded_since(started).map_err(unavailable))
+            .run(move |authority, _| authority.uploaded_after(upload_mark).map_err(unavailable))
             .await?;
         doomed.retain(|(id, _)| !fresh.contains(id));
         for (id, _) in &doomed {

@@ -29,7 +29,12 @@ pub struct Collected {
     pub(crate) retained: BTreeSet<ChunkId>,
     /// Every chunk of a retained version anywhere, or of a recent upload.
     pub live: BTreeSet<ChunkId>,
+    pub upload_mark: UploadMark,
 }
+
+/// The newest upload a collection saw; later uploads are fresh whatever the clock says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UploadMark(i64);
 
 /// Versions past the newest `?1` of their entry, created at or before `?2`, and not its head.
 const PRUNE: &str = "DELETE FROM versions WHERE id IN (
@@ -65,19 +70,21 @@ impl Authority {
             [],
         )?;
         tx.execute(STALE_UPLOADS, [now_ms - policy.grace_ms])?;
+        let upload_mark = tx.query_row("SELECT coalesce(max(seq), 0) FROM uploads", [], |row| row.get(0))?;
         let forgotten = now_ms
             .saturating_sub(policy.max_age_ms.max(REQUEST_MEMORY_MS))
             .saturating_sub(policy.grace_ms);
         tx.execute("DELETE FROM commits WHERE at_ms < ?1", [forgotten])?;
         let retained = listed(&tx)?;
         let mut live = retained.clone();
-        live.extend(uploaded(&tx, i64::MIN)?);
+        live.extend(uploaded(&tx)?);
         tx.commit()?;
         Ok(Collected {
             pruned,
             dropped,
             retained,
             live,
+            upload_mark: UploadMark(upload_mark),
         })
     }
 
@@ -123,9 +130,13 @@ impl Authority {
         Ok(expired)
     }
 
-    /// Chunks uploaded at or after `since_ms`.
-    pub fn uploaded_since(&mut self, since_ms: i64) -> anyhow::Result<BTreeSet<ChunkId>> {
-        uploaded(&self.db, since_ms)
+    /// Chunks recorded after `mark`.
+    pub fn uploaded_after(&mut self, mark: UploadMark) -> anyhow::Result<BTreeSet<ChunkId>> {
+        let mut query = self
+            .db
+            .prepare_cached("SELECT chunk FROM uploads WHERE seq > ?1")?;
+        let rows = query.query_map([mark.0], |row| row.get::<_, String>(0))?;
+        rows.map(|chunk| Ok(chunk?.parse()?)).collect()
     }
 }
 
@@ -140,8 +151,8 @@ fn listed(db: &Connection) -> anyhow::Result<BTreeSet<ChunkId>> {
     Ok(live)
 }
 
-fn uploaded(db: &Connection, since_ms: i64) -> anyhow::Result<BTreeSet<ChunkId>> {
-    let mut query = db.prepare_cached("SELECT chunk FROM uploads WHERE at_ms >= ?1")?;
-    let rows = query.query_map([since_ms], |row| row.get::<_, String>(0))?;
+fn uploaded(db: &Connection) -> anyhow::Result<BTreeSet<ChunkId>> {
+    let mut query = db.prepare_cached("SELECT chunk FROM uploads")?;
+    let rows = query.query_map([], |row| row.get::<_, String>(0))?;
     rows.map(|chunk| Ok(chunk?.parse()?)).collect()
 }
