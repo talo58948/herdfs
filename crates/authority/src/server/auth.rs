@@ -69,7 +69,19 @@ impl Verifier {
         // Fails for `alg: none`, which jsonwebtoken does not know.
         let header = decode_header(token).map_err(|error| unauthenticated(error.to_string()))?;
         let kid = header.kid.ok_or_else(|| unauthenticated("token has no key id"))?;
-        let key = self.key(&kid).await?;
+        if let Ok(principal) = self.validate(token, &kid).await {
+            if let Ok(_refreshing) = self.refreshing.try_lock() {
+                self.refresh().await;
+            }
+            return Ok(principal);
+        }
+        let _refreshing = self.refreshing.lock().await;
+        self.refresh().await;
+        self.validate(token, &kid).await
+    }
+
+    async fn validate(&self, token: &str, kid: &str) -> Result<Principal, proto::Error> {
+        let key = self.key(kid).await?;
         // Pinning the key's family stops a token from picking a weaker algorithm.
         let mut validation = Validation::new_for_family(key.family());
         validation.set_issuer(&[&self.issuer]);
@@ -86,20 +98,6 @@ impl Verifier {
     }
 
     async fn key(&self, kid: &str) -> Result<DecodingKey, proto::Error> {
-        let (usable, due, known) = {
-            let keys = self.keys.lock().await;
-            (
-                keys.fetched.is_some_and(|at| at.elapsed() < TRUST_AT_MOST),
-                keys.tried.is_none_or(|at| at.elapsed() >= REFETCH_EVERY),
-                keys.set.find(kid).is_some(),
-            )
-        };
-        if !usable || !known {
-            let _refreshing = self.refreshing.lock().await;
-            self.refresh().await;
-        } else if due && let Ok(_refreshing) = self.refreshing.try_lock() {
-            self.refresh().await;
-        }
         let keys = self.keys.lock().await;
         if keys.fetched.is_none_or(|at| at.elapsed() >= TRUST_AT_MOST) {
             let message = "the issuer's keys could not be fetched";
@@ -208,7 +206,7 @@ mod tests {
         let notified = started.notified();
         let refreshing = {
             let verifier = Arc::clone(&verifier);
-            tokio::spawn(async move { verifier.key("k1").await })
+            tokio::spawn(async move { verifier.refresh().await })
         };
         tokio::time::timeout(Duration::from_secs(1), notified)
             .await
@@ -250,8 +248,10 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, issuer).await.unwrap() });
         let verifier = Verifier::new(url, "audience".into());
 
+        verifier.refresh().await;
         assert!(verifier.key("k1").await.is_err());
         available.store(true, Ordering::Relaxed);
+        verifier.refresh().await;
         verifier.key("k1").await.unwrap();
     }
 }
