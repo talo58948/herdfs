@@ -127,7 +127,7 @@ async fn sent_to_retention(
         };
         std::future::ready(answer)
     };
-    let sent = commit::anew(record, attempt).await;
+    let sent = commit::commit_without_base(record, attempt).await;
     (bases.into_inner().unwrap(), sent)
 }
 

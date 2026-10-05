@@ -20,6 +20,7 @@ use crate::fs::Inodes;
 
 mod commit;
 mod local;
+mod rejected;
 
 pub use commit::Committer;
 pub use local::Local;
@@ -88,7 +89,7 @@ impl Journal {
             }
             file => Arc::new(file?),
         };
-        inodes.local(record.entry, true, |local| local.recovered(self, record, file));
+        inodes.make_local(record.entry, |local| local.recovered(self, record, file));
         Ok(vec![path.to_owned(), sealed])
     }
 

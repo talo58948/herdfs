@@ -47,6 +47,11 @@ impl Authority {
     pub fn open(db: &Path) -> anyhow::Result<Self> {
         let db = Connection::open(db)?;
         let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        anyhow::ensure!(
+            version <= db::SCHEMA_VERSION,
+            "database schema version {version} is newer than supported version {}",
+            db::SCHEMA_VERSION
+        );
         if version < db::SCHEMA_VERSION {
             db.execute_batch(db::DROP_ALL)?;
         }
