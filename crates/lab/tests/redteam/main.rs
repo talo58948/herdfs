@@ -86,9 +86,11 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
+use std::thread;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result, ensure};
+use herdfs_core::proto::Version;
 use herdfs_lab::{Lab, LabConfig, Profile, Strategy};
 
 /// T_vis plus a margin for the test's own scheduling.
@@ -104,6 +106,18 @@ fn two_clients() -> Result<Option<Lab>> {
     let config = LabConfig::default()
         .client("a", "alice", &[], Profile::Lan, Strategy::Stream)
         .client("b", "bob", &[], Profile::Lan, Strategy::Stream);
+    Lab::start(config).map(Some)
+}
+
+fn cache_lab(cache_bytes: u64) -> Result<Option<Lab>> {
+    if let Some(reason) = herdfs_lab::missing_binaries() {
+        eprintln!("skipped: {reason}");
+        return Ok(None);
+    }
+    let config = LabConfig::default()
+        .client("a", "alice", &[], Profile::Lan, Strategy::Stream)
+        .client("b", "bob", &[], Profile::Lan, Strategy::Stream)
+        .cache_bytes("b", cache_bytes);
     Lab::start(config).map(Some)
 }
 
@@ -128,6 +142,40 @@ fn read_at(file: &File, off: u64, len: usize) -> io::Result<Vec<u8>> {
     let mut bytes = vec![0; len];
     file.read_exact_at(&mut bytes, off)?;
     Ok(bytes)
+}
+
+fn stat_count(lab: &Lab, name: &str) -> Result<u64> {
+    lab.stats("b")?[name]
+        .as_u64()
+        .with_context(|| format!("stats count {name}"))
+}
+
+fn chunk_starts(version: &Version, bytes: &[u8], count: usize) -> Vec<(u64, u8)> {
+    let mut offset = 0_u64;
+    version
+        .chunks
+        .iter()
+        .take(count)
+        .map(|chunk| {
+            let start = (offset, bytes[offset as usize]);
+            offset += u64::from(chunk.len);
+            start
+        })
+        .collect()
+}
+
+fn read_starts(file: &File, starts: &[(u64, u8)]) -> Result<()> {
+    thread::scope(|scope| {
+        let reads = starts
+            .iter()
+            .map(|&(offset, expected)| scope.spawn(move || (read_at(file, offset, 1), expected)))
+            .collect::<Vec<_>>();
+        for read in reads {
+            let (bytes, expected) = read.join().map_err(|_| anyhow::anyhow!("read thread panicked"))?;
+            ensure!(bytes? == [expected], "wrong byte at a chunk boundary");
+        }
+        Ok(())
+    })
 }
 
 fn random_bytes(len: usize) -> Vec<u8> {
