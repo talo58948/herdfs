@@ -86,19 +86,18 @@ impl Verifier {
     }
 
     async fn key(&self, kid: &str) -> Result<DecodingKey, proto::Error> {
-        let (usable, due) = {
+        let (usable, due, known) = {
             let keys = self.keys.lock().await;
             (
                 keys.fetched.is_some_and(|at| at.elapsed() < TRUST_AT_MOST),
                 keys.tried.is_none_or(|at| at.elapsed() >= REFETCH_EVERY),
+                keys.set.find(kid).is_some(),
             )
         };
-        if due && usable {
-            if let Ok(_refreshing) = self.refreshing.try_lock() {
-                self.refresh().await;
-            }
-        } else if !usable {
+        if !usable || !known {
             let _refreshing = self.refreshing.lock().await;
+            self.refresh().await;
+        } else if due && let Ok(_refreshing) = self.refreshing.try_lock() {
             self.refresh().await;
         }
         let keys = self.keys.lock().await;

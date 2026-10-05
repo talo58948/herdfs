@@ -130,7 +130,6 @@ async fn rotation_trial() -> StatusCode {
 /// a request for an already cached key remains the nonblocking control.
 // contract: S5
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "ROUND50: concurrent rotated-key tokens fail instead of joining the JWKS refresh"]
 async fn concurrent_rotated_key_requests_wait_for_the_same_refresh() {
     let (first, second, third) = tokio::join!(rotation_trial(), rotation_trial(), rotation_trial());
     assert_eq!([first, second, third], [StatusCode::OK; 3]);
