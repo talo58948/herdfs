@@ -42,7 +42,7 @@ The authority keeps each entry's last N versions, head included, plus any younge
 2. It deletes chunk lists nothing retained uses, and a commit's upload records once its newest upload is older than the grace, so a file that takes longer than the grace to upload keeps its first chunks.
 3. It sweeps the bucket: a chunk object that no retained version or recent upload has referenced for `--gc-grace` (1 h), counted from the last collection that found it referenced, is deleted. The authority persists that collection time across restarts after a successful bucket listing. While the collector runs each interval this meets the grace-plus-interval bound; after downtime or a stall, deletion completes within the grant TTL plus one interval of collection resuming.
 
-A collection corrects upload times later than itself to its own time, so after a clock that ran ahead is corrected they age from the first collection, and the grace-plus-interval bound holds from the correction.
+A collection corrects upload and version times later than itself to its own time, so after a clock that ran ahead is corrected they age from the first collection, and the grace-plus-interval bound holds from the correction.
 
 The grace period must be at least twice the grant TTL and at least the collection interval plus the grant TTL, and exceed the time between one upload and the next or the commit, so in-flight uploads and outstanding URLs never race the sweep. `Purge` and `DeleteSpace` make history and whole spaces eligible at once. Chunks are shared across files, spaces and forks, so the live set is global.
 

@@ -43,6 +43,9 @@ impl Model {
     /// Prunes as the authority must, returning how many versions went.
     fn collect(&mut self, now_ms: i64, policy: &Policy) -> usize {
         let (cutoff, keep) = (now_ms - policy.max_age_ms, policy.versions as usize);
+        for version in self.versions.values_mut() {
+            version.created_ms = version.created_ms.min(now_ms);
+        }
         let versions = &self.versions;
         let mut pruned = Vec::new();
         for node in self

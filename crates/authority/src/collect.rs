@@ -53,8 +53,12 @@ impl Authority {
     /// ids that nothing needs, and returns the chunks still live, across every space.
     pub fn collect(&mut self, now_ms: i64, policy: &Policy) -> anyhow::Result<Collected> {
         let tx = self.db.transaction()?;
-        // A clock that ran ahead and was corrected left these in the future: they age from now.
+        // A corrected fast clock left these in the future: they age from this collection.
         tx.execute("UPDATE uploads SET at_ms = ?1 WHERE at_ms > ?1", [now_ms])?;
+        tx.execute(
+            "UPDATE versions SET created_ms = ?1 WHERE created_ms > ?1",
+            [now_ms],
+        )?;
         let pruned = tx.execute(PRUNE, params![policy.versions, now_ms - policy.max_age_ms])?;
         let dropped = tx.execute(
             "DELETE FROM manifests WHERE hash NOT IN (SELECT manifest FROM versions)",

@@ -70,7 +70,6 @@ fn old_chunks_live(forward_step: bool, trial: usize) -> usize {
 /// uploads do; regular collections must drop them after the retention age, while the head stays.
 // contract: C14, C15, S7
 #[test]
-#[ignore = "ROUND42: corrected future version timestamps never age out"]
 fn corrected_future_versions_leave_retention_on_schedule() {
     let mut failures = 0;
     for trial in 0..3 {
