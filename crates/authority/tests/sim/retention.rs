@@ -64,6 +64,9 @@ impl Model {
         for (_, at_ms) in self.uploads.values_mut() {
             *at_ms = (*at_ms).min(now_ms);
         }
+        for (.., at_ms) in self.commits.values_mut() {
+            *at_ms = (*at_ms).min(now_ms);
+        }
         self.uploads
             .retain(|_, (_, at_ms)| *at_ms > now_ms - policy.grace_ms);
         self.forget(&pruned);

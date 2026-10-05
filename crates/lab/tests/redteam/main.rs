@@ -109,6 +109,16 @@ fn save(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
+fn wait_pending(lab: &Lab) -> Result<()> {
+    for _ in 0..200 {
+        if lab.stats("b")?["pending_commits"] == 1 {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    anyhow::bail!("offline write was not journaled")
+}
+
 fn read_at(file: &File, off: u64, len: usize) -> io::Result<Vec<u8>> {
     let mut bytes = vec![0; len];
     file.read_exact_at(&mut bytes, off)?;
