@@ -243,3 +243,27 @@ fn an_older_database_is_recreated_on_open() {
     // The old versions table has no manifest column, so only a recreated one takes the commit.
     assert!(call(commit).is_ok());
 }
+
+#[test]
+fn a_newer_database_is_not_downgraded() {
+    // contract: C4b
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("authority.db");
+    let newer = rusqlite::Connection::open(&db).unwrap();
+    newer
+        .execute_batch("CREATE TABLE sentinel (value TEXT); PRAGMA user_version = 999;")
+        .unwrap();
+    drop(newer);
+
+    let error = match Authority::open(&db) {
+        Ok(_) => panic!("newer database was opened"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("newer than supported"), "{error}");
+    let newer = rusqlite::Connection::open(&db).unwrap();
+    let version: i64 = newer
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 999);
+    assert!(newer.prepare("SELECT value FROM sentinel").is_ok());
+}

@@ -81,20 +81,8 @@ impl Call<'_> {
         mtime_ms: Option<i64>,
     ) -> Result<Response> {
         self.require_space(space)?;
-        if let Some((first, version)) = self.committed(request_id)? {
-            if first != entry {
-                return Err(refuse(ErrorCode::Invalid, "request id reused for another entry"));
-            }
-            let entry = self.entry_by_id(space, entry)?;
-            if let Some(version) = self.version_of(&entry, version)? {
-                return Ok(Response::Version { version });
-            }
-            return match self.may(space, &entry.path, Perm::Read)? {
-                true => Ok(Response::Version {
-                    version: self.head(&entry)?,
-                }),
-                false => Ok(Response::Done),
-            };
+        if let Some(response) = self.replayed_commit(space, entry, request_id)? {
+            return Ok(response);
         }
         let entry = self.entry_by_id(space, entry)?;
         self.require(space, &entry.path, Perm::Write)?;
@@ -108,17 +96,7 @@ impl Call<'_> {
             Some(base) => self.base_chunks(space, &entry, base)?,
             None => HashSet::new(),
         };
-        let distinct: HashSet<_> = chunks.iter().map(|chunk| (chunk.id, chunk.len)).collect();
-        let mut clear = self
-            .db
-            .prepare_cached("DELETE FROM unreferenced WHERE chunk = ?1")?;
-        for (id, len) in distinct.difference(&base_chunks) {
-            if self.uploaded_len(*id)? != Some(*len) {
-                let message = format!("chunk {id} of {len} bytes is neither in the base nor uploaded by you");
-                return Err(refuse(ErrorCode::Invalid, message));
-            }
-            clear.execute([id.to_string()])?;
-        }
+        self.require_chunk_provenance(chunks, &base_chunks)?;
         if guarded && entry.head != base {
             return Err(refuse(
                 ErrorCode::Conflict,
@@ -132,6 +110,46 @@ impl Call<'_> {
             )?
             .execute(params![self.who.user, request_id, entry.id.0, version.id.0, self.now_ms])?;
         Ok(Response::Version { version })
+    }
+
+    fn replayed_commit(&self, space: &str, entry: EntryId, request_id: &str) -> Result<Option<Response>> {
+        let Some((first, version)) = self.committed(request_id)? else {
+            return Ok(None);
+        };
+        if first != entry {
+            return Err(refuse(ErrorCode::Invalid, "request id reused for another entry"));
+        }
+        let entry = self.entry_by_id(space, entry)?;
+        if let Some(version) = self.version_of(&entry, version)? {
+            return Ok(Some(Response::Version { version }));
+        }
+        let response = if self.may(space, &entry.path, Perm::Read)? {
+            Response::Version {
+                version: self.head(&entry)?,
+            }
+        } else {
+            Response::Done
+        };
+        Ok(Some(response))
+    }
+
+    fn require_chunk_provenance(
+        &self,
+        chunks: &[ChunkRef],
+        base_chunks: &HashSet<(ChunkId, u32)>,
+    ) -> Result<()> {
+        let distinct: HashSet<_> = chunks.iter().map(|chunk| (chunk.id, chunk.len)).collect();
+        let mut clear = self
+            .db
+            .prepare_cached("DELETE FROM unreferenced WHERE chunk = ?1")?;
+        for (id, len) in distinct.difference(base_chunks) {
+            if self.uploaded_len(*id)? != Some(*len) {
+                let message = format!("chunk {id} of {len} bytes is neither in the base nor uploaded by you");
+                return Err(refuse(ErrorCode::Invalid, message));
+            }
+            clear.execute([id.to_string()])?;
+        }
+        Ok(())
     }
 
     pub(crate) fn history(&self, space: &str, path: &SpacePath) -> Result<Response> {

@@ -35,7 +35,7 @@ struct Args {
     #[arg(long, default_value_t = 30)]
     retain_days: u32,
     /// Seconds between collections.
-    #[arg(long, default_value_t = 600)]
+    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..))]
     gc_every: u64,
     /// Seconds an unreferenced chunk must age; at least twice the grant TTL and interval plus TTL.
     #[arg(long, default_value_t = 3600)]

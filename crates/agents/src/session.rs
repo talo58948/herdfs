@@ -125,15 +125,15 @@ pub(crate) async fn new_prompt(dir: &Path) -> Option<Stamp> {
 }
 
 /// Marks the session `running`, once its directory proves to be inside the host's.
-pub(crate) async fn claim(dir: &Path) -> io::Result<Session> {
-    let session = session(dir).await?;
+pub(crate) async fn claim(mount: &Path, dir: &Path) -> io::Result<Session> {
+    let session = session(mount, dir).await?;
     set_status(&session, "running").await?;
     Ok(session)
 }
 
 /// Marks the session failed if a previous runner left it `running`.
-pub(crate) async fn recover(dir: &Path) -> io::Result<()> {
-    let session = session(dir).await?;
+pub(crate) async fn recover(mount: &Path, dir: &Path) -> io::Result<()> {
+    let session = session(mount, dir).await?;
     if read(&session, "status")
         .await?
         .is_some_and(|status| status.trim() == "running")
@@ -184,16 +184,12 @@ async fn open(session: &Session, name: &str, flags: OFlags) -> io::Result<File> 
     Ok(file)
 }
 
-async fn session(dir: &Path) -> io::Result<Session> {
-    // `<mount>/.agents/<host>/<session>`: walked from the mount, so no component may be a symlink.
-    let root = dir
-        .ancestors()
-        .nth(3)
-        .ok_or_else(|| io::Error::other("session is not below a host directory"))?;
+async fn session(mount: &Path, dir: &Path) -> io::Result<Session> {
+    // Walked from the canonical mount, so no component may be a symlink.
     let relative = dir
-        .strip_prefix(root)
+        .strip_prefix(mount)
         .map_err(|_| io::Error::other("session is not below its mount"))?;
-    let file = open_below(root, relative).await?;
+    let file = open_below(mount, relative).await?;
     Ok(Session {
         dir: dir.to_owned(),
         file,

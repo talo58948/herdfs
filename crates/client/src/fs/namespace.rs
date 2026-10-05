@@ -86,7 +86,7 @@ impl Space {
         let journaled = match change.mtime_ms {
             Some(mtime) => {
                 let set = |local: &mut Local| local.set_mtime(&self.journal, entry_id, mtime);
-                self.inodes.local(entry_id, false, set).unwrap_or(Ok(false))?
+                self.inodes.local(entry_id, set).unwrap_or(Ok(false))?
             }
             None => false,
         };
@@ -143,7 +143,7 @@ impl Space {
         let path = &removed.path;
         // The removed entry's changes are moot: deletion wins (C10), for it alone (C4a).
         let discard = |local: &mut Local| local.discard(&self.journal, removed.id);
-        self.inodes.local(removed.id, false, discard);
+        self.inodes.local(removed.id, discard);
         self.inodes.stale(path);
         // Another entry held at that path had moved away: `Locate` tells where (C7).
         self.inodes.unbind(path);

@@ -5,7 +5,7 @@
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use std::{collections::HashSet, io};
 
 use bytes::Bytes;
@@ -13,16 +13,13 @@ use herdfs_core::proto::{EntryId, ErrorCode, Version};
 use herdfs_core::{ChunkId, chunk};
 use tokio::sync::mpsc;
 
-use super::{Journal, REJECTED, Record, write_record};
+use super::Record;
 use crate::fs::Space;
 use crate::stats::bump;
 use crate::{Error, Result};
 
 const FIRST_RETRY: Duration = Duration::from_secs(1);
 const LAST_RETRY: Duration = Duration::from_secs(30);
-/// How much the writes set aside in `rejected/` may hold.
-const REJECTED_BYTES: u64 = 1 << 30;
-
 /// The latest sealed write of an entry, to be committed from its sealed file.
 pub struct Job {
     pub record: Record,
@@ -57,7 +54,7 @@ impl Committer {
         let mut delay = FIRST_RETRY;
         while let Some(job) = self.next(entry).await {
             let attempt = |record| self.attempt(&job.sealed, record);
-            let outcome = match anew(&job.record, attempt).await {
+            let outcome = match commit_dropping_lost_base(&job.record, attempt).await {
                 Ok(version) => {
                     bump(&self.space.stats.commits, 1);
                     // Reads go on to the committed version once the journal drops the copy, as
@@ -93,12 +90,7 @@ impl Committer {
     async fn next(&self, entry: EntryId) -> Option<Job> {
         loop {
             let urged = self.space.journal.urged.notified();
-            let Some(quiet) = self
-                .space
-                .inodes
-                .local(entry, false, |local| local.quiet())
-                .flatten()
-            else {
+            let Some(quiet) = self.space.inodes.local(entry, |local| local.quiet()).flatten() else {
                 return self.take(entry);
             };
             let _ = tokio::time::timeout(quiet, urged).await;
@@ -121,10 +113,8 @@ impl Committer {
         while let Some(chunk) = chunks.recv().await {
             let (chunk, bytes) = chunk?;
             // Reading the file back then needs no download of what was just uploaded.
-            if !self.space.cache.contains(&chunk.id)
-                && let Err(err) = self.space.cache.put(&chunk.id, &bytes)
-            {
-                tracing::warn!(%err, "could not cache a chunk");
+            if !self.space.cache.contains(&chunk.id) {
+                self.space.cache.put_best_effort(&chunk.id, &bytes);
             }
             if upload_error.is_none()
                 && !base.contains(&chunk.id)
@@ -158,7 +148,7 @@ impl Committer {
 /// Sends `record` through `attempt`, and once more without its base if the authority no longer
 /// retains it (`Conflict` on an unguarded commit), which uploads every chunk: retention never
 /// sets a write aside (C4a). A second `Conflict` is final.
-pub(super) async fn anew<T, F, Fut>(record: &Record, attempt: F) -> Result<T>
+pub(super) async fn commit_dropping_lost_base<T, F, Fut>(record: &Record, attempt: F) -> Result<T>
 where
     F: Fn(Record) -> Fut,
     Fut: Future<Output = Result<T>>,
@@ -183,7 +173,7 @@ where
 impl Committer {
     /// The entry's latest sealed write still to commit. `None` ends its committer.
     pub(super) fn take(&self, entry: EntryId) -> Option<Job> {
-        let job = self.space.inodes.local(entry, false, |local| {
+        let job = self.space.inodes.local(entry, |local| {
             let Some((record, _)) = &local.pending else {
                 local.committing = false;
                 return None;
@@ -243,42 +233,5 @@ impl Committer {
         if settled.is_none() {
             let _ = fs::remove_file(&job.sealed);
         }
-    }
-}
-
-impl Journal {
-    /// Moves the record to `rejected/`, with a hard link that keeps its bytes.
-    fn reject(&self, job: &Job) {
-        let record = &job.record;
-        let name = format!("{}-{}", record.entry.0, record.request_id);
-        let kept = self.dir.join(REJECTED).join(name);
-        let result = write_record(&kept.with_extension("json"), record)
-            .and_then(|()| fs::hard_link(&job.sealed, kept.with_extension("copy")))
-            .and_then(|()| self.bound_rejected());
-        if let Err(err) = result {
-            tracing::warn!(%err, "could not keep a rejected write");
-        }
-    }
-
-    /// Drops the oldest writes set aside once they hold more than `REJECTED_BYTES` (C10).
-    fn bound_rejected(&self) -> io::Result<()> {
-        let kept = fs::read_dir(self.dir.join(REJECTED))?.map(|item| {
-            let path = item?.path();
-            let meta = fs::metadata(&path)?;
-            Ok((meta.modified()?, meta.len(), path))
-        });
-        let mut kept: Vec<(SystemTime, u64, PathBuf)> = kept.collect::<io::Result<_>>()?;
-        kept.sort();
-        let mut total: u64 = kept.iter().map(|(_, len, _)| len).sum();
-        for (_, len, path) in kept {
-            if total <= REJECTED_BYTES {
-                break;
-            }
-            tracing::warn!(write = %path.display(), "dropping an old rejected write");
-            let _ = fs::remove_file(path.with_extension("json"));
-            let _ = fs::remove_file(path.with_extension("copy"));
-            total = total.saturating_sub(len);
-        }
-        Ok(())
     }
 }

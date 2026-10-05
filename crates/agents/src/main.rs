@@ -32,7 +32,7 @@ struct Args {
     command: String,
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(1..))]
     max_sessions: u32,
-    #[arg(long, default_value_t = 1000)]
+    #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(1..))]
     poll_ms: u64,
 }
 
@@ -87,7 +87,7 @@ impl Runner {
     /// Marks sessions that a previous runner left `running` as failed.
     async fn recover(&self) -> io::Result<()> {
         for dir in session_dirs(&self.host_dir).await? {
-            if let Err(err) = session::recover(&dir).await {
+            if let Err(err) = session::recover(&self.agent.mount, &dir).await {
                 log_error(&dir, &err);
             }
         }
@@ -121,7 +121,7 @@ impl Runner {
 
     /// Marks the session running and runs it in the background, holding `slot` until it ends.
     async fn start(&self, dir: PathBuf, slot: OwnedSemaphorePermit) {
-        let session = match session::claim(&dir).await {
+        let session = match session::claim(&self.agent.mount, &dir).await {
             Ok(session) => session,
             Err(err) => {
                 log_error(&dir, &err);

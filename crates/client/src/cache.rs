@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::{fs, io, path::PathBuf};
+use std::{fs, io, io::Write, path::PathBuf};
 
 use herdfs_core::{ChunkId, ChunkRef, chunk::total_len};
 
@@ -72,14 +72,21 @@ impl Cache {
 
     /// Stores a verified chunk. The temp file and rename mean a crash never leaves a torn one.
     pub fn put(&self, id: &ChunkId, bytes: &[u8]) -> io::Result<()> {
-        let temp = self.dir.join(format!("{id}.{:x}.tmp", rand::random::<u64>()));
-        fs::write(&temp, bytes)?;
+        let mut temp = tempfile::Builder::new().suffix(".tmp").tempfile_in(&self.dir)?;
+        temp.write_all(bytes)?;
         let mut index = lock(&self.index);
-        fs::rename(&temp, self.path(id))?;
+        temp.persist(self.path(id)).map_err(|error| error.error)?;
         index.chunks.insert(*id, bytes.len() as u64, ());
         drop(index);
         self.evict();
         Ok(())
+    }
+
+    /// Failure is only logged because the verified bytes are in hand and caching is optional.
+    pub(crate) fn put_best_effort(&self, id: &ChunkId, bytes: &[u8]) {
+        if let Err(err) = self.put(id, bytes) {
+            tracing::warn!(%err, "could not cache a chunk");
+        }
     }
 
     pub fn capacity(&self) -> u64 {
@@ -157,6 +164,22 @@ mod tests {
         assert_eq!(cache.get(&id), None);
         assert!(!dir.path().join(id.to_string()).exists());
         assert!(!cache.contains(&id));
+    }
+
+    // contract: C11
+    #[test]
+    fn a_failed_persist_removes_its_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::open(dir.path().into(), 1 << 20).unwrap();
+        let (id, bytes) = chunk(1);
+        fs::create_dir(dir.path().join(id.to_string())).unwrap();
+
+        assert!(cache.put(&id, &bytes).is_err());
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(names.iter().all(|name| !name.to_string_lossy().ends_with(".tmp")));
     }
 
     // contract: C10

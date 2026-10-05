@@ -77,24 +77,22 @@ impl Mount {
     }
 
     fn local<T>(&self, change: impl FnOnce(&mut Local, &Journal) -> T) -> T {
-        let changed = self
-            .inodes
-            .local(ENTRY, false, |local| change(local, &self.journal));
+        let changed = self.inodes.local(ENTRY, |local| change(local, &self.journal));
         changed.unwrap()
     }
 
     fn opened(&self) {
-        self.inodes.local(ENTRY, true, Local::opened);
+        self.inodes.make_local(ENTRY, Local::opened);
     }
 
     fn closed(&self) {
-        self.inodes.local(ENTRY, false, Local::closed);
+        self.inodes.local(ENTRY, Local::closed);
     }
 
     fn install(&self, base: Option<&Version>) {
         let scratch = self.journal.scratch(ENTRY).unwrap();
         let install = |local: &mut Local| local.install(&self.journal, ENTRY, scratch, base);
-        self.inodes.local(ENTRY, true, install).unwrap().unwrap();
+        self.inodes.make_local(ENTRY, install).unwrap();
     }
 
     fn write(&self, off: u64, bytes: &[u8]) {
@@ -116,12 +114,12 @@ impl Mount {
     }
 
     fn changes(&self) -> Option<Arc<File>> {
-        self.inodes.local(ENTRY, false, |local| local.copy()).flatten()
+        self.inodes.local(ENTRY, |local| local.copy()).flatten()
     }
 
     fn set_mtime(&self, mtime_ms: i64) -> bool {
         let set = |local: &mut Local| local.set_mtime(&self.journal, ENTRY, mtime_ms);
-        self.inodes.local(ENTRY, false, set).unwrap_or(Ok(false)).unwrap()
+        self.inodes.local(ENTRY, set).unwrap_or(Ok(false)).unwrap()
     }
 
     fn pending_count(&self) -> usize {
