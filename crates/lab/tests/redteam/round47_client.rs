@@ -32,7 +32,6 @@ fn synced_bytes(name: &str, sibling: bool) -> Result<Option<Vec<u8>>> {
 /// writing descriptor is the control; three sibling-descriptor fsyncs must publish the same bytes.
 // contract: C2 (fsync waits for the commit)
 #[test]
-#[ignore = "ROUND47: fsync on a sibling descriptor does not commit the file's dirty journal copy"]
 fn fsync_through_a_sibling_descriptor_commits_the_files_writes() -> Result<()> {
     let Some(control) = synced_bytes("sibling-fsync-control", false)? else {
         return Ok(());

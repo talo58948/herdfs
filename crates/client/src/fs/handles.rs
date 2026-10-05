@@ -133,11 +133,12 @@ impl Space {
         self.seal(&handle, true)
     }
 
-    /// Waits for the commit of everything sealed so far. EIO if that attempt fails; the
-    /// committer keeps retrying in the background.
+    /// Seals and waits for the entry's pending write. EIO if that attempt fails; the committer
+    /// keeps retrying in the background.
     pub async fn fsync(self: Arc<Self>, fh: u64) -> Result<()> {
         let handle = self.handle(fh)?;
-        self.seal(&handle, true)?;
+        tokio::task::block_in_place(|| self.seal_entry(handle.entry))?;
+        self.local(handle.entry, |local| local.activate(&self.journal, handle.entry))?;
         self.urge(handle.entry);
         self.committed(handle.entry).await?;
         // A commit refused since this handle's last fsync or open may hold its writes, and a
