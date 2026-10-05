@@ -106,12 +106,7 @@ impl Local {
         change(&working)
     }
 
-    fn start_working(
-        &mut self,
-        journal: &Journal,
-        entry: EntryId,
-        empty: bool,
-    ) -> io::Result<Arc<File>> {
+    fn start_working(&mut self, journal: &Journal, entry: EntryId, empty: bool) -> io::Result<Arc<File>> {
         let seal = self
             .pending
             .as_ref()
