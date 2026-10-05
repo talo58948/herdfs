@@ -70,6 +70,9 @@ impl Verifier {
         let header = decode_header(token).map_err(|error| unauthenticated(error.to_string()))?;
         let kid = header.kid.ok_or_else(|| unauthenticated("token has no key id"))?;
         if let Ok(principal) = self.validate(token, &kid).await {
+            if let Ok(_refreshing) = self.refreshing.try_lock() {
+                self.refresh().await;
+            }
             return Ok(principal);
         }
         let _refreshing = self.refreshing.lock().await;
@@ -88,9 +91,6 @@ impl Verifier {
         let claims = decode::<Claims>(token, &key, &validation)
             .map_err(|error| unauthenticated(error.to_string()))?
             .claims;
-        if let Ok(_refreshing) = self.refreshing.try_lock() {
-            self.refresh().await;
-        }
         Ok(Principal {
             user: format!("user:{}", claims.sub),
             groups: claims.groups,
