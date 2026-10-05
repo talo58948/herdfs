@@ -64,6 +64,7 @@ mod round39_client;
 mod round43_client;
 mod round45_client;
 mod round47_client;
+mod round49_client;
 mod saved_mtime;
 mod scratch_files;
 mod shared_appends;
