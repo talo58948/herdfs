@@ -129,7 +129,6 @@ async fn same_kid_trial() -> StatusCode {
 /// when the issuer kept the key id; cached old-key requests remain the nonblocking control.
 // contract: S5
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "ROUND52: same-kid rotated requests do not wait for the in-flight refresh"]
 async fn concurrent_requests_wait_when_rotated_key_reuses_its_id() {
     let (first, second, third) = tokio::join!(same_kid_trial(), same_kid_trial(), same_kid_trial());
     assert_eq!([first, second, third], [StatusCode::OK; 3]);
