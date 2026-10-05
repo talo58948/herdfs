@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use herdfs_lab::{ADMIN, Lab, LabConfig, Links, Profile, Strategy};
 
-use crate::{VISIBLE_AFTER, random_bytes, read_at, save, two_clients};
+use crate::{VISIBLE_AFTER, random_bytes, read_at, save, two_clients, wait_pending};
 
 const TRIALS: usize = 3;
 
@@ -92,16 +92,6 @@ fn concurrent_reads_reuse_live_grants_and_renew_expired_ones() -> Result<()> {
         "renewed fetch count"
     );
     Ok(())
-}
-
-fn wait_pending(lab: &Lab) -> Result<()> {
-    for _ in 0..200 {
-        if lab.stats("b")?["pending_commits"] == 1 {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    anyhow::bail!("offline write was not journaled")
 }
 
 fn layer_truncate(lab: &Lab, name: &str) -> Result<()> {

@@ -61,7 +61,6 @@ fn replay_after_memory(forward_step: bool, trial: usize) -> bool {
 // contract: C4a (docs/architecture.md: request-id memory uses the authority clock, and
 // timestamps left in the future are corrected)
 #[test]
-#[ignore = "ROUND46: future-stamped request ids outlive the documented memory after clock correction"]
 fn corrected_future_request_ids_age_out_of_memory() {
     let mut stuck = 0;
     for trial in 0..3 {

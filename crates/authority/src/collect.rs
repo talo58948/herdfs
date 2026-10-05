@@ -64,6 +64,7 @@ impl Authority {
             "UPDATE versions SET created_ms = ?1 WHERE created_ms > ?1",
             [now_ms],
         )?;
+        tx.execute("UPDATE commits SET at_ms = ?1 WHERE at_ms > ?1", [now_ms])?;
         let pruned = tx.execute(PRUNE, params![policy.versions, now_ms - policy.max_age_ms])?;
         let dropped = tx.execute(
             "DELETE FROM manifests WHERE hash NOT IN (SELECT manifest FROM versions)",

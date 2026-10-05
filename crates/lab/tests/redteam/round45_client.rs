@@ -4,24 +4,13 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::sync::Barrier;
 use std::thread;
-use std::time::Duration;
 
 use anyhow::{Result, ensure};
 use herdfs_lab::{Lab, LabConfig, Links, Profile, Strategy};
 
-use crate::{VISIBLE_AFTER, assert_bytes, random_bytes, save, two_clients};
+use crate::{VISIBLE_AFTER, assert_bytes, random_bytes, save, two_clients, wait_pending};
 
 const TRIALS: usize = 3;
-
-fn wait_pending(lab: &Lab) -> Result<()> {
-    for _ in 0..200 {
-        if lab.stats("b")?["pending_commits"] == 1 {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    anyhow::bail!("offline write was not journaled")
-}
 
 fn layer_append(lab: &Lab, name: &str) -> Result<()> {
     let path = lab.mount_path("b").join(name);
