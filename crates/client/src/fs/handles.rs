@@ -32,7 +32,7 @@ pub struct Handle {
 
 impl Handle {
     pub(super) fn new(entry: EntryId, writable: bool, inodes: &Arc<Inodes>) -> Self {
-        let settles = inodes.local(entry, true, |local| {
+        let settles = inodes.make_local(entry, |local| {
             local.opened();
             local.settles().0
         });
@@ -41,7 +41,7 @@ impl Handle {
             writable,
             dirty: AtomicBool::new(false),
             truncated: AtomicBool::new(false),
-            synced: AtomicU64::new(settles.unwrap_or(0)),
+            synced: AtomicU64::new(settles),
             pinned: Mutex::new(None),
             inodes: inodes.clone(),
         }
@@ -50,7 +50,7 @@ impl Handle {
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        self.inodes.local(self.entry, false, Local::closed);
+        self.inodes.local(self.entry, Local::closed);
     }
 }
 
@@ -142,7 +142,7 @@ impl Space {
         self.committed(handle.entry).await?;
         // A commit refused since this handle's last fsync or open may hold its writes, and a
         // local disk reports a failed writeback to every descriptor open then (C2).
-        let settles = self.inodes.local(handle.entry, false, |local| local.settles());
+        let settles = self.inodes.local(handle.entry, |local| local.settles());
         let (settles, refused) = settles.unwrap_or((0, 0));
         if refused > handle.synced.swap(settles, Relaxed) {
             return Err(Errno::EIO.into());
@@ -152,7 +152,7 @@ impl Space {
 
     /// Waits for the commit of the entry's pending write, if any. EIO if that attempt fails.
     pub(super) async fn committed(&self, entry: EntryId) -> Result<()> {
-        let pending = self.inodes.local(entry, false, |local| local.pending()).flatten();
+        let pending = self.inodes.local(entry, |local| local.pending()).flatten();
         let Some((sealed, mut attempts)) = pending else {
             return Ok(());
         };
@@ -189,16 +189,15 @@ impl Space {
             return Ok(());
         }
         // A truncating write needs no old bytes, only the base its commit names.
-        let (scratch, base) = match truncate {
-            true => {
-                let base = self.inodes.with(entry, |state| state.followed()).flatten();
-                (self.journal.scratch(entry)?, base)
-            }
-            false => self.usable(entry, |base| self.copy_of(entry, base)).await?,
+        let (scratch, base) = if truncate {
+            let base = self.inodes.with(entry, |state| state.followed()).flatten();
+            (self.journal.scratch(entry)?, base)
+        } else {
+            self.usable(entry, |base| self.copy_of(entry, base)).await?
         };
         let base = base.as_ref().map(|base| &base.version);
         let install = |local: &mut Local| local.install(&self.journal, entry, scratch, base);
-        self.inodes.local(entry, true, install).unwrap_or(Ok(()))?;
+        self.inodes.make_local(entry, install)?;
         // Another open may have installed its copy first; truncate that one instead.
         self.attach(entry, truncate)?;
         Ok(())
@@ -215,24 +214,24 @@ impl Space {
 
     /// The entry's journal copy while it holds changes, which every read sees (C1).
     fn changes(&self, entry: EntryId) -> Option<Arc<File>> {
-        self.inodes.local(entry, false, |local| local.copy()).flatten()
+        self.inodes.local(entry, |local| local.copy()).flatten()
     }
 
     /// Runs `change` on the entry's local changes, which a handle keeps while it is open.
     fn local<T>(&self, entry: EntryId, change: impl FnOnce(&mut Local) -> io::Result<T>) -> io::Result<T> {
-        let changed = self.inodes.local(entry, false, change);
+        let changed = self.inodes.local(entry, change);
         changed.unwrap_or_else(|| Err(io::Error::other("no journal copy")))
     }
 
     /// Seals the entry's working copy, if it has one (C3, C4a).
     pub(super) fn seal_entry(&self, entry: EntryId) -> io::Result<()> {
         let seal = |local: &mut Local| local.seal(&self.journal, entry);
-        self.inodes.local(entry, false, seal).unwrap_or(Ok(()))
+        self.inodes.local(entry, seal).unwrap_or(Ok(()))
     }
 
     /// Ends the entry's quiet period, for an fsync that waits for its commit.
     pub(super) fn urge(&self, entry: EntryId) {
-        self.inodes.local(entry, false, Local::urge);
+        self.inodes.local(entry, Local::urge);
         self.journal.urged.notify_waiters();
     }
 

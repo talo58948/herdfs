@@ -92,26 +92,35 @@ impl Inodes {
     }
 
     /// Runs `change` on the entry's local changes (journal/local.rs), under its inode's lock
-    /// alone, and forgets them once nothing holds them. With `make`, they are made first, and an
-    /// inode if unknown, since a write recovered from the journal names only its entry.
-    pub fn local<T>(&self, id: EntryId, make: bool, change: impl FnOnce(&mut Local) -> T) -> Option<T> {
+    /// alone, and forgets them once nothing holds them.
+    pub fn local<T>(&self, id: EntryId, change: impl FnOnce(&mut Local) -> T) -> Option<T> {
+        let (table, inode) = {
+            let table = lock(&self.0);
+            let inode = table.nodes.get(&id)?.inode.clone();
+            (table, inode)
+        };
+        let mut state = inode.state();
+        drop(table);
+        let changed = change(state.local.as_mut()?);
+        state.tidy();
+        Some(changed)
+    }
+
+    /// Makes the inode and its local changes when missing, then runs `change` under its lock.
+    pub fn make_local<T>(&self, id: EntryId, change: impl FnOnce(&mut Local) -> T) -> T {
         let (table, inode) = {
             let mut table = lock(&self.0);
             let inode = match table.nodes.get(&id) {
                 Some(node) => node.inode.clone(),
-                None if make => table.add(id, None, Instant::now()),
-                None => return None,
+                None => table.add(id, None, Instant::now()),
             };
             (table, inode)
         };
         let mut state = inode.state();
         drop(table);
-        if make {
-            state.local.get_or_insert_with(Local::default);
-        }
-        let changed = change(state.local.as_mut()?);
+        let changed = change(state.local.get_or_insert_with(Local::default));
         state.tidy();
-        Some(changed)
+        changed
     }
 
     /// How many entries have local state for which `counts` holds.

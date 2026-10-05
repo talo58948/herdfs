@@ -99,23 +99,27 @@ impl Local {
         empty: bool,
         change: impl FnOnce(&File) -> io::Result<()>,
     ) -> io::Result<()> {
-        if self.working.is_none() {
-            let seal = self
-                .pending
-                .as_ref()
-                .ok_or_else(|| io::Error::other("no journal copy"))?
-                .0
-                .seal;
-            let mut scratch = journal.scratch(entry)?;
-            if !empty {
-                io::copy(
-                    &mut File::open(journal.sealed_path(entry, seal))?,
-                    scratch.as_file_mut(),
-                )?;
+        let working = match &self.working {
+            Some(working) => working,
+            None => {
+                let seal = self
+                    .pending
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("no journal copy"))?
+                    .0
+                    .seal;
+                let mut scratch = journal.scratch(entry)?;
+                if !empty {
+                    io::copy(
+                        &mut File::open(journal.sealed_path(entry, seal))?,
+                        scratch.as_file_mut(),
+                    )?;
+                }
+                let working = Arc::new(scratch.persist(journal.working_path(entry))?);
+                self.working.insert(working)
             }
-            self.working = Some(Arc::new(scratch.persist(journal.working_path(entry))?));
-        }
-        self.working.as_deref().map_or(Ok(()), change)
+        };
+        change(working)
     }
 
     pub fn write(&mut self, journal: &Journal, entry: EntryId, off: u64, data: &[u8]) -> io::Result<()> {

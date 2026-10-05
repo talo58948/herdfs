@@ -122,9 +122,7 @@ impl Reader {
             for index in needed {
                 let fewer = || Error::Protocol("fetched fewer chunks than asked".into());
                 let (id, bytes) = (file.id(index), Arc::new(fetched.next().await.ok_or_else(fewer)??));
-                if let Err(err) = self.cache.put(&id, &bytes) {
-                    tracing::warn!(%err, "could not cache a chunk");
-                }
+                self.cache.put_best_effort(&id, &bytes);
                 self.keep(id, bytes.clone());
                 found.insert(id, bytes);
                 // A read waiting for this chunk goes on without waiting for the rest.
@@ -211,26 +209,39 @@ impl Reader {
     /// Expiry is measured on this client's monotonic clock, so its wall clock may be off.
     async fn urls(&self, file: &OpenVersion, indices: &[usize]) -> Result<Vec<String>> {
         let version = file.version.id;
-        let usable = |index: &usize| {
+        let now = Instant::now();
+        let (mut urls, wanted) = {
             let grants = lock(&self.grants);
-            let (url, renew) = grants.get(&(version, *index))?;
-            (*renew > Instant::now()).then(|| url.clone())
+            let mut wanted = Vec::new();
+            let urls: Vec<Option<String>> = indices
+                .iter()
+                .enumerate()
+                .map(|(slot, &index)| match grants.get(&(version, index)) {
+                    Some((url, renew)) if *renew > now => Some(url.clone()),
+                    _ => {
+                        wanted.push((slot, index as u32));
+                        None
+                    }
+                })
+                .collect();
+            (urls, wanted)
         };
-        let wanted = indices.iter().filter(|i| usable(i).is_none());
-        let wanted: Vec<u32> = wanted.map(|&i| i as u32).collect();
         if !wanted.is_empty() {
             let asked = Instant::now();
-            let grant = self.remote.grant(file.version.entry, version, wanted.clone());
-            let (urls, ttl) = grant.await?;
+            let requested: Vec<u32> = wanted.iter().map(|(_, index)| *index).collect();
+            let grant = self.remote.grant(file.version.entry, version, requested);
+            let (granted_urls, ttl) = grant.await?;
             bump(&self.stats.grants, 1);
             let mut grants = lock(&self.grants);
             grants.retain(|_, (_, renew)| *renew > Instant::now());
             let renew = asked + ttl - GRANT_MARGIN.min(ttl / 2);
-            let granted = wanted.into_iter().zip(urls);
-            grants.extend(granted.map(|(index, url)| ((version, index as usize), (url, renew))));
+            for ((slot, index), url) in wanted.into_iter().zip(granted_urls) {
+                grants.insert((version, index as usize), (url.clone(), renew));
+                urls[slot] = Some(url);
+            }
         }
         let missing = || Error::Protocol("grant lacks usable URLs".into());
-        indices.iter().map(|i| usable(i).ok_or_else(missing)).collect()
+        urls.into_iter().map(|url| url.ok_or_else(missing)).collect()
     }
 }
 

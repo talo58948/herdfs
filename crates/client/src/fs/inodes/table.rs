@@ -76,9 +76,10 @@ impl Table {
             self.rebase(&source, &entry.path, at);
         }
         if self.idle.contains(&entry.id) {
-            match cold {
-                true => self.idle.insert_cold(entry.id, 1, ()),
-                false => self.idle.insert(entry.id, 1, ()),
+            if cold {
+                self.idle.insert_cold(entry.id, 1, ());
+            } else {
+                self.idle.insert(entry.id, 1, ());
             }
         }
         self.evict();
