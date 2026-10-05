@@ -35,7 +35,7 @@ struct Args {
     #[arg(long, default_value_t = 30)]
     retain_days: u32,
     /// Seconds between collections.
-    #[arg(long, default_value_t = 600)]
+    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..))]
     gc_every: u64,
     /// Seconds an unreferenced chunk must age; at least twice the grant TTL and interval plus TTL.
     #[arg(long, default_value_t = 3600)]
@@ -130,5 +130,32 @@ mod tests {
         assert_eq!(settings.policy.grace_ms, 4_000);
         assert_eq!(settings.collect_every, Duration::from_secs(3));
         assert_eq!(settings.grant_ttl, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn zero_collection_interval_is_rejected() {
+        // contract: S7
+        let parsed = Args::try_parse_from([
+            "authority",
+            "--listen",
+            "127.0.0.1:0",
+            "--db",
+            "db",
+            "--s3-endpoint",
+            "http://store",
+            "--s3-public-endpoint",
+            "http://store",
+            "--s3-bucket",
+            "bucket",
+            "--s3-region",
+            "region",
+            "--oidc-issuer",
+            "http://issuer",
+            "--oidc-audience",
+            "audience",
+            "--gc-every",
+            "0",
+        ]);
+        assert!(parsed.is_err());
     }
 }

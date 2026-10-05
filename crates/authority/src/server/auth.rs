@@ -24,6 +24,7 @@ pub(super) struct Verifier {
     audience: String,
     http: reqwest::Client,
     keys: Mutex<Keys>,
+    refreshing: Mutex<()>,
 }
 
 #[derive(Default)]
@@ -54,6 +55,7 @@ impl Verifier {
             audience,
             http: reqwest::Client::new(),
             keys: Mutex::default(),
+            refreshing: Mutex::new(()),
         }
     }
 
@@ -84,15 +86,22 @@ impl Verifier {
     }
 
     async fn key(&self, kid: &str) -> Result<DecodingKey, proto::Error> {
-        let mut keys = self.keys.lock().await;
-        let due = keys.tried.is_none_or(|at| at.elapsed() >= REFETCH_EVERY);
-        if keys.fetched.is_none() || due {
-            keys.tried = Some(Instant::now());
-            match self.fetch().await {
-                Ok(set) => (keys.set, keys.fetched) = (set, keys.tried),
-                Err(error) => tracing::warn!(%error, "fetching the issuer's keys"),
+        let (usable, due) = {
+            let keys = self.keys.lock().await;
+            (
+                keys.fetched.is_some_and(|at| at.elapsed() < TRUST_AT_MOST),
+                keys.tried.is_none_or(|at| at.elapsed() >= REFETCH_EVERY),
+            )
+        };
+        if due && usable {
+            if let Ok(_refreshing) = self.refreshing.try_lock() {
+                self.refresh_if_due().await;
             }
+        } else if !usable {
+            let _refreshing = self.refreshing.lock().await;
+            self.refresh_if_due().await;
         }
+        let keys = self.keys.lock().await;
         if keys.fetched.is_none_or(|at| at.elapsed() >= TRUST_AT_MOST) {
             let message = "the issuer's keys could not be fetched";
             return Err(proto::Error::new(ErrorCode::Unavailable, message));
@@ -102,6 +111,25 @@ impl Verifier {
             .find(kid)
             .ok_or_else(|| unauthenticated(format!("unknown key id {kid:?}")))?;
         DecodingKey::from_jwk(jwk).map_err(|error| unauthenticated(error.to_string()))
+    }
+
+    async fn refresh_if_due(&self) {
+        let attempted = {
+            let mut keys = self.keys.lock().await;
+            if keys.tried.is_some_and(|at| at.elapsed() < REFETCH_EVERY) {
+                return;
+            }
+            let attempted = Instant::now();
+            keys.tried = Some(attempted);
+            attempted
+        };
+        match self.fetch().await {
+            Ok(set) => {
+                let mut keys = self.keys.lock().await;
+                (keys.set, keys.fetched) = (set, Some(attempted));
+            }
+            Err(error) => tracing::warn!(%error, "fetching the issuer's keys"),
+        }
     }
 
     async fn fetch(&self) -> reqwest::Result<JwkSet> {
@@ -129,11 +157,62 @@ fn unauthenticated(reason: impl Into<String>) -> proto::Error {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use axum::{Json, Router, routing::get};
+    use serde_json::json;
+    use tokio::sync::Notify;
+
     use super::*;
 
     #[test]
     fn stale_issuer_keys_are_trusted_for_five_minutes() {
         // contract: S5
         assert_eq!(TRUST_AT_MOST, Duration::from_secs(300));
+    }
+
+    #[tokio::test]
+    async fn a_slow_refresh_does_not_block_cached_keys() {
+        // contract: S5
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let started = Arc::new(Notify::new());
+        let signal = Arc::clone(&started);
+        let discovery = get(move || {
+            let signal = Arc::clone(&signal);
+            async move {
+                signal.notify_waiters();
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                Json(json!({"jwks_uri": "http://127.0.0.1/unused"}))
+            }
+        });
+        let issuer = Router::new().route("/.well-known/openid-configuration", discovery);
+        tokio::spawn(async move { axum::serve(listener, issuer).await.unwrap() });
+        let verifier = Arc::new(Verifier::new(url, "audience".into()));
+        let set = serde_json::from_value(json!({"keys": [{
+            "kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "kid": "k1",
+            "x": "1YXvpZn5rWDm4IkMDok-qEpwMr1Omjfvq7Gb0D3gI5I"
+        }]}))
+        .unwrap();
+        let stale = Instant::now() - REFETCH_EVERY - Duration::from_secs(1);
+        *verifier.keys.lock().await = Keys {
+            set,
+            tried: Some(stale),
+            fetched: Some(stale),
+        };
+
+        let notified = started.notified();
+        let refreshing = {
+            let verifier = Arc::clone(&verifier);
+            tokio::spawn(async move { verifier.key("k1").await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), notified)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_millis(100), verifier.key("k1"))
+            .await
+            .expect("cached key was blocked by the refresh")
+            .unwrap();
+        refreshing.abort();
     }
 }
