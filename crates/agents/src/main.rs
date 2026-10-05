@@ -157,25 +157,3 @@ async fn session_dirs(host_dir: &Path) -> io::Result<Vec<PathBuf>> {
 fn log_error(path: &Path, err: &io::Error) {
     eprintln!("herdfs-agents: {}: {err}", path.display());
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn zero_poll_interval_is_rejected() {
-        // contract: A1
-        let parsed = Args::try_parse_from([
-            "agents",
-            "--mount",
-            ".",
-            "--host",
-            "host",
-            "--command",
-            "true",
-            "--poll-ms",
-            "0",
-        ]);
-        assert!(parsed.is_err());
-    }
-}

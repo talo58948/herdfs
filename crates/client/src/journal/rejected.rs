@@ -1,22 +1,12 @@
 //! Rejected journal writes kept for manual recovery, within a fixed disk bound (C10).
 
-use std::collections::HashMap;
-use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
-use std::time::SystemTime;
 
 use super::{Journal, REJECTED, commit::Job, write_record};
 
 /// How much the writes set aside in `rejected/` may hold.
 const REJECTED_BYTES: u64 = 1 << 30;
-
-struct RejectedWrite {
-    path: PathBuf,
-    bytes: u64,
-    record_time: Option<SystemTime>,
-}
 
 impl Journal {
     /// Moves the record to `rejected/`, with a hard link that keeps its bytes.
@@ -34,37 +24,30 @@ impl Journal {
 
     /// Drops the oldest writes set aside once they hold more than `REJECTED_BYTES` (C10).
     fn bound_rejected(&self) -> io::Result<()> {
-        let mut writes: HashMap<OsString, RejectedWrite> = HashMap::new();
+        let mut writes = Vec::new();
         for item in fs::read_dir(self.dir.join(REJECTED))? {
             let path = item?.path();
-            let Some(stem) = path.file_stem().map(OsString::from) else {
+            if !path.extension().is_some_and(|extension| extension == "json") {
                 continue;
-            };
-            let meta = fs::metadata(&path)?;
-            let write = writes.entry(stem).or_insert_with(|| RejectedWrite {
-                path: path.with_extension(""),
-                bytes: 0,
-                record_time: None,
-            });
-            write.bytes += meta.len();
-            if path.extension().is_some_and(|extension| extension == "json") {
-                write.record_time = Some(meta.modified()?);
             }
+            let record = fs::metadata(&path)?;
+            let copy = match fs::metadata(path.with_extension("copy")) {
+                Ok(copy) => copy.len(),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => 0,
+                Err(err) => return Err(err),
+            };
+            writes.push((record.modified()?, record.len() + copy, path.with_extension("")));
         }
-        let mut writes: Vec<_> = writes
-            .into_values()
-            .filter_map(|write| write.record_time.map(|time| (time, write)))
-            .collect();
-        writes.sort_by_key(|(time, _)| *time);
-        let mut total: u64 = writes.iter().map(|(_, write)| write.bytes).sum();
-        for (_, write) in writes {
+        writes.sort();
+        let mut total: u64 = writes.iter().map(|(_, bytes, _)| bytes).sum();
+        for (_, bytes, path) in writes {
             if total <= REJECTED_BYTES {
                 break;
             }
-            tracing::warn!(write = %write.path.display(), "dropping an old rejected write");
-            let _ = fs::remove_file(write.path.with_extension("json"));
-            let _ = fs::remove_file(write.path.with_extension("copy"));
-            total = total.saturating_sub(write.bytes);
+            tracing::warn!(write = %path.display(), "dropping an old rejected write");
+            let _ = fs::remove_file(path.with_extension("json"));
+            let _ = fs::remove_file(path.with_extension("copy"));
+            total = total.saturating_sub(bytes);
         }
         Ok(())
     }

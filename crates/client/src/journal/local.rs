@@ -100,26 +100,34 @@ impl Local {
         change: impl FnOnce(&File) -> io::Result<()>,
     ) -> io::Result<()> {
         let working = match &self.working {
-            Some(working) => working,
-            None => {
-                let seal = self
-                    .pending
-                    .as_ref()
-                    .ok_or_else(|| io::Error::other("no journal copy"))?
-                    .0
-                    .seal;
-                let mut scratch = journal.scratch(entry)?;
-                if !empty {
-                    io::copy(
-                        &mut File::open(journal.sealed_path(entry, seal))?,
-                        scratch.as_file_mut(),
-                    )?;
-                }
-                let working = Arc::new(scratch.persist(journal.working_path(entry))?);
-                self.working.insert(working)
-            }
+            Some(working) => Arc::clone(working),
+            None => self.start_working(journal, entry, empty)?,
         };
-        change(working)
+        change(&working)
+    }
+
+    fn start_working(
+        &mut self,
+        journal: &Journal,
+        entry: EntryId,
+        empty: bool,
+    ) -> io::Result<Arc<File>> {
+        let seal = self
+            .pending
+            .as_ref()
+            .ok_or_else(|| io::Error::other("no journal copy"))?
+            .0
+            .seal;
+        let mut scratch = journal.scratch(entry)?;
+        if !empty {
+            io::copy(
+                &mut File::open(journal.sealed_path(entry, seal))?,
+                scratch.as_file_mut(),
+            )?;
+        }
+        let working = Arc::new(scratch.persist(journal.working_path(entry))?);
+        self.working = Some(Arc::clone(&working));
+        Ok(working)
     }
 
     pub fn write(&mut self, journal: &Journal, entry: EntryId, off: u64, data: &[u8]) -> io::Result<()> {

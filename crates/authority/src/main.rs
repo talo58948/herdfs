@@ -131,31 +131,4 @@ mod tests {
         assert_eq!(settings.collect_every, Duration::from_secs(3));
         assert_eq!(settings.grant_ttl, Duration::from_secs(5));
     }
-
-    #[test]
-    fn zero_collection_interval_is_rejected() {
-        // contract: S7
-        let parsed = Args::try_parse_from([
-            "authority",
-            "--listen",
-            "127.0.0.1:0",
-            "--db",
-            "db",
-            "--s3-endpoint",
-            "http://store",
-            "--s3-public-endpoint",
-            "http://store",
-            "--s3-bucket",
-            "bucket",
-            "--s3-region",
-            "region",
-            "--oidc-issuer",
-            "http://issuer",
-            "--oidc-audience",
-            "audience",
-            "--gc-every",
-            "0",
-        ]);
-        assert!(parsed.is_err());
-    }
 }

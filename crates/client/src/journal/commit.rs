@@ -54,7 +54,7 @@ impl Committer {
         let mut delay = FIRST_RETRY;
         while let Some(job) = self.next(entry).await {
             let attempt = |record| self.attempt(&job.sealed, record);
-            let outcome = match commit_without_base(&job.record, attempt).await {
+            let outcome = match commit_dropping_lost_base(&job.record, attempt).await {
                 Ok(version) => {
                     bump(&self.space.stats.commits, 1);
                     // Reads go on to the committed version once the journal drops the copy, as
@@ -148,7 +148,7 @@ impl Committer {
 /// Sends `record` through `attempt`, and once more without its base if the authority no longer
 /// retains it (`Conflict` on an unguarded commit), which uploads every chunk: retention never
 /// sets a write aside (C4a). A second `Conflict` is final.
-pub(super) async fn commit_without_base<T, F, Fut>(record: &Record, attempt: F) -> Result<T>
+pub(super) async fn commit_dropping_lost_base<T, F, Fut>(record: &Record, attempt: F) -> Result<T>
 where
     F: Fn(Record) -> Fut,
     Fut: Future<Output = Result<T>>,

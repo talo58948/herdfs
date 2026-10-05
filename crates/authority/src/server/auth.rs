@@ -95,11 +95,11 @@ impl Verifier {
         };
         if due && usable {
             if let Ok(_refreshing) = self.refreshing.try_lock() {
-                self.refresh_if_due().await;
+                self.refresh().await;
             }
         } else if !usable {
             let _refreshing = self.refreshing.lock().await;
-            self.refresh_if_due().await;
+            self.refresh().await;
         }
         let keys = self.keys.lock().await;
         if keys.fetched.is_none_or(|at| at.elapsed() >= TRUST_AT_MOST) {
@@ -113,10 +113,12 @@ impl Verifier {
         DecodingKey::from_jwk(jwk).map_err(|error| unauthenticated(error.to_string()))
     }
 
-    async fn refresh_if_due(&self) {
+    async fn refresh(&self) {
         let attempted = {
             let mut keys = self.keys.lock().await;
-            if keys.tried.is_some_and(|at| at.elapsed() < REFETCH_EVERY) {
+            let usable = keys.fetched.is_some_and(|at| at.elapsed() < TRUST_AT_MOST);
+            let recent = keys.tried.is_some_and(|at| at.elapsed() < REFETCH_EVERY);
+            if usable && recent {
                 return;
             }
             let attempted = Instant::now();
@@ -157,9 +159,12 @@ fn unauthenticated(reason: impl Into<String>) -> proto::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
 
-    use axum::{Json, Router, routing::get};
+    use axum::{Json, Router, http::StatusCode, routing::get};
     use serde_json::json;
     use tokio::sync::Notify;
 
@@ -214,5 +219,40 @@ mod tests {
             .expect("cached key was blocked by the refresh")
             .unwrap();
         refreshing.abort();
+    }
+
+    #[tokio::test]
+    async fn unusable_keys_retry_immediately_after_a_failed_fetch() {
+        // contract: S5
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let available = Arc::new(AtomicBool::new(false));
+        let answers = Arc::clone(&available);
+        let jwks_uri = format!("{url}/keys");
+        let discovery = get(move || {
+            let answers = Arc::clone(&answers);
+            let jwks_uri = jwks_uri.clone();
+            async move {
+                answers
+                    .load(Ordering::Relaxed)
+                    .then(|| Json(json!({"jwks_uri": jwks_uri})))
+                    .ok_or(StatusCode::SERVICE_UNAVAILABLE)
+            }
+        });
+        let keys = get(|| async {
+            Json(json!({"keys": [{
+                "kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "kid": "k1",
+                "x": "1YXvpZn5rWDm4IkMDok-qEpwMr1Omjfvq7Gb0D3gI5I"
+            }]}))
+        });
+        let issuer = Router::new()
+            .route("/.well-known/openid-configuration", discovery)
+            .route("/keys", keys);
+        tokio::spawn(async move { axum::serve(listener, issuer).await.unwrap() });
+        let verifier = Verifier::new(url, "audience".into());
+
+        assert!(verifier.key("k1").await.is_err());
+        available.store(true, Ordering::Relaxed);
+        verifier.key("k1").await.unwrap();
     }
 }

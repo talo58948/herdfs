@@ -82,6 +82,7 @@ impl Cache {
         Ok(())
     }
 
+    /// Failure is only logged because the verified bytes are in hand and caching is optional.
     pub(crate) fn put_best_effort(&self, id: &ChunkId, bytes: &[u8]) {
         if let Err(err) = self.put(id, bytes) {
             tracing::warn!(%err, "could not cache a chunk");
