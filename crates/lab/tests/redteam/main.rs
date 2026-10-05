@@ -68,6 +68,7 @@ mod round49_client;
 mod round51_cache;
 mod round51_journal;
 mod round53_client;
+mod round55_client;
 mod saved_mtime;
 mod scratch_files;
 mod shared_appends;
