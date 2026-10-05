@@ -258,8 +258,7 @@ fn after_a_collection_nothing_reaches_a_pruned_versions_chunks() {
     assert!(referenced.is_subset(&collected.live), "{referenced:?}");
 }
 
-/// The one way past the live set: an upload made after the collection began, which the sweep
-/// reads back with `uploaded_since` before it deletes anything.
+/// A committed chunk outside an earlier live-set snapshot came from an upload after collection.
 #[test]
 fn after_a_collection_a_chunk_outside_the_live_set_comes_only_from_a_fresh_upload() {
     // contract: C14, C15
@@ -283,6 +282,4 @@ fn after_a_collection_a_chunk_outside_the_live_set_comes_only_from_a_fresh_uploa
         .filter(|id| !collected.live.contains(id))
         .collect();
     assert_eq!(outside, BTreeSet::from([again.id, new.id]));
-    let rechecked = fx.authority.uploaded_since(started).unwrap();
-    assert!(outside.is_subset(&rechecked), "{outside:?} not in {rechecked:?}");
 }

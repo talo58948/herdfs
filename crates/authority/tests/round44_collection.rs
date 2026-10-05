@@ -43,7 +43,6 @@ async fn commit(lab: &Lab, token: &str, entry: &Value, request_id: &str, bytes: 
 /// A retained file uploaded before the clock step is the control.
 // contract: C4b, C14, C15, S7
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "ROUND44: corrected clock during sweep deletes an acknowledged concurrent upload"]
 async fn a_corrected_clock_during_a_sweep_does_not_delete_a_concurrent_upload() {
     let mut deleted = 0;
     for trial in 0..3 {
