@@ -10,16 +10,16 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, ensure};
 use herdfs_lab::{Lab, LabConfig, Links, Profile, Strategy};
 
-use crate::{VISIBLE_AFTER, assert_bytes, random_bytes, read_at, save, wait_pending};
+use crate::{
+    VISIBLE_AFTER, assert_bytes, random_bytes, read_at, save, stat_count, two_clients, wait_pending,
+};
 
 const TRIALS: usize = 3;
 
 fn wait_for_fetch(lab: &Lab, before: u64, done: &AtomicBool) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let fetched = lab.stats("b")?["chunks_fetched"]
-            .as_u64()
-            .context("chunks_fetched counter")?;
+        let fetched = stat_count(lab, "chunks_fetched")?;
         if fetched > before {
             ensure!(!done.load(Relaxed), "materialization finished before the rename");
             return Ok(());
@@ -40,9 +40,7 @@ fn materialize_during_move(lab: &Lab, trial: usize, moved: bool) -> Result<Optio
     let changed = expected.len() - 4096;
     expected[changed] ^= 0xff;
     let replacement = format!("replacement-{trial}").into_bytes();
-    let before = lab.stats("b")?["chunks_fetched"]
-        .as_u64()
-        .context("chunks_fetched counter")?;
+    let before = stat_count(lab, "chunks_fetched")?;
     let done = AtomicBool::new(false);
 
     thread::scope(|scope| -> Result<()> {
@@ -204,14 +202,9 @@ fn recover_over_activated_truncate(lab: &mut Lab, trial: usize, crash: bool) -> 
 // contract: C1, C3, C4a, C12
 #[test]
 fn a_later_seal_survives_a_crash_over_an_activated_truncate() -> Result<()> {
-    if let Some(reason) = herdfs_lab::missing_binaries() {
-        eprintln!("skipped: {reason}");
+    let Some(mut lab) = two_clients()? else {
         return Ok(());
-    }
-    let config = LabConfig::default()
-        .client("a", "alice", &[], Profile::Lan, Strategy::Stream)
-        .client("b", "bob", &[], Profile::Lan, Strategy::Stream);
-    let mut lab = Lab::start(config)?;
+    };
     recover_over_activated_truncate(&mut lab, 0, false)?;
     for trial in 0..TRIALS {
         recover_over_activated_truncate(&mut lab, trial, true)?;

@@ -6,25 +6,13 @@ use std::sync::Barrier;
 use std::thread;
 
 use anyhow::{Context, Result, ensure};
-use herdfs_lab::{ADMIN, Lab, LabConfig, Profile, Strategy};
+use herdfs_lab::{ADMIN, Lab};
 
-use crate::{VISIBLE_AFTER, assert_bytes, random_bytes, read_at, save};
+use crate::{VISIBLE_AFTER, assert_bytes, cache_lab, random_bytes, read_at, save};
 
 const TRIALS: usize = 3;
 const FILES: usize = 12;
 const CACHE_BYTES: u64 = 3 << 20;
-
-fn cache_lab(cache_bytes: u64) -> Result<Option<Lab>> {
-    if let Some(reason) = herdfs_lab::missing_binaries() {
-        eprintln!("skipped: {reason}");
-        return Ok(None);
-    }
-    let config = LabConfig::default()
-        .client("a", "alice", &[], Profile::Lan, Strategy::Stream)
-        .client("b", "bob", &[], Profile::Lan, Strategy::Stream)
-        .cache_bytes("b", cache_bytes);
-    Lab::start(config).map(Some)
-}
 
 fn read_set(lab: &Lab, names: &[String], bytes: &[Vec<u8>], concurrent: bool) -> Result<()> {
     if !concurrent {

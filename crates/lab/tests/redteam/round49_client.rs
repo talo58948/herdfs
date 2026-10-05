@@ -6,19 +6,15 @@ use std::sync::Barrier;
 use std::thread;
 
 use anyhow::{Context, Result, ensure};
-use herdfs_core::proto::Version;
-use herdfs_lab::{ADMIN, Lab, LabConfig, Links, Profile, Strategy};
+use herdfs_lab::{ADMIN, Lab, Links};
 
-use crate::{VISIBLE_AFTER, assert_bytes, random_bytes, read_at, save, two_clients, wait_pending};
+use crate::{
+    VISIBLE_AFTER, assert_bytes, cache_lab, chunk_starts, random_bytes, read_at, read_starts, save,
+    stat_count, two_clients, wait_pending,
+};
 
 const TRIALS: usize = 3;
 const PAGE: usize = 4096;
-
-fn count(lab: &Lab, name: &str) -> Result<u64> {
-    lab.stats("b")?[name]
-        .as_u64()
-        .with_context(|| format!("stats count {name}"))
-}
 
 fn concurrent_page(file: &File, expected: &[u8]) -> Result<()> {
     const READERS: usize = 8;
@@ -42,18 +38,6 @@ fn concurrent_page(file: &File, expected: &[u8]) -> Result<()> {
     })
 }
 
-fn cache_lab() -> Result<Option<Lab>> {
-    if let Some(reason) = herdfs_lab::missing_binaries() {
-        eprintln!("skipped: {reason}");
-        return Ok(None);
-    }
-    let config = LabConfig::default()
-        .client("a", "alice", &[], Profile::Lan, Strategy::Stream)
-        .client("b", "bob", &[], Profile::Lan, Strategy::Stream)
-        .cache_bytes("b", 16 << 20);
-    Lab::start(config).map(Some)
-}
-
 fn read_with_destination(lab: &Lab, name: &str, bytes: &[u8], block: bool) -> Result<u64> {
     save(&lab.mount_path("a").join(name), bytes)?;
     let version = lab.head(ADMIN, name)?;
@@ -63,10 +47,10 @@ fn read_with_destination(lab: &Lab, name: &str, bytes: &[u8], block: bool) -> Re
         fs::create_dir(&destination)?;
     }
     thread::sleep(VISIBLE_AFTER);
-    let before = count(lab, "chunks_fetched")?;
+    let before = stat_count(lab, "chunks_fetched")?;
     let file = File::open(lab.mount_path("b").join(name))?;
     concurrent_page(&file, bytes)?;
-    let fetched = count(lab, "chunks_fetched")? - before;
+    let fetched = stat_count(lab, "chunks_fetched")? - before;
     if block {
         ensure!(destination.is_dir(), "failed persist replaced its blocker");
     } else {
@@ -80,7 +64,7 @@ fn read_with_destination(lab: &Lab, name: &str, bytes: &[u8], block: bool) -> Re
 // contract: C9, C10, C11
 #[test]
 fn failed_cache_publication_keeps_concurrent_reads_correct_and_clean() -> Result<()> {
-    let Some(lab) = cache_lab()? else {
+    let Some(lab) = cache_lab(16 << 20)? else {
         return Ok(());
     };
     let control = random_bytes(2 << 20);
@@ -105,52 +89,14 @@ fn failed_cache_publication_keeps_concurrent_reads_correct_and_clean() -> Result
     Ok(())
 }
 
-fn starts(version: &Version, bytes: &[u8]) -> Result<Vec<(u64, u8)>> {
-    ensure!(
-        version.chunks.len() >= TRIALS,
-        "fixture has fewer than {TRIALS} chunks"
-    );
-    let mut offset = 0_u64;
-    Ok(version
-        .chunks
-        .iter()
-        .take(TRIALS)
-        .map(|chunk| {
-            let start = (offset, bytes[offset as usize]);
-            offset += u64::from(chunk.len);
-            start
-        })
-        .collect())
-}
-
-fn read_starts(file: &File, starts: &[(u64, u8)]) -> Result<()> {
-    thread::scope(|scope| {
-        let reads = starts
-            .iter()
-            .map(|&(offset, expected)| scope.spawn(move || (read_at(file, offset, 1), expected)))
-            .collect::<Vec<_>>();
-        for read in reads {
-            let (bytes, expected) = read.join().map_err(|_| anyhow::anyhow!("read thread panicked"))?;
-            ensure!(bytes? == [expected], "wrong byte at a chunk boundary");
-        }
-        Ok(())
-    })
-}
-
 /// Repeating concurrent reads of one version controls three head switches on one held handle.
 /// Each switch needs fresh version-scoped grants, and repeats reuse only that version's URLs.
 // contract: C3, C8, C9, S2
 #[test]
 fn concurrent_reads_do_not_reuse_grants_across_version_switches() -> Result<()> {
-    if let Some(reason) = herdfs_lab::missing_binaries() {
-        eprintln!("skipped: {reason}");
+    let Some(lab) = cache_lab(0)? else {
         return Ok(());
-    }
-    let config = LabConfig::default()
-        .client("a", "alice", &[], Profile::Lan, Strategy::Stream)
-        .client("b", "bob", &[], Profile::Lan, Strategy::Stream)
-        .cache_bytes("b", 0);
-    let lab = Lab::start(config)?;
+    };
     let path_a = lab.mount_path("a").join("switching-grants");
     let path_b = lab.mount_path("b").join("switching-grants");
     let mut bytes = random_bytes(9 << 20);
@@ -158,7 +104,7 @@ fn concurrent_reads_do_not_reuse_grants_across_version_switches() -> Result<()> 
     thread::sleep(VISIBLE_AFTER);
     let held = File::open(&path_b)?;
 
-    let mut grants = count(&lab, "grants")?;
+    let mut grants = stat_count(&lab, "grants")?;
     for version_number in 0..=TRIALS {
         if version_number != 0 {
             bytes = random_bytes(9 << 20);
@@ -167,11 +113,19 @@ fn concurrent_reads_do_not_reuse_grants_across_version_switches() -> Result<()> 
             ensure!(held.metadata()?.len() == bytes.len() as u64, "switch metadata");
         }
         let version = lab.head(ADMIN, "switching-grants")?;
-        read_starts(&held, &starts(&version, &bytes)?)?;
-        let fresh = count(&lab, "grants")?;
+        ensure!(
+            version.chunks.len() >= TRIALS,
+            "fixture has fewer than {TRIALS} chunks"
+        );
+        let starts = chunk_starts(&version, &bytes, TRIALS);
+        read_starts(&held, &starts)?;
+        let fresh = stat_count(&lab, "grants")?;
         ensure!(fresh > grants, "version {version_number} reused an older grant");
-        read_starts(&held, &starts(&version, &bytes)?)?;
-        ensure!(count(&lab, "grants")? == fresh, "live grants were not reused");
+        read_starts(&held, &starts)?;
+        ensure!(
+            stat_count(&lab, "grants")? == fresh,
+            "live grants were not reused"
+        );
         grants = fresh;
     }
     Ok(())
