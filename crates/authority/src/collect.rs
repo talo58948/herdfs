@@ -29,11 +29,12 @@ pub struct Collected {
     pub(crate) retained: BTreeSet<ChunkId>,
     /// Every chunk of a retained version anywhere, or of a recent upload.
     pub live: BTreeSet<ChunkId>,
-    pub(crate) upload_mark: UploadMark,
+    pub upload_mark: UploadMark,
 }
 
+/// The newest upload a collection saw; later uploads are fresh whatever the clock says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct UploadMark(i64);
+pub struct UploadMark(i64);
 
 /// Versions past the newest `?1` of their entry, created at or before `?2`, and not its head.
 const PRUNE: &str = "DELETE FROM versions WHERE id IN (
@@ -130,7 +131,7 @@ impl Authority {
     }
 
     /// Chunks recorded after `mark`.
-    pub(crate) fn uploaded_after(&mut self, mark: UploadMark) -> anyhow::Result<BTreeSet<ChunkId>> {
+    pub fn uploaded_after(&mut self, mark: UploadMark) -> anyhow::Result<BTreeSet<ChunkId>> {
         let mut query = self
             .db
             .prepare_cached("SELECT chunk FROM uploads WHERE seq > ?1")?;
