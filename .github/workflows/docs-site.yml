@@ -1,0 +1,24 @@
+name: Docs site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "CONTRACT.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Vercel deployment
+        env:
+          VERCEL_DOCS_HOOK: ${{ secrets.VERCEL_DOCS_HOOK }}
+        run: |
+          test -n "$VERCEL_DOCS_HOOK"
+          curl --fail --show-error --silent --output /dev/null \
+            --request POST "$VERCEL_DOCS_HOOK"
