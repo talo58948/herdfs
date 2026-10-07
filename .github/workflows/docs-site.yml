@@ -11,14 +11,27 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: docs-site
+  cancel-in-progress: true
+
 jobs:
-  deploy:
+  sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Vercel deployment
+      - uses: actions/checkout@v6
+        with:
+          repository: talo58948/herdfs-www
+          ref: main
+          ssh-key: ${{ secrets.WWW_DEPLOY_KEY }}
+      - name: Update the pinned docs commit
         env:
-          VERCEL_DOCS_HOOK: ${{ secrets.VERCEL_DOCS_HOOK }}
+          HERDFS_SHA: ${{ github.sha }}
         run: |
-          test -n "$VERCEL_DOCS_HOOK"
-          curl --fail --show-error --silent --output /dev/null \
-            --request POST "$VERCEL_DOCS_HOOK"
+          printf '%s\n' "$HERDFS_SHA" > herdfs-docs.lock
+          git diff --quiet -- herdfs-docs.lock && exit 0
+          git config user.name "herdfs docs bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add herdfs-docs.lock
+          git commit -m "Sync docs to herdfs ${HERDFS_SHA:0:7}"
+          git push origin HEAD:main
