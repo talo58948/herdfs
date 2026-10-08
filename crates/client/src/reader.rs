@@ -93,7 +93,8 @@ impl Reader {
 
     pub(crate) async fn cache_all(&self, file: &OpenVersion) -> Result<()> {
         let fetched = AtomicU64::new(0);
-        self.prefetch_indices(file, 0..file.version.chunks.len(), &fetched).await
+        self.prefetch_indices(file, 0..file.version.chunks.len(), &fetched)
+            .await
     }
 
     /// Writes all of `file` to `out`, to start a journal copy from it.

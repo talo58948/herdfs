@@ -141,9 +141,8 @@ impl Table {
     /// Drops the least recently used entries that nothing holds, past `IDLE`.
     pub(super) fn evict(&mut self) {
         let nodes = &self.nodes;
-        let used = |id: &EntryId| {
-            self.kept.contains(id) || nodes.get(id).is_some_and(|node| node.inode.in_use())
-        };
+        let used =
+            |id: &EntryId| self.kept.contains(id) || nodes.get(id).is_some_and(|node| node.inode.in_use());
         for id in self.idle.evict(IDLE, used) {
             if let Some((path, _)) = self.nodes.remove(&id).and_then(|node| node.bound) {
                 self.by_path.remove(&path);

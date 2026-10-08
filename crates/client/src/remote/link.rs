@@ -1,6 +1,9 @@
 //! The offline window, which spares calls the wait of a silent outage.
 
-use std::sync::{Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use crate::{Error, Result, lock};

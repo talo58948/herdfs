@@ -51,7 +51,11 @@ pub(crate) fn only_mount(path: Option<&Path>) -> anyhow::Result<Registration> {
         return find_mount(path);
     }
     let mounts = registrations(true)?;
-    ensure!(mounts.len() == 1, "expected one mounted space, found {}", mounts.len());
+    ensure!(
+        mounts.len() == 1,
+        "expected one mounted space, found {}",
+        mounts.len()
+    );
     mounts.into_iter().next().context("mounted space disappeared")
 }
 

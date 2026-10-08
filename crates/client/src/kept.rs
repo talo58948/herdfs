@@ -18,8 +18,8 @@ use crate::{Result, lock};
 
 const REFRESH: Duration = Duration::from_secs(1);
 
-mod state;
 mod scan;
+mod state;
 use state::{Loaded, Progress, Saved, SavedFile};
 
 pub(crate) struct Kept {
@@ -53,7 +53,15 @@ impl Kept {
             .roots
             .iter()
             .cloned()
-            .map(|root| (root, Progress { downloading: true, error: None }))
+            .map(|root| {
+                (
+                    root,
+                    Progress {
+                        downloading: true,
+                        error: None,
+                    },
+                )
+            })
             .collect();
         Self {
             path,
@@ -77,7 +85,13 @@ impl Kept {
 
     pub fn pin(&self, path: SpacePath) -> std::io::Result<()> {
         lock(&self.saved).roots.insert(path.clone());
-        lock(&self.progress).insert(path, Progress { downloading: true, error: None });
+        lock(&self.progress).insert(
+            path,
+            Progress {
+                downloading: true,
+                error: None,
+            },
+        );
         self.persist()?;
         self.wake.notify_one();
         Ok(())
@@ -163,7 +177,10 @@ impl Kept {
                             self.set_progress(&root, false, Some(error.to_string()));
                         }
                     }
-                    if lock(&self.progress).get(&root).is_some_and(|state| state.error.is_none()) {
+                    if lock(&self.progress)
+                        .get(&root)
+                        .is_some_and(|state| state.error.is_none())
+                    {
                         self.set_progress(&root, false, None);
                     }
                 }
@@ -190,11 +207,17 @@ impl Kept {
         }
         let open = OpenVersion::new(version.clone());
         self.reader.cache_all(&open).await?;
-        if !version.chunks.iter().all(|chunk| self.cache.get(&chunk.id).is_some()) {
+        if !version
+            .chunks
+            .iter()
+            .all(|chunk| self.cache.get(&chunk.id).is_some())
+        {
             return Err(crate::Error::Corrupt(version.chunks[0].id));
         }
         self.finish(&path)?;
-        let switched = self.inodes.with(entry.id, |state| state.switch((Some(version), true)));
+        let switched = self
+            .inodes
+            .with(entry.id, |state| state.switch((Some(version), true)));
         if downloading || switched == Some(true) {
             self.kernel.invalidate_attrs(entry.id);
         }
@@ -203,7 +226,11 @@ impl Kept {
 
     fn prepare(&self, path: &SpacePath, version: &Version) -> std::io::Result<bool> {
         let mut saved = lock(&self.saved);
-        if saved.files.get(path).is_some_and(|file| file.current.id == version.id) {
+        if saved
+            .files
+            .get(path)
+            .is_some_and(|file| file.current.id == version.id)
+        {
             let cached = version
                 .chunks
                 .iter()
@@ -218,13 +245,18 @@ impl Kept {
             self.persist()?;
             return Ok(true);
         }
-        self.cache.pin(&version.chunks.iter().map(|chunk| chunk.id).collect::<Vec<_>>());
+        self.cache
+            .pin(&version.chunks.iter().map(|chunk| chunk.id).collect::<Vec<_>>());
         let retired = saved.files.remove(path).map_or_else(Vec::new, |file| {
             std::iter::once(file.current).chain(file.retired).collect()
         });
         saved.files.insert(
             path.clone(),
-            SavedFile { current: version.clone(), retired, ready: false },
+            SavedFile {
+                current: version.clone(),
+                retired,
+                ready: false,
+            },
         );
         drop(saved);
         self.persist()?;
@@ -234,7 +266,9 @@ impl Kept {
     fn finish(&self, path: &SpacePath) -> std::io::Result<()> {
         let retired = {
             let mut saved = lock(&self.saved);
-            let Some(file) = saved.files.get_mut(path) else { return Ok(()) };
+            let Some(file) = saved.files.get_mut(path) else {
+                return Ok(());
+            };
             file.ready = true;
             std::mem::take(&mut file.retired)
         };
@@ -245,8 +279,16 @@ impl Kept {
     fn drop_unseen(&self, seen: &BTreeSet<SpacePath>) {
         let removed = {
             let mut saved = lock(&self.saved);
-            let paths: Vec<_> = saved.files.keys().filter(|path| !seen.contains(*path)).cloned().collect();
-            paths.into_iter().filter_map(|path| saved.files.remove(&path)).collect::<Vec<_>>()
+            let paths: Vec<_> = saved
+                .files
+                .keys()
+                .filter(|path| !seen.contains(*path))
+                .cloned()
+                .collect();
+            paths
+                .into_iter()
+                .filter_map(|path| saved.files.remove(&path))
+                .collect::<Vec<_>>()
         };
         removed.iter().for_each(|file| self.unpin_file(file));
         let _ = self.persist();
@@ -254,11 +296,14 @@ impl Kept {
 
     fn unpin_file(&self, file: &SavedFile) {
         self.unpin_version(&file.current);
-        file.retired.iter().for_each(|version| self.unpin_version(version));
+        file.retired
+            .iter()
+            .for_each(|version| self.unpin_version(version));
     }
 
     fn unpin_version(&self, version: &Version) {
-        self.cache.unpin(&version.chunks.iter().map(|chunk| chunk.id).collect::<Vec<_>>());
+        self.cache
+            .unpin(&version.chunks.iter().map(|chunk| chunk.id).collect::<Vec<_>>());
     }
 
     fn set_progress(&self, root: &SpacePath, downloading: bool, error: Option<String>) {

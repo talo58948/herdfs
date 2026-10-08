@@ -8,9 +8,9 @@ use {
     crate::{
         cache::Cache,
         fs::{Fuse, Inodes, Kernel, MountState, Space},
+        journal::CommitGate,
         journal::{Committer, Journal},
         kept::Kept,
-        journal::CommitGate,
         reader::Reader,
         remote::Remote,
         stats::Stats,
@@ -71,7 +71,9 @@ pub fn mount(args: &MountArgs) -> anyhow::Result<()> {
     config.mount_options = vec![MountOption::FSName("herdfs".into())];
     let fuse = Fuse::new(space.clone(), runtime.handle().clone());
     let journal = crate::control::absolute(&args.journal)?;
-    let state = journal.parent().context("--journal must have a parent directory")?;
+    let state = journal
+        .parent()
+        .context("--journal must have a parent directory")?;
     let _control = crate::control::serve(
         space.clone(),
         &args.authority,
@@ -115,7 +117,9 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
     let root = remote.stat(SpacePath::root()).await;
     let root = root.with_context(|| format!("cannot reach space {space:?} at the authority {authority}"))?;
     let journal = crate::control::absolute(&args.journal)?;
-    let state = journal.parent().context("--journal must have a parent directory")?;
+    let state = journal
+        .parent()
+        .context("--journal must have a parent directory")?;
     let pins = state.join("pins.json");
     let loaded = Kept::load(&pins).with_context(|| format!("reading pin state {}", pins.display()))?;
     let cache = Cache::open_pinned(args.cache.clone(), args.cache_bytes, &loaded.pinned)
@@ -149,7 +153,11 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
     let space = Arc::new(Space::new(
         remote.clone(),
         cache,
-        MountState { journal, commits, kept: Some(kept.clone()) },
+        MountState {
+            journal,
+            commits,
+            kept: Some(kept.clone()),
+        },
         stats,
         decider,
         kernel,

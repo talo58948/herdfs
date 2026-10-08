@@ -252,7 +252,10 @@ impl Space {
             .pending()
             .into_iter()
             .map(|(entry, path, bytes)| {
-                (path.map_or_else(|| format!("entry-{}", entry.0), |path| path.as_str().to_owned()), bytes)
+                (
+                    path.map_or_else(|| format!("entry-{}", entry.0), |path| path.as_str().to_owned()),
+                    bytes,
+                )
             })
             .collect()
     }

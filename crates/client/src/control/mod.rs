@@ -21,7 +21,10 @@ pub(crate) async fn request(registration: &Registration, request: Value) -> anyh
     write.write_all(&serde_json::to_vec(&request)?).await?;
     write.write_all(b"\n").await?;
     let mut lines = BufReader::new(read).lines();
-    let line = lines.next_line().await?.context("mount closed its control socket")?;
+    let line = lines
+        .next_line()
+        .await?
+        .context("mount closed its control socket")?;
     Ok(serde_json::from_str(&line)?)
 }
 

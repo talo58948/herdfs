@@ -227,7 +227,11 @@ fn control(
     } else {
         println!("{}", serde_json::to_string_pretty(&response)?);
     }
-    anyhow::ensure!(response["ok"] == true, "{}", response["error"].as_str().unwrap_or("control request failed"));
+    anyhow::ensure!(
+        response["ok"] == true,
+        "{}",
+        response["error"].as_str().unwrap_or("control request failed")
+    );
     Ok(())
 }
 

@@ -64,12 +64,17 @@ pub(crate) fn serve(
     };
     let registered = Registered::write(&registration)?;
     tokio::spawn(run(listener, space, registration));
-    Ok(Guard { socket, _registered: registered })
+    Ok(Guard {
+        socket,
+        _registered: registered,
+    })
 }
 
 async fn run(listener: UnixListener, space: Arc<Space>, mount: Registration) {
     loop {
-        let Ok((stream, _)) = listener.accept().await else { return };
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
         let space = space.clone();
         let mount = mount.clone();
         tokio::spawn(async move {
@@ -104,7 +109,11 @@ async fn answer(space: &Space, mount: &Registration, request: Request) -> anyhow
     match request {
         Request::Status => {
             let (kept_bytes, pins) = kept(space)?.status();
-            let pending: Vec<_> = space.pending().into_iter().map(|(path, bytes)| json!({"path":path,"bytes":bytes})).collect();
+            let pending: Vec<_> = space
+                .pending()
+                .into_iter()
+                .map(|(path, bytes)| json!({"path":path,"bytes":bytes}))
+                .collect();
             Ok(json!({
                 "ok": true, "space": mount.space, "mountpoint": mount.mountpoint,
                 "connected": space.remote.link.connected(),
@@ -117,7 +126,9 @@ async fn answer(space: &Space, mount: &Registration, request: Request) -> anyhow
         Request::Stats => with_ok(serde_json::from_slice(&space.stats())?),
         Request::Explain { path } => {
             let path = relative(mount, &path)?;
-            let value = space.explain_path(&path).context("path has not been read since mount")?;
+            let value = space
+                .explain_path(&path)
+                .context("path has not been read since mount")?;
             with_ok(serde_json::from_slice(&value)?)
         }
         Request::Pin { path } => {
@@ -139,14 +150,20 @@ async fn answer(space: &Space, mount: &Registration, request: Request) -> anyhow
         Request::File { path } => {
             let path = relative(mount, &path)?;
             let (kept, downloading, error) = kept(space)?.file(&path);
-            let pending = space.pending().iter().any(|(pending, _)| pending == path.as_str());
+            let pending = space
+                .pending()
+                .iter()
+                .any(|(pending, _)| pending == path.as_str());
             Ok(json!({"ok":true,"kept":kept,"downloading":downloading,"pending":pending,"error":error}))
         }
     }
 }
 
 fn kept(space: &Space) -> anyhow::Result<&crate::kept::Kept> {
-    space.kept.as_deref().context("keep-downloaded state is unavailable")
+    space
+        .kept
+        .as_deref()
+        .context("keep-downloaded state is unavailable")
 }
 
 fn relative(mount: &Registration, path: &Path) -> anyhow::Result<SpacePath> {
@@ -161,11 +178,16 @@ fn relative(mount: &Registration, path: &Path) -> anyhow::Result<SpacePath> {
             _ => None,
         })
         .collect();
-    Ok(SpacePath::try_from(names.context("path is not UTF-8")?.join("/"))?)
+    Ok(SpacePath::try_from(
+        names.context("path is not UTF-8")?.join("/"),
+    )?)
 }
 
 fn with_ok(mut value: Value) -> anyhow::Result<Value> {
-    value.as_object_mut().context("control response is not an object")?.insert("ok".into(), true.into());
+    value
+        .as_object_mut()
+        .context("control response is not an object")?
+        .insert("ok".into(), true.into());
     Ok(value)
 }
 
@@ -184,9 +206,19 @@ fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
     let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
     // SAFETY: both pointers name writable values of the lengths supplied to getsockopt.
     let result = unsafe {
-        libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut credentials as *mut libc::ucred).cast(), &mut length)
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut credentials as *mut libc::ucred).cast(),
+            &mut length,
+        )
     };
-    if result == 0 { Ok(credentials.uid) } else { Err(std::io::Error::last_os_error()) }
+    if result == 0 {
+        Ok(credentials.uid)
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -195,7 +227,11 @@ fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
     let (mut uid, mut gid) = (0, 0);
     // SAFETY: uid and gid are writable for getpeereid's output values.
     let result = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
-    if result == 0 { Ok(uid) } else { Err(std::io::Error::last_os_error()) }
+    if result == 0 {
+        Ok(uid)
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[cfg(test)]
