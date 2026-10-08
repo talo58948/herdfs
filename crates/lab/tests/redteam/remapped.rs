@@ -2,14 +2,14 @@
 //! rewrote it with bytes of the same length. Every open uses direct I/O, but a mapping still
 //! reads through the kernel's page cache, which the first mapping filled.
 
-use std::fs::{self, File};
+use std::fs::File;
 use std::os::fd::AsRawFd;
-use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use herdfs_lab::abort_mount;
 
 use crate::{VISIBLE_AFTER, random_bytes, read_at, save, two_clients};
 
@@ -35,18 +35,6 @@ fn read_mapped(file: &File, len: usize) -> std::io::Result<Vec<u8>> {
 }
 
 /// Aborts the FUSE connection of the mount at `mount`, so a client stuck in the kernel exits.
-fn abort_connection(mount: &Path) -> Result<()> {
-    let table = fs::read_to_string("/proc/self/mountinfo")?;
-    let minor = table
-        .lines()
-        .map(|line| line.split(' ').collect::<Vec<_>>())
-        .find(|fields| fields.get(4).copied() == mount.to_str())
-        .and_then(|fields| Some(fields.get(2)?.split_once(':')?.1.to_owned()))
-        .with_context(|| format!("{} is not mounted", mount.display()))?;
-    fs::write(format!("/sys/fs/fuse/connections/{minor}/abort"), "1")?;
-    Ok(())
-}
-
 /// In each trial, a saves v1 of a new file; after T_vis b opens it and reads it whole, through a
 /// mapping if `mapped_first`, else with `read`, then closes it. a saves v2, other bytes of the
 /// same length; after T_vis b opens the file again and reads it whole through a mapping. Returns
@@ -59,7 +47,7 @@ fn remap_after_a_rewrite(mapped_first: bool) -> Result<Option<Vec<&'static str>>
     let (done, finished) = mpsc::channel::<()>();
     let watchdog = thread::spawn(move || {
         if finished.recv_timeout(HUNG_AFTER).is_err() {
-            let _ = abort_connection(&mount);
+            let _ = abort_mount(&mount);
         }
     });
     let mut seen = Vec::new();

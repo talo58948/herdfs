@@ -2,14 +2,12 @@
 //! permission check and before the record (the upload order of round 17).
 
 use std::fs;
-use std::path::Path;
-use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
-use herdfs_lab::Lab;
+use herdfs_lab::{Lab, StoppedProcess, process_with_arg};
 
 use crate::{VISIBLE_AFTER, random_bytes, save, two_clients};
 
@@ -27,47 +25,6 @@ fn reads(lab: &Lab, client: &str, name: &str, expected: &[u8]) -> bool {
     thread::spawn(move || done.send(fs::read(path)));
     got.recv_timeout(READ_WITHIN)
         .is_ok_and(|got| got.is_ok_and(|got| got == expected))
-}
-
-/// The pid of the lab's MinIO, the process whose command line names its data directory.
-fn store_pid(store_dir: &Path) -> Result<i32> {
-    let wanted = store_dir.as_os_str().as_encoded_bytes();
-    for proc in fs::read_dir("/proc")? {
-        let proc = proc?;
-        let Some(pid) = proc.file_name().to_str().and_then(|pid| pid.parse::<i32>().ok()) else {
-            continue;
-        };
-        let Ok(cmdline) = fs::read(proc.path().join("cmdline")) else {
-            continue;
-        };
-        if cmdline.split(|&byte| byte == 0).any(|arg| arg == wanted) {
-            return Ok(pid);
-        }
-    }
-    anyhow::bail!("no process serves {}", store_dir.display())
-}
-
-/// Stops the store, so every request to it stalls, until dropped.
-struct Stopped(i32);
-
-/// Sends `signal` to `pid` with kill(1).
-fn signal(pid: i32, signal: &str) -> Result<()> {
-    let status = Command::new("kill").arg(signal).arg(pid.to_string()).status()?;
-    ensure!(status.success(), "kill {signal} {pid}");
-    Ok(())
-}
-
-impl Stopped {
-    fn new(pid: i32) -> Result<Self> {
-        signal(pid, "-STOP")?;
-        Ok(Self(pid))
-    }
-}
-
-impl Drop for Stopped {
-    fn drop(&mut self) {
-        let _ = signal(self.0, "-CONT");
-    }
 }
 
 /// What a sees and b reads after the crash, per file.
@@ -92,8 +49,8 @@ fn crash_during_a_stalled_store_write(crash: bool, restart_first: bool) -> Resul
     };
     let (synced, closed) = (random_bytes(LEN), random_bytes(LEN));
     save(&lab.mount_path("a").join("synced"), &synced)?;
-    let pid = store_pid(lab.store_dir())?;
-    let stopped = Stopped::new(pid)?;
+    let pid = process_with_arg(lab.store_dir())?;
+    let stopped = StoppedProcess::new(pid)?;
     fs::write(lab.mount_path("a").join("closed"), &closed)?;
     thread::sleep(STALL);
     let pending = lab.stats("a")?["pending_commits"].as_u64();

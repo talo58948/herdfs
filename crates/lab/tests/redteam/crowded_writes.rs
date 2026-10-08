@@ -1,8 +1,10 @@
 //! Round 13: saves of one file while other processes on the same client stat it without pause.
 
-use std::ffi::CString;
 use std::fs::OpenOptions;
 use std::io;
+#[cfg(target_os = "linux")]
+use std::ffi::CString;
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
@@ -20,6 +22,7 @@ const STATTERS: usize = 8;
 /// Stats `path`, asking the filesystem each time rather than the kernel's cached attributes, as
 /// `stat --cached=never` does.
 #[expect(unsafe_code, reason = "statx with AT_STATX_FORCE_SYNC has no std wrapper")]
+#[cfg(target_os = "linux")]
 fn stat_uncached(path: &Path) -> io::Result<()> {
     let path = CString::new(path.as_os_str().as_bytes())?;
     // SAFETY: a zeroed `statx` is a valid value for the kernel to fill.
@@ -39,6 +42,11 @@ fn stat_uncached(path: &Path) -> io::Result<()> {
     } else {
         Err(io::Error::last_os_error())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn stat_uncached(path: &Path) -> io::Result<()> {
+    std::fs::metadata(path).map(drop)
 }
 
 /// Opens `path` for writing, writes one line at its start and fsyncs it, as a program that keeps
