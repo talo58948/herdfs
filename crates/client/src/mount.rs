@@ -70,18 +70,18 @@ pub fn mount(args: &MountArgs) -> anyhow::Result<()> {
     let mut config = Config::default();
     config.mount_options = vec![MountOption::FSName("herdfs".into())];
     let fuse = Fuse::new(space.clone(), runtime.handle().clone());
-    let mut session = Session::new(fuse, &args.mountpoint, &config)
-        .with_context(|| format!("mounting at {}", args.mountpoint.display()))?;
-    Fuse::mounted(&space, session.notifier());
     let journal = crate::control::absolute(&args.journal)?;
     let state = journal.parent().context("--journal must have a parent directory")?;
     let _control = crate::control::serve(
-        space,
+        space.clone(),
         &args.authority,
         &args.space,
         &args.mountpoint,
         state,
     )?;
+    let mut session = Session::new(fuse, &args.mountpoint, &config)
+        .with_context(|| format!("mounting at {}", args.mountpoint.display()))?;
+    Fuse::mounted(&space, session.notifier());
     let mut unmounter = session.unmount_callable();
     runtime.spawn(async move {
         tokio::select! {
