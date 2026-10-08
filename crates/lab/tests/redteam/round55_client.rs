@@ -2,8 +2,6 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::os::fd::AsRawFd;
-use std::path::PathBuf;
 use std::sync::Barrier;
 use std::thread;
 
@@ -11,9 +9,10 @@ use anyhow::{Result, ensure};
 use herdfs_lab::{Lab, Links};
 
 use crate::{
-    VISIBLE_AFTER, assert_bytes, cache_lab, random_bytes, read_at, save, stat_count, two_clients,
-    wait_pending,
+    VISIBLE_AFTER, assert_bytes, cache_lab, open_entry, random_bytes, read_at, read_entry, save,
+    stat_count, two_clients, wait_pending,
 };
+use rustix::fs::OFlags;
 
 const TRIALS: usize = 3;
 
@@ -32,8 +31,7 @@ fn write_below_moved_parent(
     thread::sleep(VISIBLE_AFTER);
 
     let held = File::open(b.join(&parent))?;
-    let through = PathBuf::from(format!("/proc/self/fd/{}", held.as_raw_fd()));
-    assert_bytes(&fs::read(through.join("child"))?, b"original", "cached child");
+    assert_bytes(&read_entry(&held, "child")?, b"original", "cached child");
 
     let original = if move_child {
         fs::rename(a.join(&parent).join("child"), a.join(&outside).join("child"))?;
@@ -47,9 +45,7 @@ fn write_below_moved_parent(
     held.metadata()?;
 
     lab.cut("b", Links::Authority)?;
-    let written = OpenOptions::new()
-        .write(true)
-        .open(through.join("child"))
+    let written = open_entry(&held, "child", OFlags::WRONLY)
         .and_then(|mut child| child.write_all(b"OFFLINE!"));
     lab.restore("b", Links::Authority)?;
     if written.is_ok() {

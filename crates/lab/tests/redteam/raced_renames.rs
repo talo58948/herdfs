@@ -2,7 +2,6 @@
 //! renamed.
 
 use std::fs::{self, File};
-use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,7 +10,8 @@ use anyhow::Result;
 use herdfs_core::proto::Request;
 use herdfs_lab::{ADMIN, SPACE};
 
-use crate::{VISIBLE_AFTER, random_bytes, save, two_clients};
+use crate::{VISIBLE_AFTER, open_entry, random_bytes, save, two_clients};
+use rustix::fs::OFlags;
 
 /// Chunks in the file's version, so that the reply to each open, which lists them, takes the
 /// client a while to read: a 2 GiB file, well within the documented limit (a file written through
@@ -28,8 +28,8 @@ const LOOK_FOR: Duration = Duration::from_millis(900);
 const LOOK_EVERY: Duration = Duration::from_millis(10);
 
 /// a saves `f0`, and the admin commits a version of it that repeats its one chunk 8,000 times. b
-/// opens `f0` and keeps the descriptor; with `reopen`, four other threads on b keep opening the
-/// file again through that descriptor (`/proc/self/fd`), as programs that reread an input do. b
+/// opens the root directory and, with `reopen`, four other threads on b keep opening the file
+/// relative to it while b renames the file 20 times. b
 /// renames the file from `f0` to `f1`, then to `f2`, and so on, 20 times, and after each rename
 /// looks for the old name for 0.9 s. Returns after how many renames b found the file at its old
 /// name.
@@ -52,12 +52,13 @@ fn old_names_after_renames(reopen: bool) -> Result<Option<usize>> {
     thread::sleep(VISIBLE_AFTER);
 
     let b = lab.mount_path("b");
-    let held = File::open(b.join("f0"))?;
-    let again = format!("/proc/self/fd/{}", held.as_raw_fd());
+    let held = File::open(b)?;
     let stop = AtomicBool::new(false);
     let reopen_until_stopped = || {
         while !stop.load(Relaxed) {
-            let _ = File::open(&again);
+            for round in 0..=ROUNDS {
+                let _ = open_entry(&held, &format!("f{round}"), OFlags::RDONLY);
+            }
         }
     };
     thread::scope(|scope| {

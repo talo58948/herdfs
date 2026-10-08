@@ -5,63 +5,14 @@
 use std::fs;
 use std::process::Command;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use anyhow::{Context, Result, bail, ensure};
-use herdfs_core::SpacePath;
-use herdfs_core::proto::{Request, Response, Version};
-use herdfs_lab::{ADMIN, Collection, Lab, LabConfig, Profile, SPACE, Strategy, run};
+use anyhow::{Context, Result, ensure};
+use herdfs_lab::{ADMIN, Collection, Lab, LabConfig, Profile, Strategy, run};
 
-use crate::{random_bytes, save};
+use crate::{SLOW_ANSWERS, journaled, random_bytes, replay_history, save, wait_for_rewrite};
 
 const LEN: usize = 1 << 20;
-/// a's links: half a second each way, so the answer to a commit is still on its way when the
-/// test sees the version at the authority and stops a.
-const SLOW_ANSWERS: Profile = Profile::Custom {
-    round_trip_ms: 1_000,
-    kilobytes_per_sec: 100_000,
-    store_first_byte_ms: 0,
-};
-const COMMITTED_WITHIN: Duration = Duration::from_secs(30);
-
-/// The versions of `f` in [`SPACE`], as the admin sees them.
-fn history(lab: &Lab) -> Result<Vec<Version>> {
-    let request = Request::History {
-        space: SPACE.into(),
-        path: SpacePath::try_from("f")?,
-    };
-    match lab.rpc(ADMIN, &request)? {
-        Response::History { versions } => Ok(versions),
-        reply => bail!("history answers with versions, not {reply:?}"),
-    }
-}
-
-/// Polls the authority until a version of `f` other than `known` appears, and returns it.
-fn wait_for_new_version(lab: &Lab, known: &Version) -> Result<Version> {
-    let deadline = Instant::now() + COMMITTED_WITHIN;
-    loop {
-        if let Some(new) = history(lab)?.into_iter().find(|version| version != known) {
-            return Ok(new);
-        }
-        if Instant::now() > deadline {
-            bail!("no commit after {COMMITTED_WITHIN:?}");
-        }
-        thread::sleep(Duration::from_millis(2));
-    }
-}
-
-/// Whether a's journal holds a record of a write still to commit.
-fn journaled(lab: &Lab) -> Result<bool> {
-    let records = fs::read_dir(lab.client_dir("a").join("journal"))?;
-    for record in records {
-        let path = record?.path();
-        if path.extension().is_some_and(|extension| extension == "json") {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 /// Under `Collection::QUICK` (grace 5 s, collection every second, 3 versions kept), a commits
 /// v1 of `f`, then closes a rewrite without fsync. The moment the authority has committed the
 /// rewrite, and before its answer crosses a's slow link, the test stops and SIGKILLs a's mount:
@@ -82,7 +33,7 @@ fn replay_after(down: Duration) -> Result<Option<(&'static str, usize)>> {
     save(&lab.mount_path("a").join("f"), &random_bytes(LEN))?;
     let v1 = lab.head(ADMIN, "f")?;
     fs::write(lab.mount_path("a").join("f"), random_bytes(LEN))?;
-    let rewrite = wait_for_new_version(&lab, &v1)?;
+    let rewrite = wait_for_rewrite(&lab, "f", &v1)?;
     let pid = lab.client_pid("a").context("a runs")?;
     run(Command::new("kill").args(["-STOP", &pid.to_string()]))?;
     lab.kill_client("a")?;
@@ -92,7 +43,7 @@ fn replay_after(down: Duration) -> Result<Option<(&'static str, usize)>> {
     let last = lab.head(ADMIN, "f")?;
     thread::sleep(down);
     ensure!(
-        history(&lab)?.contains(&rewrite),
+        replay_history(&lab, "f")?.contains(&rewrite),
         "retention kept the rewrite while a was down"
     );
     lab.restart_client("a")?;
@@ -103,7 +54,7 @@ fn replay_after(down: Duration) -> Result<Option<(&'static str, usize)>> {
         head if head == rewrite.chunks => "a's rewrite",
         _ => "neither",
     };
-    let copies = history(&lab)?
+    let copies = replay_history(&lab, "f")?
         .iter()
         .filter(|version| version.chunks == rewrite.chunks)
         .count();

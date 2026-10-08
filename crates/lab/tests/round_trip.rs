@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-use herdfs_lab::{Lab, LabConfig, Profile, Strategy, canary};
+use herdfs_lab::{Lab, LabConfig, Profile, Strategy, canary, mounted};
 
 /// T_vis plus a margin for the test's own scheduling.
 const VISIBLE_AFTER: Duration = Duration::from_millis(1_200);
@@ -35,11 +35,10 @@ fn a_write_on_one_client_reads_back_on_another() -> Result<()> {
     thread::sleep(VISIBLE_AFTER);
     assert_eq!(fs::read_to_string(lab.mount_path("b").join("hello.txt"))?, text);
 
-    let mounts = ["a", "b"].map(|name| lab.mount_path(name).display().to_string());
+    let mounts = ["a", "b"].map(|name| lab.mount_path(name).to_owned());
     drop(lab);
-    let table = fs::read_to_string("/proc/self/mountinfo")?;
     assert!(
-        mounts.iter().all(|mount| !table.contains(mount.as_str())),
+        mounts.iter().all(|mount| !mounted(mount)),
         "a mount outlived the lab"
     );
     Ok(())

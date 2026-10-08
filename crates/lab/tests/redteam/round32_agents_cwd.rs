@@ -2,7 +2,7 @@
 #![allow(
     unsafe_code,
     clippy::unwrap_used,
-    reason = "test-only renameat2 and assertions"
+    reason = "test-only atomic directory exchange and assertions"
 )]
 
 use std::ffi::CString;
@@ -10,7 +10,6 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -18,35 +17,21 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use tempfile::TempDir;
+
+use crate::TestChild;
 
 const TRIALS: usize = 40;
 
-struct Runner(Child);
-
-impl Runner {
-    fn start(mount: &Path) -> Result<Self> {
-        let test = std::env::current_exe()?;
-        let binary = test
-            .parent()
-            .and_then(Path::parent)
-            .context("test binary is under target/debug/deps")?
-            .join("herdfs-agents");
-        let child = Command::new(binary)
-            .args(["--mount", mount.to_str().context("UTF-8 mount")?])
-            .args(["--host", "box", "--command", "pwd -P"])
-            .args(["--poll-ms", "5", "--max-sessions", "40"])
-            .spawn()?;
-        Ok(Self(child))
-    }
-}
-
-impl Drop for Runner {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
+fn start_runner(mount: &Path) -> Result<TestChild> {
+    let mut command = TestChild::agents()?;
+    command
+        .arg("--mount")
+        .arg(mount)
+        .args(["--host", "box", "--command", "pwd -P"])
+        .args(["--poll-ms", "5", "--max-sessions", "40"]);
+    TestChild::spawn(command)
 }
 
 fn session(host: &Path, name: &str, cwd: &str) -> Result<PathBuf> {
@@ -57,6 +42,7 @@ fn session(host: &Path, name: &str, cwd: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
+#[cfg(target_os = "linux")]
 fn exchange(left: &Path, right: &Path) -> Result<()> {
     let left = CString::new(left.as_os_str().as_bytes())?;
     let right = CString::new(right.as_os_str().as_bytes())?;
@@ -70,6 +56,16 @@ fn exchange(left: &Path, right: &Path) -> Result<()> {
         )
     };
     ensure!(result == 0, "renameat2: {}", std::io::Error::last_os_error());
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn exchange(left: &Path, right: &Path) -> Result<()> {
+    let left = CString::new(left.as_os_str().as_bytes())?;
+    let right = CString::new(right.as_os_str().as_bytes())?;
+    // SAFETY: both paths are NUL-terminated and remain alive for the call.
+    let result = unsafe { libc::renameatx_np(libc::AT_FDCWD, left.as_ptr(), libc::AT_FDCWD, right.as_ptr(), libc::RENAME_SWAP) };
+    ensure!(result == 0, "renameatx_np: {}", std::io::Error::last_os_error());
     Ok(())
 }
 
@@ -118,7 +114,7 @@ fn a_checked_session_cwd_cannot_be_swapped_outside_the_mount() -> Result<()> {
             exchange(&left, &right).unwrap();
         }
     });
-    let _runner = Runner::start(&mount)?;
+    let _runner = start_runner(&mount)?;
     wait_finished(&sessions)?;
     wait_finished(std::slice::from_ref(&control))?;
     running.store(false, Ordering::Relaxed);

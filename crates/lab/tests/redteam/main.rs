@@ -15,6 +15,7 @@ mod debounce;
 mod followed;
 mod followed_paths;
 mod forgotten_replays;
+mod helpers;
 mod journal;
 mod listed_heads;
 mod listed_renames;
@@ -83,119 +84,97 @@ mod unstored_uploads;
 mod unusable_versions;
 mod versions;
 
+use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, Write};
-use std::os::unix::fs::FileExt;
-use std::path::Path;
-use std::thread;
+use std::io::{self, Read, Write};
+use std::os::unix::ffi::OsStringExt;
 use std::time::Duration;
 
-use anyhow::{Context, Result, ensure};
-use herdfs_core::proto::Version;
-use herdfs_lab::{Lab, LabConfig, Profile, Strategy};
+use rustix::fs::{AtFlags, Dir, Mode, OFlags};
+
+use crate::helpers::*;
 
 /// T_vis plus a margin for the test's own scheduling.
 const VISIBLE_AFTER: Duration = Duration::from_millis(1_200);
-
-/// Client `a` as alice and client `b` as bob, both streaming over LAN links, or `None` until the
-/// binaries are built.
-fn two_clients() -> Result<Option<Lab>> {
-    if let Some(reason) = herdfs_lab::missing_binaries() {
-        eprintln!("skipped: {reason}");
-        return Ok(None);
-    }
-    let config = LabConfig::default()
-        .client("a", "alice", &[], Profile::Lan, Strategy::Stream)
-        .client("b", "bob", &[], Profile::Lan, Strategy::Stream);
-    Lab::start(config).map(Some)
+/// Opens `name` relative to the held directory, without recovering a path for it.
+fn open_entry(dir: &File, name: &str, flags: OFlags) -> io::Result<File> {
+    Ok(File::from(rustix::fs::openat(
+        dir,
+        name,
+        flags | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )?))
 }
 
-fn cache_lab(cache_bytes: u64) -> Result<Option<Lab>> {
-    if let Some(reason) = herdfs_lab::missing_binaries() {
-        eprintln!("skipped: {reason}");
-        return Ok(None);
-    }
-    let config = LabConfig::default()
-        .client("a", "alice", &[], Profile::Lan, Strategy::Stream)
-        .client("b", "bob", &[], Profile::Lan, Strategy::Stream)
-        .cache_bytes("b", cache_bytes);
-    Lab::start(config).map(Some)
+fn read_held(file: &File) -> io::Result<Vec<u8>> {
+    read_at(file, 0, usize::try_from(file.metadata()?.len()).map_err(io::Error::other)?)
 }
 
-/// Writes `bytes` to `path` and returns once the authority has committed them: fsync waits.
-fn save(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = File::create(path)?;
+fn read_entry(dir: &File, name: &str) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    open_entry(dir, name, OFlags::RDONLY)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn write_entry(dir: &File, name: &str, bytes: &[u8]) -> io::Result<()> {
+    open_entry(
+        dir,
+        name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC,
+    )?
+    .write_all(bytes)
+}
+
+fn save_entry(dir: &File, name: &str, bytes: &[u8]) -> io::Result<()> {
+    let mut file = open_entry(
+        dir,
+        name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC,
+    )?;
     file.write_all(bytes)?;
     file.sync_all()
 }
 
-fn wait_pending(lab: &Lab) -> Result<()> {
-    for _ in 0..200 {
-        if lab.stats("b")?["pending_commits"] == 1 {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    anyhow::bail!("offline write was not journaled")
+fn create_entry(dir: &File, name: &str) -> io::Result<File> {
+    open_entry(dir, name, OFlags::WRONLY | OFlags::CREATE)
 }
 
-fn read_at(file: &File, off: u64, len: usize) -> io::Result<Vec<u8>> {
-    let mut bytes = vec![0; len];
-    file.read_exact_at(&mut bytes, off)?;
-    Ok(bytes)
+fn mkdir_entry(dir: &File, name: &str) -> io::Result<()> {
+    Ok(rustix::fs::mkdirat(
+        dir,
+        name,
+        Mode::RUSR | Mode::WUSR | Mode::XUSR,
+    )?)
 }
 
-fn stat_count(lab: &Lab, name: &str) -> Result<u64> {
-    lab.stats("b")?[name]
-        .as_u64()
-        .with_context(|| format!("stats count {name}"))
+fn unlink_entry(dir: &File, name: &str) -> io::Result<()> {
+    Ok(rustix::fs::unlinkat(dir, name, AtFlags::empty())?)
 }
 
-fn chunk_starts(version: &Version, bytes: &[u8], count: usize) -> Vec<(u64, u8)> {
-    let mut offset = 0_u64;
-    version
-        .chunks
-        .iter()
-        .take(count)
-        .map(|chunk| {
-            let start = (offset, bytes[offset as usize]);
-            offset += u64::from(chunk.len);
-            start
+fn rmdir_entry(dir: &File, name: &str) -> io::Result<()> {
+    Ok(rustix::fs::unlinkat(dir, name, AtFlags::REMOVEDIR)? )
+}
+
+fn rename_entry(from: &File, name: &str, to: &File, new_name: &str) -> io::Result<()> {
+    Ok(rustix::fs::renameat(from, name, to, new_name)?)
+}
+
+fn symlink_entry(dir: &File, name: &str, target: &str) -> io::Result<()> {
+    Ok(rustix::fs::symlinkat(target, dir, name)?)
+}
+
+fn readlink_entry(dir: &File, name: &str) -> io::Result<OsString> {
+    let target = rustix::fs::readlinkat(dir, name, Vec::new())?;
+    Ok(OsString::from_vec(target.into_bytes()))
+}
+
+fn entry_names(dir: &File) -> io::Result<Vec<OsString>> {
+    let fd = rustix::io::dup(dir)?;
+    Dir::read_from(fd)?
+        .filter_map(|entry| match entry {
+            Ok(entry) if entry.file_name().to_bytes() == b"." || entry.file_name().to_bytes() == b".." => None,
+            Ok(entry) => Some(Ok(OsString::from_vec(entry.file_name().to_bytes().to_vec()))),
+            Err(error) => Some(Err(error.into())),
         })
         .collect()
-}
-
-fn read_starts(file: &File, starts: &[(u64, u8)]) -> Result<()> {
-    thread::scope(|scope| {
-        let reads = starts
-            .iter()
-            .map(|&(offset, expected)| scope.spawn(move || (read_at(file, offset, 1), expected)))
-            .collect::<Vec<_>>();
-        for read in reads {
-            let (bytes, expected) = read.join().map_err(|_| anyhow::anyhow!("read thread panicked"))?;
-            ensure!(bytes? == [expected], "wrong byte at a chunk boundary");
-        }
-        Ok(())
-    })
-}
-
-fn random_bytes(len: usize) -> Vec<u8> {
-    let mut bytes = vec![0; len];
-    rand::fill(&mut bytes[..]);
-    bytes
-}
-
-/// Fails unless `got` is exactly `expected`, naming the first differing offset instead of
-/// printing both.
-fn assert_bytes(got: &[u8], expected: &[u8], what: &str) {
-    let differs = got
-        .iter()
-        .zip(expected)
-        .position(|(got, expected)| got != expected);
-    assert!(
-        got == expected,
-        "{what}: {} bytes, {} expected; first difference at {differs:?}",
-        got.len(),
-        expected.len()
-    );
 }
