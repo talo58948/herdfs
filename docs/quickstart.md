@@ -2,6 +2,8 @@
 
 This is the shortest path from a source checkout to one mounted space. Start the store and authority, sign in, create a space, then mount it.
 
+For complete local-issuer, generic OIDC and Clerk configurations, see [Self-hosting](self-hosting.md).
+
 ## Prerequisites
 
 - Linux with FUSE support, access to `/dev/fuse`, and `fusermount3` for unmounting. macOS support is in progress.
