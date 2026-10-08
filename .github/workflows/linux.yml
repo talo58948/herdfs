@@ -69,8 +69,7 @@ jobs:
         run: |
           cargo nextest run -p herdfs-lab \
             --test smoke --test round_trip --test semantics --test faults \
-            --test cli --test plans --test local_issuer
-          # Add --test control when the control branch merges.
+            --test cli --test plans --test local_issuer --test control
       - name: fsx stream and chaos
         env:
           FSX_OPS: 20000
@@ -78,4 +77,4 @@ jobs:
       - name: NFS suites
         env:
           LAB_MOUNT: nfs
-        run: cargo nextest run -p herdfs-lab --test nfs --test round_trip
+        run: cargo nextest run -p herdfs-lab --test nfs --test round_trip --test control
