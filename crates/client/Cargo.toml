@@ -12,10 +12,12 @@ path = "src/main.rs"
 [dependencies]
 herdfs-core.workspace = true
 anyhow.workspace = true
+async-trait.workspace = true
 bytes.workspace = true
 clap.workspace = true
 futures.workspace = true
 libc.workspace = true
+nfsserve.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 rustix = { workspace = true, features = ["process"] }

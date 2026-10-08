@@ -11,6 +11,7 @@ publish = false
 herdfs-client = { path = "crates/client" }
 herdfs-core = { path = "crates/core" }
 anyhow = "1"
+async-trait = "0.1"
 axum = "0.8"
 blake3 = "1"
 bytes = "1"
@@ -20,6 +21,7 @@ fuser = { version = "0.18", default-features = false }
 futures = "0.3"
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 libc = "0.2"
+nfsserve = { path = "vendor/nfsserve" }
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
