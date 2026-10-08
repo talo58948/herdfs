@@ -72,7 +72,7 @@ enum CLI {
     static func spawn(_ command: CLIArguments, stderr log: URL) throws {
         FileManager.default.createFile(atPath: log.path, contents: nil)
         let errors = try FileHandle(forWritingTo: log)
-        try errors.seekToEnd()
+        try errors.truncate(atOffset: 0)
         let process = Process()
         process.executableURL = executableURL
         process.arguments = command.rendered()

@@ -23,7 +23,7 @@ final class FinderSync: FIFinderSync, @unchecked Sendable {
     }
 
     override nonisolated func menu(for menuKind: FIMenuKind) -> NSMenu? {
-        MainActor.assumeIsolated { makeMenu(for: menuKind) }
+        MainActor.assumeIsolated { MenuResult(makeMenu(for: menuKind)) }.value
     }
 
     private func start() {
@@ -126,5 +126,13 @@ final class FinderSync: FIFinderSync, @unchecked Sendable {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
         return item
+    }
+}
+
+private struct MenuResult: @unchecked Sendable {
+    let value: NSMenu?
+
+    init(_ value: NSMenu?) {
+        self.value = value
     }
 }

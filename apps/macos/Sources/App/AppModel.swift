@@ -230,10 +230,11 @@ final class AppModel: ObservableObject {
         let found = registry.records().contains {
             $0.space == spaceID && $0.authority == Configuration.authority
         }
-        guard !found, let data = try? Data(contentsOf: log), !data.isEmpty else { return }
-        let message = String(decoding: data.suffix(2_000), as: UTF8.self)
+        guard !found else { return }
+        let data = (try? Data(contentsOf: log)) ?? Data()
+        let stderr = String(decoding: data.suffix(2_000), as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if !message.isEmpty { fail(message) }
+        fail(stderr.isEmpty ? "Mount did not register; see \(log.path)" : stderr)
     }
 
     private func processPath(_ pid: Int32) -> String? {
