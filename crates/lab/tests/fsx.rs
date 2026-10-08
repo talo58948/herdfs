@@ -62,8 +62,9 @@ fn exercise(strategy: impl FnOnce(u64) -> Strategy) -> Result<()> {
     let seed = setting("FSX_SEED", rand::random())?;
     let ops = setting("FSX_OPS", DEFAULT_OPS)?;
     let long = ops > DEFAULT_OPS;
+    let on_disk = long || env::var("LAB_MOUNT").as_deref() == Ok("nfs");
     let _turn = long.then(take_turn).transpose()?;
-    if long && !room_for_store(ops)? {
+    if on_disk && !room_for_store(ops)? {
         return Ok(());
     }
     let strategy = strategy(seed);
@@ -74,7 +75,7 @@ fn exercise(strategy: impl FnOnce(u64) -> Strategy) -> Result<()> {
         .cache_bytes("a", CACHE_BYTES)
         .cache_bytes("b", CACHE_BYTES);
     // A default run stores under 2 GB, which tmpfs holds, sparing the shared disk.
-    let lab = Lab::start(if long { clients } else { clients.on_tmpfs() })?;
+    let lab = Lab::start(if on_disk { clients } else { clients.on_tmpfs() })?;
     let local = tempfile::tempdir()?;
     fsx(local.path(), local.path(), seed, ops)?;
     let expected = fs::read(local.path().join(FILE))?;
@@ -105,7 +106,12 @@ fn exercise(strategy: impl FnOnce(u64) -> Strategy) -> Result<()> {
 
 /// Runs fsx on `dir`/[`FILE`], keeping its artifacts in `artifacts`.
 fn fsx(dir: &Path, artifacts: &Path, seed: u64, ops: u64) -> Result<()> {
-    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("fsx.toml");
+    let config = if env::var("LAB_MOUNT").as_deref() == Ok("nfs") {
+        "fsx-nfs.toml"
+    } else {
+        "fsx.toml"
+    };
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join(config);
     let output = Command::new("fsx")
         .args(["-N", &ops.to_string(), "-S", &seed.to_string(), "-f"])
         .arg(config)

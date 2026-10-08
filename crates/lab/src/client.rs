@@ -236,7 +236,7 @@ fn nfs_port(dir: &Path) -> Option<u16> {
 
 fn mount_nfs(mountpoint: &Path, port: u16) -> Result<()> {
     let options = format!(
-        "vers=3,tcp,nolock,noacl,actimeo=1,lookupcache=none,rsize=131072,wsize=131072,port={port},mountport={port}"
+        "vers=3,tcp,nolock,noacl,noac,lookupcache=none,rsize=131072,wsize=131072,port={port},mountport={port}"
     );
     let status = Command::new("sudo")
         .arg("mount.nfs")

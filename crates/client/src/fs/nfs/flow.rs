@@ -83,7 +83,11 @@ impl Nfs {
                 state.serial,
             );
         }
-        self.space.clone().write(handle, off, data.to_vec()).await?;
+        let written = self.space.clone().write(handle, off, data.to_vec()).await;
+        if written.is_ok() {
+            state.last_data = Some(Instant::now());
+        }
+        written?;
         if !stable {
             return Ok(());
         }
@@ -127,7 +131,11 @@ impl Nfs {
             );
         }
         change.fh = Some(handle);
-        self.space.clone().setattr(self.space.ino(entry), change).await
+        let changed = self.space.clone().setattr(self.space.ino(entry), change).await;
+        if changed.is_ok() {
+            state.last_data = Some(Instant::now());
+        }
+        changed
     }
 
     pub(super) async fn commit_generation(&self, entry: EntryId) -> Result<()> {
