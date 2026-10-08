@@ -4,7 +4,7 @@ use std::env;
 use std::net::Ipv4Addr;
 use std::process::Command;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{Perm, Request};
 use reqwest::blocking::Client as Http;
@@ -55,7 +55,7 @@ impl LabConfig {
         self
     }
 
-    /// Keeps the lab's directory in `/dev/shm`, so that many changes do not each wait on fsync.
+    /// Keeps the lab's directory on tmpfs where the platform provides it.
     pub fn on_tmpfs(mut self) -> Self {
         self.on_tmpfs = true;
         self
@@ -110,7 +110,10 @@ impl Lab {
     }
 
     fn start_services(config: LabConfig) -> Result<Self> {
+        #[cfg(target_os = "linux")]
         let parent = config.on_tmpfs.then(|| "/dev/shm".into());
+        #[cfg(target_os = "macos")]
+        let parent = config.on_tmpfs.then(env::temp_dir);
         let parent = parent.unwrap_or_else(env::temp_dir);
         let mut dir = tempfile::Builder::new()
             .prefix("herdfs-lab-")
@@ -124,6 +127,9 @@ impl Lab {
             .map(|n| Ipv4Addr::new(127, 0, 0, n))
             .take(config.clients.len() + 1)
             .collect();
+        std::net::TcpListener::bind((Ipv4Addr::new(127, 0, 0, 2), 0)).with_context(|| {
+            "127.0.0.2 is unavailable; on macOS add it as a loopback alias with `ifconfig lo0 alias 127.0.0.2`"
+        })?;
         let [store_port, authority_port, toxiproxy_port] = process::free_ports(&loopback)?;
         let http = Http::builder()
             .resolve(S3_HOST, (Ipv4Addr::LOCALHOST, store_port).into())

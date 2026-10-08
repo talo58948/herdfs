@@ -5,13 +5,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::{fs::File, io};
 
-use fuser::{Errno, INodeNo, OpenFlags};
 use herdfs_core::ChunkId;
 use herdfs_core::proto::EntryId;
 
 use tempfile::NamedTempFile;
 
-use super::{Inodes, OpenMode, Space};
+use super::{InodeNo, Inodes, OpenMode, Space};
 use crate::journal::Local;
 use crate::strategy::AccessRecord;
 use crate::{Result, lock, reader::Head};
@@ -75,9 +74,8 @@ impl Drop for Handle {
 }
 
 impl Space {
-    pub async fn open(self: Arc<Self>, ino: INodeNo, flags: OpenFlags, pid: u32) -> Result<u64> {
+    pub async fn open(self: Arc<Self>, ino: InodeNo, mode: OpenMode, pid: u32) -> Result<u64> {
         let entry = self.entry_id(ino);
-        let mode = OpenMode::for_open(flags);
         let (writable, truncate) = (mode.writes(), mode.truncates());
         let (file, access, upgrade) = if writable {
             // Every open for writing asks for write access, over pending changes too (C1, C4a).
@@ -108,7 +106,7 @@ impl Space {
     pub async fn write(self: Arc<Self>, fh: u64, off: u64, data: Vec<u8>) -> Result<u32> {
         let handle = self.handle(fh)?;
         if !handle.writable {
-            return Err(Errno::EBADF.into());
+            return Err(libc::EBADF.into());
         }
         self.prepare(handle.entry, false).await?;
         self.local(handle.entry, |local| {
@@ -151,7 +149,7 @@ impl Space {
         let settles = self.inodes.local(handle.entry, |local| local.settles());
         let (settles, refused) = settles.unwrap_or((0, 0));
         if refused > handle.synced.swap(settles, Relaxed) {
-            return Err(Errno::EIO.into());
+            return Err(libc::EIO.into());
         }
         Ok(())
     }
@@ -164,12 +162,12 @@ impl Space {
         };
         let attempt = attempts.wait_for(|(covered, _)| *covered >= sealed).await;
         let committed = attempt.is_ok_and(|attempt| attempt.1);
-        if committed { Ok(()) } else { Err(Errno::EIO.into()) }
+        if committed { Ok(()) } else { Err(libc::EIO.into()) }
     }
 
     /// Truncates through the journal: on the handle if one is given, else as a short open,
     /// which needs write access as an open for writing does.
-    pub(super) async fn truncate(&self, ino: INodeNo, size: u64, fh: Option<u64>) -> Result<()> {
+    pub(super) async fn truncate(&self, ino: InodeNo, size: u64, fh: Option<u64>) -> Result<()> {
         let handle = fh.map(|fh| self.handle(fh)).transpose()?;
         let handle = handle.filter(|handle| handle.writable);
         let entry = self.entry_id(ino);
@@ -280,6 +278,6 @@ impl Space {
     }
 
     pub(super) fn handle(&self, fh: u64) -> Result<Arc<Handle>> {
-        Ok(lock(&self.handles).get(&fh).cloned().ok_or(Errno::EBADF)?)
+        Ok(lock(&self.handles).get(&fh).cloned().ok_or(libc::EBADF)?)
     }
 }

@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use crate::issuer::Issuer;
 use crate::jev::FakeJev;
+use crate::mount;
 use crate::process::{self, Proc};
 use crate::store::S3_HOST;
 use crate::{Profile, SPACE};
@@ -128,7 +129,7 @@ impl Client {
                 .args(["--jev-url", jev.url()]);
         }
         let mut mount = Proc::spawn(&self.spec.name, command, &self.dir.join("client.log"))?;
-        mount.wait_until("mounted", || is_mounted(&self.mount))?;
+        mount.wait_until("mounted", || mount::mounted(&self.mount))?;
         self.process = Some(mount);
         Ok(())
     }
@@ -136,19 +137,10 @@ impl Client {
     /// SIGKILLs the mount process, then detaches the mount it leaves behind.
     pub(crate) fn kill(&mut self) -> Result<()> {
         self.process = None;
-        if !is_mounted(&self.mount) {
+        if !mount::mounted(&self.mount) {
             return Ok(());
         }
-        let status = Command::new("fusermount3")
-            .args(["-u", "-z"])
-            .arg(&self.mount)
-            .status()?;
-        ensure!(
-            status.success(),
-            "fusermount3 -u -z {}: {status}",
-            self.mount.display()
-        );
-        Ok(())
+        mount::detach(&self.mount)
     }
 
     pub(crate) fn pid(&self) -> Option<u32> {
@@ -188,12 +180,4 @@ impl Drop for Client {
             eprintln!("lab: {error:#}");
         }
     }
-}
-
-fn is_mounted(path: &Path) -> bool {
-    let Ok(table) = fs::read_to_string("/proc/self/mountinfo") else {
-        return false;
-    };
-    // The fifth field of each line is the mount point.
-    table.lines().any(|line| line.split(' ').nth(4) == path.to_str())
 }

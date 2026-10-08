@@ -2,7 +2,6 @@
 //! while another writer keeps committing new versions of the file.
 
 use std::fs::{self, File};
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc;
 use std::thread;
@@ -11,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{Perm, Request, Version};
-use herdfs_lab::{ADMIN, Lab, SPACE};
+use herdfs_lab::{ADMIN, Lab, SPACE, abort_mount};
 
 use crate::{VISIBLE_AFTER, random_bytes, read_at, save, two_clients};
 
@@ -56,6 +55,7 @@ fn recommit(lab: &Lab, base: &Version, request: u64) -> Result<()> {
 }
 
 /// The threads of process `pid` that wait in the kernel for a page lock.
+#[cfg(target_os = "linux")]
 fn waiting_for_pages(pid: u32) -> Result<usize> {
     let mut waiting = 0;
     for task in fs::read_dir(format!("/proc/{pid}/task"))? {
@@ -65,20 +65,10 @@ fn waiting_for_pages(pid: u32) -> Result<usize> {
     Ok(waiting)
 }
 
-/// Aborts the FUSE connection of the mount at `mount`, which fails the requests it holds, so that
-/// a client stuck in the kernel can exit and the lab can be torn down.
-fn abort_connection(mount: &Path) -> Result<()> {
-    let table = fs::read_to_string("/proc/self/mountinfo")?;
-    // The fifth field is the mount point; the third its device, whose minor number names the
-    // connection.
-    let minor = table
-        .lines()
-        .map(|line| line.split(' ').collect::<Vec<_>>())
-        .find(|fields| fields.get(4).copied() == mount.to_str())
-        .and_then(|fields| Some(fields.get(2)?.split_once(':')?.1.to_owned()))
-        .with_context(|| format!("{} is not mounted", mount.display()))?;
-    fs::write(format!("/sys/fs/fuse/connections/{minor}/abort"), "1")?;
-    Ok(())
+#[cfg(target_os = "macos")]
+fn waiting_for_pages(_pid: u32) -> Result<usize> {
+    // Darwin exposes no stable equivalent of Linux wchan names; this count is diagnostic only.
+    Ok(0)
 }
 
 /// Bob's only access is read on `shared`. In each of 20 trials, a saves v1 of a new file there,
@@ -130,7 +120,7 @@ fn hung_read(busy: bool) -> Result<Option<Option<String>>> {
         })?;
         if !returned {
             let waiting = waiting_for_pages(lab.client_pid("b").context("b's client runs")?)?;
-            abort_connection(lab.mount_path("b"))?;
+            abort_mount(lab.mount_path("b"))?;
             let hung = format!("trial {trial}, with {waiting} of b's client threads waiting for a page lock");
             return Ok(Some(Some(hung)));
         }

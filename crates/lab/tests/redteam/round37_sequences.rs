@@ -1,21 +1,25 @@
 //! Round 37: repeated rebases and version switches through held entries.
 
 use std::fs::{self, File};
-use std::os::fd::AsRawFd;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::thread;
 
 use anyhow::{Result, ensure};
 use herdfs_lab::Links;
 
-use crate::{VISIBLE_AFTER, assert_bytes, random_bytes, read_at, save, two_clients};
+use crate::{
+    VISIBLE_AFTER, assert_bytes, entry_names, random_bytes, read_at, read_entry, readlink_entry, save,
+    two_clients, write_entry,
+};
 
 const TRIALS: usize = 3;
 const SWITCHES: usize = 3;
 
-fn list(path: &Path) -> Result<()> {
-    let entries = fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
-    ensure!(entries.len() == SWITCHES, "{} has all children", path.display());
+fn list(dir: &File) -> Result<()> {
+    ensure!(
+        entry_names(dir)?.len() == SWITCHES,
+        "held directory has all children"
+    );
     Ok(())
 }
 
@@ -47,10 +51,10 @@ fn rebase_over_decoys(trial: usize) -> Result<Option<()>> {
     thread::sleep(VISIBLE_AFTER);
 
     let held = File::open(b.join(&origin))?;
-    let through = PathBuf::from(format!("/proc/self/fd/{}", held.as_raw_fd()));
-    list(&through)?;
+    list(&held)?;
     for hop in 0..SWITCHES {
-        list(&b.join(format!("destination-{trial}-{hop}")))?;
+        let decoy = File::open(b.join(format!("destination-{trial}-{hop}")))?;
+        list(&decoy)?;
     }
 
     let mut current = origin;
@@ -63,7 +67,7 @@ fn rebase_over_decoys(trial: usize) -> Result<Option<()>> {
 
         lab.cut("b", Links::Authority)?;
         let child = hop;
-        let read = fs::read_link(through.join(format!("child-{child}")));
+        let read = readlink_entry(&held, &format!("child-{child}"));
         lab.restore("b", Links::Authority)?;
         let expected = format!("original-{trial}-{child}");
         ensure!(
@@ -91,10 +95,9 @@ fn repeated_rebases_replace_cached_destination_subtrees() -> Result<()> {
     }
     thread::sleep(VISIBLE_AFTER);
     let held = File::open(lab.mount_path("b").join("stationary"))?;
-    let through = PathBuf::from(format!("/proc/self/fd/{}", held.as_raw_fd()));
-    list(&through)?;
+    list(&held)?;
     lab.cut("b", Links::Authority)?;
-    ensure!(fs::read_link(through.join("child-0"))?.as_os_str() == "control");
+    ensure!(readlink_entry(&held, "child-0")?.as_os_str() == "control");
     lab.restore("b", Links::Authority)?;
     drop(lab);
 
@@ -176,12 +179,8 @@ fn crash_recovery_keeps_the_latest_seal_across_repeated_parent_moves() -> Result
         .clone()
         .map(|case| File::open(b.join(format!("recovery-{case}-0"))))
         .collect::<std::io::Result<Vec<_>>>()?;
-    let through = held
-        .iter()
-        .map(|dir| PathBuf::from(format!("/proc/self/fd/{}/file", dir.as_raw_fd())))
-        .collect::<Vec<_>>();
-    for path in &through {
-        assert_bytes(&fs::read(path)?, b"initial", "online recovery control");
+    for dir in &held {
+        assert_bytes(&read_entry(dir, "file")?, b"initial", "online recovery control");
     }
 
     lab.cut("b", Links::Authority)?;
@@ -191,7 +190,7 @@ fn crash_recovery_keeps_the_latest_seal_across_repeated_parent_moves() -> Result
         .collect::<Vec<_>>();
     for seal in 0..SWITCHES {
         for case in cases.clone() {
-            fs::write(&through[case], format!("latest-{case}-{seal}"))?;
+            write_entry(&held[case], "file", format!("latest-{case}-{seal}").as_bytes())?;
             if case == 0 {
                 continue;
             }

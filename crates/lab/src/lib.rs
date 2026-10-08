@@ -1,4 +1,4 @@
-//! A test lab for herdfs on one Linux machine, without root: MinIO, toxiproxy, a test OIDC
+//! A test lab for herdfs on one machine, without root: MinIO, toxiproxy, a test OIDC
 //! issuer, the authority, and FUSE clients. Client N reaches the authority and the store through
 //! its own proxies on 127.0.0.N, shaped by its link profile.
 //!
@@ -12,6 +12,7 @@ mod direct;
 mod issuer;
 mod jev;
 mod lifecycle;
+mod mount;
 mod process;
 mod store;
 mod sweep;
@@ -35,7 +36,10 @@ pub use crate::client::Strategy;
 pub use crate::issuer::{AUDIENCE, BadToken, Issuer};
 pub use crate::jev::{FakeJev, JevAnswers, JevMode};
 pub use crate::lifecycle::LabConfig;
-pub use crate::process::run;
+pub use crate::mount::{abort_mount, mounted};
+pub use crate::process::{
+    StoppedProcess, child_processes, process_cpu_time, process_snapshot, process_with_arg, run,
+};
 pub use crate::store::STORE_CREDENTIALS;
 pub use crate::sweep::{Hit, canary, sweep};
 pub use crate::toxiproxy::{Links, Profile};

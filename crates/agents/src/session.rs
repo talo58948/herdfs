@@ -3,17 +3,19 @@
 //! Session files come from whoever can write the host's directory, so they are opened only as
 //! regular files and never through a symlink, which could point at the runner host's own files.
 
+mod process;
+
 use std::ffi::OsStr;
 use std::io::{self, ErrorKind};
-use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
-use anyhow::{Context, bail, ensure};
+use anyhow::{Context, bail};
 use rustix::fs::{Mode, OFlags};
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::Command;
+
+use process::Outcome;
 
 const OUTSIDE_MOUNT: &str = "cwd outside mount";
 const DIR_FLAGS: OFlags = OFlags::RDONLY
@@ -43,45 +45,14 @@ pub(crate) struct Session {
 }
 
 impl Agent {
-    /// Runs the session and records `done` or `failed: <reason>` as its status.
+    /// Runs the session and records its terminal status.
     pub(crate) async fn run(&self, session: &Session) -> io::Result<()> {
         let status = match self.execute(session).await {
-            Ok(()) => "done".to_owned(),
+            Ok(Outcome::Cancelled) => "cancelled".to_owned(),
+            Ok(Outcome::Done) => "done".to_owned(),
             Err(err) => format!("failed: {err:#}"),
         };
-        set_status(session, &status).await
-    }
-
-    async fn execute(&self, session: &Session) -> anyhow::Result<()> {
-        let cwd = self.cwd(session).await?;
-        let cwd_path = PathBuf::from(format!("/proc/self/fd/{}", cwd.as_raw_fd()));
-        let prompt = open(session, "prompt", OFlags::RDONLY).await?;
-        let output = open(
-            session,
-            "output",
-            OFlags::WRONLY | OFlags::CREATE | OFlags::APPEND,
-        )
-        .await?;
-        let stdout = output.try_clone().await?.into_std().await;
-        let exit = Command::new("sh")
-            .arg("-c")
-            .arg(&self.command)
-            .current_dir(cwd_path)
-            .env("HERDFS_SESSION_DIR", &session.dir)
-            .env("HERDFS_MOUNT", &self.mount)
-            .stdin(prompt.into_std().await)
-            .stdout(stdout.try_clone()?)
-            .stderr(stdout)
-            .status()
-            .await
-            .context("spawn")?;
-        drop(cwd);
-        // On herdfs, fsync means committed: other hosts must never see the session end
-        // before they can see all of its output.
-        output.sync_all().await.context("sync output")?;
-        let Some(code) = exit.code() else { bail!("{exit}") };
-        ensure!(code == 0, "exit {code}");
-        Ok(())
+        transition(session, Some("running"), &status).await
     }
 
     /// The directory named by the session's `cwd` file, or the mount root without one.
@@ -105,29 +76,43 @@ impl Agent {
     }
 }
 
-/// The prompt's stamp, if the session has a non-empty prompt and no status yet.
-pub(crate) async fn new_prompt(dir: &Path) -> Option<Stamp> {
-    // A status of any kind, even one we cannot check, counts as present: never starting beats
-    // starting twice.
-    let status = fs::symlink_metadata(dir.join("status")).await;
-    if !matches!(status, Err(err) if err.kind() == ErrorKind::NotFound) {
-        return None;
-    }
-    let meta = fs::symlink_metadata(dir.join("prompt")).await.ok()?;
+/// The prompt's stamp and whether the session is already queued.
+pub(crate) async fn pending_prompt(mount: &Path, dir: &Path) -> io::Result<Option<(Stamp, bool)>> {
+    let session = session(mount, dir).await?;
+    let queued = match read(&session, "status").await? {
+        None => false,
+        Some(status) if status.trim() == "queued" => true,
+        Some(_) => return Ok(None),
+    };
+    let meta = match fs::symlink_metadata(dir.join("prompt")).await {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
     // Another host's create shows an empty prompt before the writer's close commits its bytes.
     if meta.len() == 0 {
-        return None;
+        return Ok(None);
     }
-    Some(Stamp {
-        len: meta.len(),
-        modified: meta.modified().ok()?,
-    })
+    let modified = meta.modified()?;
+    Ok(Some((
+        Stamp {
+            len: meta.len(),
+            modified,
+        },
+        queued,
+    )))
 }
 
-/// Marks the session `running`, once its directory proves to be inside the host's.
+/// Marks a newly discovered session `queued`.
+pub(crate) async fn queue(mount: &Path, dir: &Path) -> io::Result<()> {
+    let session = session(mount, dir).await?;
+    transition(&session, None, "queued").await
+}
+
+/// Moves a queued session to `running`, once its directory proves to be inside the host's.
 pub(crate) async fn claim(mount: &Path, dir: &Path) -> io::Result<Session> {
     let session = session(mount, dir).await?;
-    set_status(&session, "running").await?;
+    transition(&session, Some("queued"), "running").await?;
     Ok(session)
 }
 
@@ -138,15 +123,25 @@ pub(crate) async fn recover(mount: &Path, dir: &Path) -> io::Result<()> {
         .await?
         .is_some_and(|status| status.trim() == "running")
     {
-        set_status(&session, "failed: runner restarted").await?;
+        transition(&session, Some("running"), "failed: runner restarted").await?;
     }
     Ok(())
 }
 
-async fn set_status(session: &Session, status: &str) -> io::Result<()> {
+async fn transition(session: &Session, from: Option<&str>, status: &str) -> io::Result<()> {
+    let current = read(session, "status").await?;
+    if current.as_deref().map(str::trim) != from {
+        return Err(io::Error::other(format!(
+            "status changed before transition to {status}"
+        )));
+    }
+    write(session, "status", status).await
+}
+
+async fn write(session: &Session, name: &str, text: &str) -> io::Result<()> {
     let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC;
-    let mut file = open(session, "status", flags).await?;
-    file.write_all(format!("{status}\n").as_bytes()).await?;
+    let mut file = open(session, name, flags).await?;
+    file.write_all(format!("{text}\n").as_bytes()).await?;
     file.sync_all().await
 }
 

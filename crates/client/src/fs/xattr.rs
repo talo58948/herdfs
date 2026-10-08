@@ -1,42 +1,27 @@
 use std::ffi::OsStr;
 
-use fuser::{Errno, INodeNo, ReplyXattr};
-
-use super::Space;
+use super::{InodeNo, Space};
 
 const STATS: &str = "user.herdfs.stats";
 const PLAN: &str = "user.herdfs.plan";
 
-pub(super) fn get(space: &Space, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
-    let value = match (ino, name) {
-        (INodeNo::ROOT, name) if name == STATS => Some(space.stats()),
-        (_, name) if name == PLAN => space.explain(space.kernel.entry(ino)),
+pub(super) fn get(space: &Space, ino: InodeNo, name: &OsStr) -> Option<Vec<u8>> {
+    match (ino, name) {
+        (InodeNo::ROOT, name) if name == STATS => Some(space.stats()),
+        (_, name) if name == PLAN => space.explain(space.entry_id(ino)),
         _ => None,
-    };
-    match value {
-        Some(value) => answer(&value, size, reply),
-        None => reply.error(Errno::NO_XATTR),
     }
 }
 
-pub(super) fn list(space: &Space, ino: INodeNo, size: u32, reply: ReplyXattr) {
+pub(super) fn list(space: &Space, ino: InodeNo) -> Vec<u8> {
     let mut names = Vec::new();
-    if ino == INodeNo::ROOT {
+    if ino == InodeNo::ROOT {
         names.extend_from_slice(STATS.as_bytes());
         names.push(0);
     }
-    if space.explain(space.kernel.entry(ino)).is_some() {
+    if space.explain(space.entry_id(ino)).is_some() {
         names.extend_from_slice(PLAN.as_bytes());
         names.push(0);
     }
-    answer(&names, size, reply);
-}
-
-/// Answers with the size first and `ERANGE` when the caller's buffer is too small.
-fn answer(value: &[u8], size: u32, reply: ReplyXattr) {
-    match u32::try_from(value.len()) {
-        Ok(len) if size == 0 => reply.size(len),
-        Ok(len) if len <= size => reply.data(value),
-        _ => reply.error(Errno::ERANGE),
-    }
+    names
 }

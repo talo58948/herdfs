@@ -1,10 +1,16 @@
 //! Round 35: id-addressed operations through entries held while another client moves them.
 
-#![expect(unsafe_code, reason = "test-only O_PATH and readlinkat")]
+#![cfg_attr(
+    target_os = "linux",
+    expect(unsafe_code, reason = "the held-symlink probe requires Linux O_PATH")
+)]
 
+#[cfg(target_os = "linux")]
 use std::ffi::{CString, OsString};
 use std::fs::{self, File};
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
@@ -13,14 +19,15 @@ use std::thread;
 use anyhow::{Result, ensure};
 use herdfs_lab::Links;
 
-use crate::{VISIBLE_AFTER, assert_bytes, save, two_clients};
+use crate::{
+    VISIBLE_AFTER, assert_bytes, entry_names, mkdir_entry, readlink_entry, rename_entry, rmdir_entry, save,
+    symlink_entry, two_clients, unlink_entry, write_entry,
+};
 
 const TRIALS: usize = 3;
 type ComparedBytes = Option<(Vec<u8>, Option<Vec<u8>>)>;
 
-/// Exercises every child operation through a directory descriptor after its path is optionally
-/// moved and recreated. The replacement carries the same child names so a path-based request
-/// changes a visible canary instead of merely failing.
+/// Exercises child operations through a directory descriptor after its path is moved and reused.
 fn directory_ops(trial: usize, moved: bool) -> Result<Option<()>> {
     let Some(lab) = two_clients()? else {
         return Ok(None);
@@ -37,9 +44,8 @@ fn directory_ops(trial: usize, moved: bool) -> Result<Option<()>> {
     thread::sleep(VISIBLE_AFTER);
 
     let held = File::open(b.join(&old))?;
-    let through = PathBuf::from(format!("/proc/self/fd/{}", held.as_raw_fd()));
-    let mut before = fs::read_dir(&through)?.collect::<std::io::Result<Vec<_>>>()?;
-    before.sort_by_key(|entry| entry.file_name());
+    let mut before = entry_names(&held)?;
+    before.sort();
     ensure!(before.len() == 4, "control lists all original children");
 
     let authoritative = if moved {
@@ -54,21 +60,19 @@ fn directory_ops(trial: usize, moved: bool) -> Result<Option<()>> {
         original.clone()
     };
     thread::sleep(VISIBLE_AFTER);
-    let listed: Vec<_> = fs::read_dir(&through)?
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<std::io::Result<_>>()?;
+    let listed = entry_names(&held)?;
     ensure!(
         listed.iter().any(|name| name == "listed-original"),
         "readdir follows held parent"
     );
     ensure!(!listed.iter().any(|name| name == "listed-replacement"));
 
-    save(&through.join("created"), b"created")?;
-    fs::create_dir(through.join("made-dir"))?;
-    std::os::unix::fs::symlink("created", through.join("made-link"))?;
-    fs::remove_file(through.join("victim"))?;
-    fs::remove_dir(through.join("empty"))?;
-    fs::rename(through.join("source"), through.join("destination"))?;
+    write_entry(&held, "created", b"created")?;
+    mkdir_entry(&held, "made-dir")?;
+    symlink_entry(&held, "made-link", "created")?;
+    unlink_entry(&held, "victim")?;
+    rmdir_entry(&held, "empty")?;
+    rename_entry(&held, "source", &held, "destination")?;
 
     ensure!(
         authoritative.join("created").is_file(),
@@ -78,7 +82,7 @@ fn directory_ops(trial: usize, moved: bool) -> Result<Option<()>> {
         authoritative.join("made-dir").is_dir(),
         "mkdir follows held parent"
     );
-    ensure!(fs::read_link(authoritative.join("made-link"))? == PathBuf::from("created"));
+    ensure!(readlink_entry(&held, "made-link")? == PathBuf::from("created").into_os_string());
     ensure!(
         !authoritative.join("victim").exists(),
         "unlink follows held parent"
@@ -123,8 +127,7 @@ fn child_operations_follow_a_held_recreated_directory() -> Result<()> {
     Ok(())
 }
 
-/// Truncates and rewrites a file through b's descriptor after a optionally moves it and recreates
-/// its old name. Returns the authoritative bytes of the held entry and its replacement.
+/// Rewrites through b's descriptor after optionally moving the file and reusing its old name.
 fn rewrite_held(trial: usize, moved: bool) -> Result<ComparedBytes> {
     let Some(lab) = two_clients()? else {
         return Ok(None);
@@ -176,8 +179,7 @@ fn truncate_and_write_follow_a_held_recreated_file() -> Result<()> {
     Ok(())
 }
 
-/// Closes an offline rewrite through a held descriptor, crashes b, and restarts it. When moved,
-/// the original name is reused before the rewrite so only recovery by entry id can land correctly.
+/// Recovers an offline rewrite after a move, old-name reuse, and client crash.
 fn recover_held(trial: usize, moved: bool) -> Result<ComparedBytes> {
     let Some(mut lab) = two_clients()? else {
         return Ok(None);
@@ -234,6 +236,7 @@ fn crash_recovery_follows_a_held_recreated_file() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn held_symlink(trial: usize, moved: bool) -> Result<Option<PathBuf>> {
     let Some(lab) = two_clients()? else {
         return Ok(None);
@@ -278,6 +281,7 @@ fn held_symlink(trial: usize, moved: bool) -> Result<Option<PathBuf>> {
 /// stationary symlink controls three rename-and-recreate trials.
 // contract: C7
 #[test]
+#[cfg(target_os = "linux")] // O_PATH can hold a symlink inode; Darwin has no equivalent operation.
 fn readlink_follows_a_held_recreated_symlink() -> Result<()> {
     let Some(control) = held_symlink(0, false)? else {
         return Ok(());

@@ -1,9 +1,7 @@
 //! Round 51: a deferred truncate layered with a sibling write on a repeatedly moved entry.
 
 use std::fs::{self, OpenOptions};
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
-use std::path::PathBuf;
 use std::thread;
 
 use anyhow::{Context, Result, ensure};
@@ -21,7 +19,6 @@ fn deferred_then_written(lab: &mut Lab, trial: usize, moved: bool) -> Result<(Ve
     save(&a.join(&first), b"old bytes")?;
     thread::sleep(VISIBLE_AFTER);
     let held = OpenOptions::new().read(true).write(true).open(b.join(&first))?;
-    let through = PathBuf::from(format!("/proc/self/fd/{}", held.as_raw_fd()));
 
     let mut current = first;
     let mut replacements = Vec::new();
@@ -39,7 +36,7 @@ fn deferred_then_written(lab: &mut Lab, trial: usize, moved: bool) -> Result<(Ve
     }
 
     lab.cut("b", Links::Authority)?;
-    drop(OpenOptions::new().write(true).truncate(true).open(&through)?);
+    held.set_len(0)?;
     held.write_all_at(b"after truncate", 0)?;
     drop(held);
     wait_pending(lab)?;

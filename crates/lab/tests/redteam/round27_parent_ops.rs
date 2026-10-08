@@ -1,9 +1,7 @@
 //! Round 27: operations through held directories while they move or relocate.
 
-use std::fs::{self, File, OpenOptions};
-use std::os::fd::AsRawFd;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::fs::{self, File};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::mpsc;
 use std::thread;
@@ -11,9 +9,12 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, ensure};
 use herdfs_core::chunk;
-use herdfs_lab::{ADMIN, Lab, LabConfig, Profile, Strategy};
+use herdfs_lab::{ADMIN, Lab, LabConfig, Profile, StoppedProcess, Strategy, process_with_arg};
 
-use crate::{VISIBLE_AFTER, random_bytes, save, two_clients};
+use crate::{
+    VISIBLE_AFTER, create_entry, random_bytes, read_entry, rename_entry, save, two_clients, unlink_entry,
+    write_entry,
+};
 
 const SLOW_AUTHORITY: Profile = Profile::Custom {
     round_trip_ms: 2_000,
@@ -38,44 +39,6 @@ fn start() -> Result<Option<Lab>> {
     Lab::start(config).map(Some)
 }
 
-fn store_pid(store_dir: &Path) -> Result<i32> {
-    let wanted = store_dir.as_os_str().as_encoded_bytes();
-    for proc in fs::read_dir("/proc")? {
-        let proc = proc?;
-        let Some(pid) = proc.file_name().to_str().and_then(|pid| pid.parse().ok()) else {
-            continue;
-        };
-        let Ok(cmdline) = fs::read(proc.path().join("cmdline")) else {
-            continue;
-        };
-        if cmdline.split(|&byte| byte == 0).any(|arg| arg == wanted) {
-            return Ok(pid);
-        }
-    }
-    Err(anyhow!("no process serves {}", store_dir.display()))
-}
-
-struct Stopped(i32);
-
-impl Stopped {
-    fn new(pid: i32) -> Result<Self> {
-        ensure!(
-            Command::new("kill")
-                .args(["-STOP", &pid.to_string()])
-                .status()?
-                .success(),
-            "stop MinIO {pid}"
-        );
-        Ok(Self(pid))
-    }
-}
-
-impl Drop for Stopped {
-    fn drop(&mut self) {
-        let _ = Command::new("kill").args(["-CONT", &self.0.to_string()]).status();
-    }
-}
-
 /// Races O_CREAT with another client installing the child after b's negative lookup, while a
 /// optionally keeps moving the held parent after that.
 fn open_existing(lab: &Lab, trial: usize, moving: bool) -> Result<(std::io::Result<File>, PathBuf, usize)> {
@@ -85,16 +48,9 @@ fn open_existing(lab: &Lab, trial: usize, moving: bool) -> Result<(std::io::Resu
     thread::sleep(VISIBLE_AFTER);
     let held = File::open(b.join(&first))?;
     thread::sleep(VISIBLE_AFTER);
-    let child = PathBuf::from(format!("/proc/self/fd/{}/child", held.as_raw_fd()));
     let stop = AtomicBool::new(false);
     let (opened, last, moves) = thread::scope(|scope| {
-        let opener = scope.spawn(|| {
-            OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(child)
-        });
+        let opener = scope.spawn(|| create_entry(&held, "child"));
         let rename = scope.spawn(|| -> Result<(PathBuf, usize)> {
             let mut current = a.join(first);
             let mut moves = 0;
@@ -156,10 +112,9 @@ fn remove_child(lab: &Lab, trial: usize, moving: bool) -> Result<(std::io::Resul
     thread::sleep(VISIBLE_AFTER);
     let held = File::open(b.join(&first))?;
     thread::sleep(VISIBLE_AFTER);
-    let child = PathBuf::from(format!("/proc/self/fd/{}/child", held.as_raw_fd()));
     let stop = AtomicBool::new(false);
     let (removed, last, moves) = thread::scope(|scope| {
-        let remover = scope.spawn(|| fs::remove_file(child));
+        let remover = scope.spawn(|| unlink_entry(&held, "child"));
         let rename = scope.spawn(|| -> Result<(PathBuf, usize)> {
             let mut current = a.join(first);
             let mut moves = 0;
@@ -220,11 +175,9 @@ fn rename_after_parents_move(lab: &Lab, trial: usize, move_parents: bool) -> Res
 
     let source_fd = File::open(b.join(&source))?;
     let destination_fd = File::open(b.join(&destination))?;
-    let source_child = PathBuf::from(format!("/proc/self/fd/{}/child", source_fd.as_raw_fd()));
-    let destination_child = PathBuf::from(format!("/proc/self/fd/{}/child", destination_fd.as_raw_fd()));
-    fs::read(&source_child)?;
-    let stopped = Stopped::new(store_pid(lab.store_dir())?)?;
-    fs::write(&source_child, random_bytes(NEW_LEN))?;
+    read_entry(&source_fd, "child")?;
+    let stopped = StoppedProcess::new(process_with_arg(lab.store_dir())?)?;
+    write_entry(&source_fd, "child", &random_bytes(NEW_LEN))?;
     ensure!(lab.stats("b")?["pending_commits"] == 1, "rewrite is pending");
 
     let (source_now, destination_now) = if move_parents {
@@ -243,7 +196,7 @@ fn rename_after_parents_move(lab: &Lab, trial: usize, move_parents: bool) -> Res
     };
 
     let (sent, finished) = mpsc::channel();
-    thread::spawn(move || sent.send(fs::rename(source_child, destination_child)));
+    thread::spawn(move || sent.send(rename_entry(&source_fd, "child", &destination_fd, "child")));
     let early = finished.recv_timeout(STALL).ok();
     if let Some(Err(err)) = &early {
         return Err(anyhow!("rename through held parents: {err}"));

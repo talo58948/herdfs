@@ -127,7 +127,7 @@ pub(crate) enum PlanSource {
 pub struct OpenContext {
     pub size: u64,
     pub extension: Option<String>,
-    /// The opening process's name, when the adapter can report one.
+    /// The opening process's name, when the platform provides it.
     pub comm: String,
     /// The fraction of the version's bytes already cached.
     pub coverage: f64,

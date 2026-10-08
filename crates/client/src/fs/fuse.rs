@@ -6,13 +6,13 @@ use std::time::SystemTime;
 use std::{ffi::OsStr, io, path::Path, sync::Arc};
 
 use fuser::{
-    BsdFileFlags, Errno, FileHandle, Filesystem, INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags,
-    RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
-    ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
+    BsdFileFlags, Errno, FileHandle, Filesystem, INodeNo, InitFlags, KernelConfig, LockOwner, Notifier,
+    OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
+    ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
 use tokio::runtime::Handle as Runtime;
 
-use super::answer::Answer;
+use super::answer::{self, Answer, inode, open_mode};
 use super::{Space, namespace::AttrChange, xattr};
 use crate::{Result, unix_ms};
 
@@ -26,6 +26,10 @@ impl Fuse {
         Self { space, runtime }
     }
 
+    pub fn mounted(space: &Space, notifier: Notifier) {
+        answer::mounted(space, notifier);
+    }
+
     fn space(&self) -> Arc<Space> {
         self.space.clone()
     }
@@ -37,22 +41,8 @@ impl Fuse {
         work: impl Future<Output = Result<T>> + Send + 'static,
     ) {
         self.runtime.spawn(async move {
-            Self::reply(reply, work.await);
+            answer::reply(reply, work.await);
         });
-    }
-
-    fn reply<T>(reply: impl Answer<T>, result: Result<T>) -> bool {
-        match result {
-            Ok(value) => {
-                reply.answer(value);
-                true
-            }
-            Err(err) => {
-                tracing::debug!(%err, "request failed");
-                reply.fail(err.errno());
-                false
-            }
-        }
     }
 }
 
@@ -68,15 +58,15 @@ impl Filesystem for Fuse {
     }
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
-        self.spawn(reply, self.space().lookup(parent, name.to_owned()));
+        self.spawn(reply, self.space().lookup(inode(parent), name.to_owned()));
     }
 
     fn forget(&self, _req: &Request, ino: INodeNo, lookups: u64) {
-        self.space.forget(ino, lookups);
+        self.space.forget(inode(ino), lookups);
     }
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
-        self.spawn(reply, self.space().getattr(ino));
+        self.spawn(reply, self.space().getattr(inode(ino)));
     }
 
     fn setattr(
@@ -109,15 +99,18 @@ impl Filesystem for Fuse {
             mtime_ms,
             fh: fh.map(u64::from),
         };
-        self.spawn(reply, self.space().setattr(ino, change));
+        self.spawn(reply, self.space().setattr(inode(ino), change));
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
-        self.spawn(reply, self.space().readlink(ino));
+        self.spawn(reply, self.space().readlink(inode(ino)));
     }
 
     fn mkdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, mode: u32, umask: u32, reply: ReplyEntry) {
-        self.spawn(reply, self.space().mkdir(parent, name.to_owned(), mode & !umask));
+        self.spawn(
+            reply,
+            self.space().mkdir(inode(parent), name.to_owned(), mode & !umask),
+        );
     }
 
     fn mknod(
@@ -139,13 +132,14 @@ impl Filesystem for Fuse {
     }
 
     fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
-        self.spawn(reply, self.space().remove(parent, name.to_owned()));
+        self.spawn(reply, self.space().remove(inode(parent), name.to_owned()));
     }
 
     fn symlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, target: &Path, reply: ReplyEntry) {
         self.spawn(
             reply,
-            self.space().symlink(parent, name.to_owned(), target.to_owned()),
+            self.space()
+                .symlink(inode(parent), name.to_owned(), target.to_owned()),
         );
     }
 
@@ -164,21 +158,26 @@ impl Filesystem for Fuse {
             return reply.error(Errno::EINVAL);
         }
         let destination = new_name.to_owned();
-        let (from, to) = ((parent, name.to_owned()), (new_parent, destination.clone()));
+        let (from, to) = (
+            (inode(parent), name.to_owned()),
+            (inode(new_parent), destination.clone()),
+        );
         let space = self.space();
         self.runtime.spawn(async move {
             let result = space.clone().rename(from, to).await;
             let stale = result.as_ref().ok().copied().flatten();
-            if Self::reply(reply, result.map(|_| ()))
+            if answer::reply(reply, result.map(|_| ()))
                 && let Some(stale) = stale
             {
-                space.kernel.invalidate_entry(new_parent, stale, &destination);
+                space
+                    .kernel
+                    .invalidate_entry(inode(new_parent), stale, &destination);
             }
         });
     }
 
     fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
-        self.spawn(reply, self.space().open(ino, flags, req.pid()));
+        self.spawn(reply, self.space().open(inode(ino), open_mode(flags), req.pid()));
     }
 
     fn read(
@@ -233,11 +232,11 @@ impl Filesystem for Fuse {
     }
 
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        self.spawn(reply, self.space().opendir(ino));
+        self.spawn(reply, self.space().opendir(inode(ino)));
     }
 
     fn readdir(&self, _req: &Request, _ino: INodeNo, fh: FileHandle, offset: u64, reply: ReplyDirectory) {
-        self.space.readdir(fh.0, offset, reply);
+        answer::directory(self.space.readdir(fh.0, offset), reply);
     }
 
     fn releasedir(
@@ -258,11 +257,14 @@ impl Filesystem for Fuse {
     }
 
     fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
-        xattr::get(&self.space, ino, name, size, reply);
+        match xattr::get(&self.space, inode(ino), name) {
+            Some(value) => answer::xattr(&value, size, reply),
+            None => reply.error(Errno::NO_XATTR),
+        }
     }
 
     fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
-        xattr::list(&self.space, ino, size, reply);
+        answer::xattr(&xattr::list(&self.space, inode(ino)), size, reply);
     }
 
     fn create(
@@ -275,7 +277,16 @@ impl Filesystem for Fuse {
         flags: i32,
         reply: ReplyCreate,
     ) {
-        let child = (parent, name.to_owned());
-        self.spawn(reply, self.space().create(child, mode & !umask, flags, req.pid()));
+        let child = (inode(parent), name.to_owned());
+        self.spawn(
+            reply,
+            self.space().create(
+                child,
+                mode & !umask,
+                flags & libc::O_EXCL != 0,
+                open_mode(OpenFlags(flags)),
+                req.pid(),
+            ),
+        );
     }
 }

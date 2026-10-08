@@ -1,8 +1,10 @@
 //! The mounted space: inode numbers, attributes and open handles over the remote namespace.
 
 mod access;
+#[cfg(target_os = "linux")]
 mod answer;
 mod ask;
+#[cfg(target_os = "linux")]
 mod fuse;
 mod handles;
 mod inode;
@@ -13,11 +15,11 @@ mod read;
 mod xattr;
 
 use std::sync::{Arc, Mutex, atomic::AtomicU64};
-use std::time::{Duration, Instant};
-use std::{collections::HashMap, fs::File, io, os::unix::fs::MetadataExt};
+use std::time::{Duration, Instant, SystemTime};
+use std::{collections::HashMap, ffi::OsString, fs::File};
 
+#[cfg(target_os = "linux")]
 pub use fuse::Fuse;
-use fuser::{FileAttr, FileType, INodeNo, Notifier, OpenAccMode, OpenFlags};
 use handles::Handle;
 pub use inodes::Inodes;
 pub use kernel::Kernel;
@@ -41,24 +43,59 @@ const PERMISSIONS: u32 = 0o7777;
 const MAX_NAME: usize = 255;
 
 /// A directory's entries as readdir reports them.
-type Listing = Vec<(INodeNo, FileType, String)>;
+type Listing = Vec<(InodeNo, FileKind, String)>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct InodeNo(u64);
+
+impl InodeNo {
+    const ROOT: Self = Self(1);
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FileKind {
+    File,
+    Directory,
+    Symlink,
+}
+
+pub(crate) struct Attributes {
+    ino: InodeNo,
+    size: u64,
+    blocks: u64,
+    time: SystemTime,
+    kind: FileKind,
+    perm: u16,
+    nlink: u32,
+    uid: u32,
+    gid: u32,
+    blksize: u32,
+}
+
+pub(crate) struct DirectoryEntry {
+    ino: InodeNo,
+    kind: FileKind,
+    name: String,
+    next: u64,
+}
+
+pub(crate) enum Invalidation {
+    Attributes(InodeNo),
+    Entry {
+        parent: InodeNo,
+        child: InodeNo,
+        name: OsString,
+    },
+}
 
 #[derive(Clone, Copy)]
-enum OpenMode {
+pub(crate) enum OpenMode {
     Read,
     Write,
     Truncate,
 }
 
 impl OpenMode {
-    fn for_open(flags: OpenFlags) -> Self {
-        match (flags.acc_mode(), flags.0 & libc::O_TRUNC != 0) {
-            (OpenAccMode::O_RDONLY, _) => Self::Read,
-            (_, true) => Self::Truncate,
-            _ => Self::Write,
-        }
-    }
-
     fn for_set_len(size: u64) -> Self {
         if size == 0 { Self::Truncate } else { Self::Write }
     }
@@ -102,11 +139,9 @@ impl Space {
         decider: Decider,
         kernel: Arc<Kernel>,
         inodes: Arc<Inodes>,
-    ) -> io::Result<Self> {
-        // /proc/self belongs to this process's user and group.
-        let process = std::fs::metadata("/proc/self")?;
+    ) -> Self {
         let reader = Arc::new(Reader::new(remote.clone(), cache.clone(), stats.clone()));
-        Ok(Self {
+        Self {
             remote,
             reader,
             cache,
@@ -115,37 +150,40 @@ impl Space {
             decider: Mutex::new(decider),
             accesses: Mutex::default(),
             kernel,
-            owner: (process.uid(), process.gid()),
+            owner: (
+                rustix::process::geteuid().as_raw(),
+                rustix::process::getegid().as_raw(),
+            ),
             inodes,
             opens: Mutex::default(),
             handles: Mutex::default(),
             listings: Mutex::default(),
             next_handle: AtomicU64::new(1),
-        })
+        }
     }
 
     /// Inode numbers are entry ids plus one, except that the root is always inode 1.
-    fn ino(&self, entry: EntryId) -> INodeNo {
+    fn ino(&self, entry: EntryId) -> InodeNo {
         self.kernel.ino(entry)
     }
 
-    fn entry_id(&self, ino: INodeNo) -> EntryId {
+    fn entry_id(&self, ino: InodeNo) -> EntryId {
         self.kernel.entry(ino)
     }
 
-    pub fn mounted(&self, notifier: Notifier) {
-        self.kernel.mounted(notifier);
+    fn mounted(&self, invalidate: impl Fn(Invalidation) + Send + Sync + 'static) {
+        self.kernel.mounted(invalidate);
     }
 
     /// Counts a reply that hands the kernel a reference to the entry's inode, and returns its
     /// attributes for that reply.
-    fn looked_up(&self, entry: &Entry, asked: Instant, local: Option<&File>) -> FileAttr {
+    fn looked_up(&self, entry: &Entry, asked: Instant, local: Option<&File>) -> Attributes {
         self.inodes.looked_up(entry, asked);
         self.attr(entry, local)
     }
 
     /// Records an entry this client just made, whose reply hands the kernel its inode.
-    fn added(&self, parent: EntryId, entry: &Entry, asked: Instant) -> FileAttr {
+    fn added(&self, parent: EntryId, entry: &Entry, asked: Instant) -> Attributes {
         self.inodes.confirm_parent(parent, &entry.path, asked);
         self.inodes.stale(&entry.path);
         let (entry, local) = self.inodes.view(entry.clone());
@@ -153,12 +191,12 @@ impl Space {
     }
 
     /// Drops the kernel's `lookups` references to `ino`.
-    pub fn forget(&self, ino: INodeNo, lookups: u64) {
+    fn forget(&self, ino: InodeNo, lookups: u64) {
         self.inodes.forget(self.entry_id(ino), lookups);
     }
 
     /// The entry's attributes, with size and mtime from its journal copy while it has one.
-    fn attr(&self, entry: &Entry, local: Option<&File>) -> FileAttr {
+    fn attr(&self, entry: &Entry, local: Option<&File>) -> Attributes {
         let local = local.and_then(|copy| copy.metadata().ok());
         let size = match (&local, entry.kind) {
             (Some(local), _) => local.len(),
@@ -169,26 +207,21 @@ impl Space {
         let written = local.and_then(|local| local.modified().ok()).map(crate::unix_ms);
         let mtime = crate::from_unix_ms(written.unwrap_or(entry.mtime_ms));
         let kind = match entry.kind {
-            Kind::File => FileType::RegularFile,
-            Kind::Dir => FileType::Directory,
-            Kind::Symlink => FileType::Symlink,
+            Kind::File => FileKind::File,
+            Kind::Dir => FileKind::Directory,
+            Kind::Symlink => FileKind::Symlink,
         };
-        FileAttr {
+        Attributes {
             ino: self.ino(entry.id),
             size,
             blocks: size.div_ceil(512),
-            atime: mtime,
-            mtime,
-            ctime: mtime,
-            crtime: mtime,
+            time: mtime,
             kind,
             perm: (entry.mode & PERMISSIONS) as u16,
-            nlink: if kind == FileType::Directory { 2 } else { 1 },
+            nlink: if kind == FileKind::Directory { 2 } else { 1 },
             uid: self.owner.0,
             gid: self.owner.1,
-            rdev: 0,
             blksize: 4096,
-            flags: 0,
         }
     }
 

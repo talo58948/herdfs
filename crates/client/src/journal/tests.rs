@@ -62,8 +62,7 @@ impl Mount {
             Decider::Fixed(AccessPlan::STREAM),
             kernel,
             inodes.clone(),
-        )
-        .unwrap();
+        );
         let committer = Committer {
             space: Arc::new(space),
         };

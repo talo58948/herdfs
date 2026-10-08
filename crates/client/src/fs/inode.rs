@@ -6,7 +6,6 @@ use std::fs::File;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
-use fuser::Errno;
 use herdfs_core::proto::{Entry, Version};
 
 use super::OpenMode;
@@ -117,9 +116,9 @@ impl State {
     /// with the access it came with. A truncating write needs none, since its unguarded commit is
     /// right on an unknown base too, nor does one over pending changes, which hold the bytes (C5,
     /// C12). `None` if nothing is known to go on.
-    pub(super) fn offline(&self, mode: OpenMode) -> Option<Result<Head, Errno>> {
+    pub(super) fn offline(&self, mode: OpenMode) -> Option<Result<Head, i32>> {
         match self.known() {
-            Some((_, false)) if mode.writes() => Some(Err(Errno::EACCES)),
+            Some((_, false)) if mode.writes() => Some(Err(libc::EACCES)),
             Some((file, _)) => Some(Ok(file)),
             None if mode.truncates() || self.local.as_ref().and_then(Local::copy).is_some() => Some(Ok(None)),
             None => None,

@@ -2,7 +2,6 @@
 
 use std::io;
 
-use fuser::Errno;
 use herdfs_core::ChunkId;
 use herdfs_core::proto::{self, ErrorCode};
 
@@ -30,33 +29,33 @@ pub enum Error {
     TimedOut,
     /// A local condition with a fixed errno.
     #[error("{0:?}")]
-    Errno(Errno),
+    Errno(i32),
 }
 
-impl From<Errno> for Error {
-    fn from(errno: Errno) -> Self {
+impl From<i32> for Error {
+    fn from(errno: i32) -> Self {
         Self::Errno(errno)
     }
 }
 
 impl Error {
-    pub fn errno(&self) -> Errno {
+    pub fn errno(&self) -> i32 {
         match self {
             Self::Api(error) => match error.code {
-                ErrorCode::NotFound => Errno::ENOENT,
-                ErrorCode::Exists => Errno::EEXIST,
-                ErrorCode::NotEmpty => Errno::ENOTEMPTY,
-                ErrorCode::NotDir => Errno::ENOTDIR,
-                ErrorCode::IsDir => Errno::EISDIR,
-                ErrorCode::Denied | ErrorCode::Unauthenticated => Errno::EACCES,
-                ErrorCode::Invalid => Errno::EINVAL,
-                ErrorCode::Conflict => Errno::EBUSY,
-                ErrorCode::Unavailable => Errno::EIO,
+                ErrorCode::NotFound => libc::ENOENT,
+                ErrorCode::Exists => libc::EEXIST,
+                ErrorCode::NotEmpty => libc::ENOTEMPTY,
+                ErrorCode::NotDir => libc::ENOTDIR,
+                ErrorCode::IsDir => libc::EISDIR,
+                ErrorCode::Denied | ErrorCode::Unauthenticated => libc::EACCES,
+                ErrorCode::Invalid => libc::EINVAL,
+                ErrorCode::Conflict => libc::EBUSY,
+                ErrorCode::Unavailable => libc::EIO,
             },
-            Self::Io(error) => error.raw_os_error().map_or(Errno::EIO, Errno::from_i32),
+            Self::Io(error) => error.raw_os_error().unwrap_or(libc::EIO),
             Self::Errno(errno) => *errno,
             Self::Network(_) | Self::Offline | Self::TimedOut | Self::Corrupt(_) | Self::Protocol(_) => {
-                Errno::EIO
+                libc::EIO
             }
         }
     }

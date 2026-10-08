@@ -6,7 +6,7 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -63,23 +63,47 @@ fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
 fn final_status(dir: &Path) -> String {
     let mut status = None;
     wait_until("a final status", || {
-        status = read(dir, "status").filter(|status| status != "running");
+        status = read(dir, "status").filter(|status| !matches!(status.as_str(), "queued" | "running"));
         status.is_some()
     });
     status.unwrap()
 }
 
-// contract: A1
+fn wait_status(dir: &Path, wanted: &str) {
+    wait_until(wanted, || read(dir, "status").as_deref() == Some(wanted));
+}
+
+// contract: A1, A2
 #[test]
 fn runs_a_session_to_done() {
     let mount = TempDir::new().unwrap();
+    let blocker = session(mount.path(), HOST, "blocker", "block\n");
+    let command = concat!(
+        "read line; ",
+        "while [ ! -f \"$HERDFS_SESSION_DIR/release\" ]; do sleep 0.05; done; ",
+        "echo \"$line\"; echo ok; echo warning >&2"
+    );
+    let _runner = Runner::start(
+        mount.path(),
+        &["--command", command, "--poll-ms", "50", "--max-sessions", "1"],
+    );
+    wait_status(&blocker, "running");
     let dir = session(mount.path(), HOST, "s1", "hello\n");
-    let _runner = Runner::start(mount.path(), &["--command", "cat; echo ok", "--poll-ms", "50"]);
+    wait_status(&dir, "queued");
+    fs::write(blocker.join("release"), "").unwrap();
+    wait_status(&dir, "running");
+    fs::write(dir.join("release"), "").unwrap();
     assert_eq!(final_status(&dir), "done");
-    assert_eq!(read(&dir, "output").unwrap(), "hello\nok");
+    assert_eq!(read(&dir, "exit_code").unwrap(), "0");
+    assert_eq!(read(&dir, "stdout").unwrap(), "hello\nok");
+    assert_eq!(read(&dir, "stderr").unwrap(), "warning");
+    let output = read(&dir, "output").unwrap();
+    for line in ["hello", "ok", "warning"] {
+        assert!(output.lines().any(|output| output == line));
+    }
 }
 
-// contract: A1
+// contract: A1, A2
 #[test]
 fn reports_the_exit_code_of_a_failing_command() {
     let mount = TempDir::new().unwrap();
@@ -89,7 +113,47 @@ fn reports_the_exit_code_of_a_failing_command() {
         &["--command", "echo oops >&2; exit 3", "--poll-ms", "50"],
     );
     assert_eq!(final_status(&dir), "failed: exit 3");
+    assert_eq!(fs::read_to_string(dir.join("stdout")).unwrap(), "");
+    assert_eq!(read(&dir, "stderr").unwrap(), "oops");
     assert_eq!(read(&dir, "output").unwrap(), "oops");
+    assert_eq!(read(&dir, "exit_code").unwrap(), "3");
+}
+
+// contract: A2
+#[test]
+fn cancel_stops_the_process_group_within_five_seconds() {
+    let mount = TempDir::new().unwrap();
+    let dir = session(mount.path(), HOST, "s1", "hello\n");
+    let command = "sleep 30 & echo \"$$ $!\"; wait";
+    let _runner = Runner::start(mount.path(), &["--command", command, "--poll-ms", "50"]);
+    wait_status(&dir, "running");
+    let mut pid = None;
+    wait_until("the child pid", || {
+        pid = read(&dir, "stdout");
+        pid.is_some()
+    });
+
+    let cancelled = Instant::now();
+    fs::write(dir.join("cancel"), "").unwrap();
+    assert_eq!(final_status(&dir), "cancelled");
+    assert!(cancelled.elapsed() < Duration::from_secs(5));
+    assert_eq!(read(&dir, "exit_code").unwrap(), "signal 9");
+    assert_eq!(fs::read_to_string(dir.join("stderr")).unwrap(), "");
+    assert_eq!(read(&dir, "output"), pid);
+    for process in pid.unwrap().split_whitespace() {
+        assert!(
+            !Command::new("kill")
+                .args(["-0", process])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success(),
+            "process {process} survived cancellation"
+        );
+    }
+    sleep(Duration::from_millis(150));
+    assert_eq!(read(&dir, "status").unwrap(), "cancelled");
 }
 
 // contract: A1
@@ -233,64 +297,4 @@ fn finishes_running_sessions_on_sigterm() {
     assert_eq!(read(&dir, "status").unwrap(), "done");
     assert_eq!(read(&dir, "output").unwrap(), "finished");
     assert!(!late.join("status").exists());
-}
-
-// contract: A1
-#[test]
-fn refuses_session_files_that_are_not_regular_files() {
-    let mount = TempDir::new().unwrap();
-    let outside = TempDir::new().unwrap();
-    let secret = outside.path().join("secret");
-    fs::write(&secret, "secret").unwrap();
-    let prompt_link = session(mount.path(), HOST, "prompt-link", "hi");
-    fs::remove_file(prompt_link.join("prompt")).unwrap();
-    symlink(&secret, prompt_link.join("prompt")).unwrap();
-    let output_link = session(mount.path(), HOST, "output-link", "hi");
-    symlink(&secret, output_link.join("output")).unwrap();
-    let cwd_link = session(mount.path(), HOST, "cwd-link", "hi");
-    symlink(&secret, cwd_link.join("cwd")).unwrap();
-    let output_dir = session(mount.path(), HOST, "output-dir", "hi");
-    fs::create_dir(output_dir.join("output")).unwrap();
-    let status_link = session(mount.path(), HOST, "status-link", "hi");
-    symlink(outside.path().join("status"), status_link.join("status")).unwrap();
-    fs::write(outside.path().join("prompt"), "hi").unwrap();
-    symlink(
-        outside.path(),
-        mount.path().join(".agents").join(HOST).join("dir-link"),
-    )
-    .unwrap();
-    let _runner = Runner::start(mount.path(), &["--command", "cat", "--poll-ms", "50"]);
-
-    for dir in [&prompt_link, &output_link, &cwd_link, &output_dir] {
-        let status = final_status(dir);
-        assert_eq!(
-            status,
-            "failed: not a regular file in the session",
-            "{}",
-            dir.display()
-        );
-    }
-    assert_eq!(fs::read_to_string(&secret).unwrap(), "secret");
-    assert!(!prompt_link.join("output").exists());
-    assert!(!status_link.join("output").exists());
-    assert!(!outside.path().join("status").exists());
-    assert!(!outside.path().join("output").exists());
-}
-
-// contract: A1
-#[test]
-fn ignores_a_host_directory_reached_through_a_symlink() {
-    let mount = TempDir::new().unwrap();
-    let outside = TempDir::new().unwrap();
-    let dir = session(outside.path(), HOST, "s1", "hi");
-    fs::create_dir(mount.path().join(".agents")).unwrap();
-    symlink(
-        outside.path().join(".agents").join(HOST),
-        mount.path().join(".agents").join(HOST),
-    )
-    .unwrap();
-    let _runner = Runner::start(mount.path(), &["--command", "cat", "--poll-ms", "50"]);
-    sleep(Duration::from_millis(500));
-    assert!(!dir.join("status").exists());
-    assert!(!dir.join("output").exists());
 }

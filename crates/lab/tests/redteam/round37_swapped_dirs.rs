@@ -1,23 +1,17 @@
 //! Round 37: two held directories exchanging paths after both subtrees are known.
 
 use std::fs::{self, File};
-use std::os::fd::AsRawFd;
-use std::path::PathBuf;
 use std::thread;
 
 use anyhow::{Result, ensure};
 use herdfs_lab::{Lab, Links};
 
-use crate::{VISIBLE_AFTER, save, two_clients};
+use crate::{VISIBLE_AFTER, entry_names, save, two_clients, write_entry};
 
 const TRIALS: usize = 3;
 
-fn listed(path: &PathBuf) -> Result<()> {
-    ensure!(
-        fs::read_dir(path)?.count() == 1,
-        "{} has one child",
-        path.display()
-    );
+fn listed(dir: &File) -> Result<()> {
+    ensure!(entry_names(dir)?.len() == 1, "held directory has one child");
     Ok(())
 }
 
@@ -41,10 +35,8 @@ fn swap_and_write(
 
     let left_held = File::open(b.join(&left))?;
     let right_held = File::open(b.join(&right))?;
-    let left_fd = PathBuf::from(format!("/proc/self/fd/{}", left_held.as_raw_fd()));
-    let right_fd = PathBuf::from(format!("/proc/self/fd/{}", right_held.as_raw_fd()));
-    listed(&left_fd)?;
-    listed(&right_fd)?;
+    listed(&left_held)?;
+    listed(&right_held)?;
 
     if swapped {
         fs::rename(a.join(&left), a.join(&temporary))?;
@@ -56,8 +48,8 @@ fn swap_and_write(
     right_held.metadata()?;
 
     lab.cut("b", Links::Authority)?;
-    let left_write = fs::write(left_fd.join("left-child"), b"left-written");
-    let right_write = fs::write(right_fd.join("right-child"), b"right-written");
+    let left_write = write_entry(&left_held, "left-child", b"left-written");
+    let right_write = write_entry(&right_held, "right-child", b"right-written");
     lab.restore("b", Links::Authority)?;
     if left_write.is_ok() || right_write.is_ok() {
         lab.wait_committed("b")?;

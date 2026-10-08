@@ -112,12 +112,17 @@ impl Call<'_> {
             return Err(refuse(ErrorCode::Invalid, format!("bad principal {principal:?}")));
         }
         match perm {
-            // A changed perm keeps the row's grant sequence, which S8 counts from.
+            // An overlap continues the old access interval; changing a row also retains its start.
             Some(perm) => self
                 .db
                 .prepare_cached(
                     "INSERT INTO acl (space, path, principal, perm, granted_seq)
-                     VALUES (?1, ?2, ?3, ?4, coalesce((SELECT max(id) FROM versions), 0))
+                     VALUES (?1, ?2, ?3, ?4, coalesce(
+                         (SELECT min(granted_seq) FROM acl
+                          WHERE space = ?1 AND principal = ?3
+                            AND (path = '' OR path = ?2
+                                 OR substr(?2, 1, length(path) + 1) = path || '/')),
+                         (SELECT max(id) FROM versions), 0))
                      ON CONFLICT (space, principal, path) DO UPDATE SET perm = excluded.perm",
                 )?
                 .execute(params![space, path.as_str(), principal, perm_name(perm)])?,

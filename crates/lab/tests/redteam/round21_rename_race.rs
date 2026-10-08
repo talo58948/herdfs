@@ -1,15 +1,13 @@
 //! Round 21: a path-based mutation racing a rename of the directory inode it is relative to.
 
 use std::fs::{self, File};
-use std::os::fd::AsRawFd;
-use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use herdfs_lab::{Lab, LabConfig, Profile, Strategy};
 
-use crate::VISIBLE_AFTER;
+use crate::{VISIBLE_AFTER, mkdir_entry};
 
 const SLOW_AUTHORITY: Profile = Profile::Custom {
     round_trip_ms: 2_000,
@@ -39,9 +37,8 @@ fn make_child(lab: &Lab, trial: usize, rename: bool) -> Result<(std::io::Result<
     thread::sleep(VISIBLE_AFTER);
     let held = File::open(b.join(&old))?;
     thread::sleep(VISIBLE_AFTER);
-    let child = PathBuf::from(format!("/proc/self/fd/{}/child", held.as_raw_fd()));
     let made = thread::scope(|scope| {
-        let mkdir = scope.spawn(|| fs::create_dir(child));
+        let mkdir = scope.spawn(|| mkdir_entry(&held, "child"));
         if rename {
             thread::sleep(RENAME_AFTER);
             fs::rename(a.join(&old), a.join(&new))?;

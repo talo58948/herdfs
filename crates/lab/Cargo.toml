@@ -22,6 +22,7 @@ xattr.workspace = true
 [dev-dependencies]
 libc.workspace = true
 herdfs-client.workspace = true
+rustix.workspace = true
 
 [lints]
 workspace = true

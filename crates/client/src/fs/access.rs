@@ -36,15 +36,15 @@ impl Space {
         entry: EntryId,
     ) -> (Arc<AccessRecord>, Option<Upgrade>) {
         let path = self.path(self.ino(entry)).ok().flatten();
-        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+        let comm = process_name(pid);
         let extension = path
             .as_ref()
             .and_then(|path| std::path::Path::new(path.name()).extension());
         let context = OpenContext {
             size: file.map_or(0, |file| file.version.size),
             extension: extension.map(|extension| extension.to_string_lossy().into()),
-            opens: self.opened(entry, comm.trim_end()),
-            comm: comm.trim_end().to_owned(),
+            opens: self.opened(entry, &comm),
+            comm,
             coverage: file.map_or(1.0, |file| self.cache.coverage(&file.version.chunks)),
             throughput: self.reader.throughput.get(),
             round_trip: self.remote.round_trip.get().unwrap_or_default(),
@@ -163,4 +163,33 @@ impl Space {
     pub(super) fn explain(&self, entry: EntryId) -> Option<Vec<u8>> {
         lock(&self.accesses).get(&entry)?.json().ok()
     }
+}
+
+#[cfg(target_os = "linux")]
+fn process_name(pid: u32) -> String {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .unwrap_or_default()
+        .trim_end()
+        .to_owned()
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn process_name(pid: u32) -> String {
+    let Ok(pid) = i32::try_from(pid) else {
+        return String::new();
+    };
+    let mut name = [0_u8; 256];
+    // SAFETY: `name` is writable for the exact length passed to libproc.
+    let read = unsafe { libc::proc_name(pid, name.as_mut_ptr().cast(), name.len() as u32) };
+    if read <= 0 {
+        return String::new();
+    }
+    let end = name.iter().position(|byte| *byte == 0).unwrap_or(name.len());
+    String::from_utf8_lossy(&name[..end]).into_owned()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_name(_pid: u32) -> String {
+    String::new()
 }
