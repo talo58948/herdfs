@@ -20,11 +20,11 @@ final class FinderSync: FIFinderSync {
 
     override func requestBadgeIdentifier(for url: URL) {
         guard let located = registry.locate(url) else {
-            FIFinderSyncController.default().setBadgeIdentifier(nil, for: url)
+            FIFinderSyncController.default().setBadgeIdentifier("", for: url)
             return
         }
         if let cached = badges.lookup(url) {
-            FIFinderSyncController.default().setBadgeIdentifier(cached.badge?.rawValue, for: url)
+            FIFinderSyncController.default().setBadgeIdentifier(cached.badge?.rawValue ?? "", for: url)
             return
         }
         Task {
@@ -32,7 +32,7 @@ final class FinderSync: FIFinderSync {
             let badge = state.flatMap(Badge.choose)
             badges.store(badge, for: url)
             await MainActor.run {
-                FIFinderSyncController.default().setBadgeIdentifier(badge?.rawValue, for: url)
+                FIFinderSyncController.default().setBadgeIdentifier(badge?.rawValue ?? "", for: url)
             }
         }
     }
@@ -81,7 +81,7 @@ final class FinderSync: FIFinderSync {
                 try? await ControlClient.command(op, path: url, mount: mount)
                 badges.remove(url)
                 await MainActor.run {
-                    FIFinderSyncController.default().setBadgeIdentifier(nil, for: url)
+                    FIFinderSyncController.default().setBadgeIdentifier("", for: url)
                     self.requestBadgeIdentifier(for: url)
                 }
             }
