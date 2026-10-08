@@ -30,7 +30,9 @@ fn a_write_on_one_client_reads_back_on_another() -> Result<()> {
     file.sync_all()?;
     drop(file);
     assert_eq!(fs::read_to_string(lab.mount_path("a").join("hello.txt"))?, text);
-    assert!(lab.stats("a")?["commits"].as_u64() >= Some(1));
+    if !lab.is_nfs("a") {
+        assert!(lab.stats("a")?["commits"].as_u64() >= Some(1));
+    }
 
     thread::sleep(VISIBLE_AFTER);
     assert_eq!(fs::read_to_string(lab.mount_path("b").join("hello.txt"))?, text);

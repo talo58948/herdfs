@@ -93,6 +93,9 @@ fn exercise(strategy: impl FnOnce(u64) -> Strategy) -> Result<()> {
             bytes.iter().zip(&expected).position(|(got, want)| got != want)
         );
     }
+    if lab.is_nfs("b") {
+        return Ok(());
+    }
     let decisions = lab.stats("b")?["decisions"].clone();
     let counts = decisions.as_object().context("stats have no decisions")?.values();
     let decided: u64 = counts.filter_map(|count| count.as_u64()).sum();

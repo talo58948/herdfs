@@ -35,6 +35,14 @@ pub enum Strategy {
     Jev,
 }
 
+/// Filesystem adapter a lab client mounts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mount {
+    #[default]
+    Fuse,
+    Nfs,
+}
+
 impl Strategy {
     fn arg(self) -> String {
         match self {
@@ -56,6 +64,7 @@ pub(crate) struct ClientSpec {
     pub(crate) profile: Profile,
     pub(crate) strategy: Strategy,
     pub(crate) cache_bytes: u64,
+    pub(crate) mount: Mount,
 }
 
 pub(crate) struct Client {
@@ -115,6 +124,9 @@ impl Client {
             .args(["--strategy", &self.spec.strategy.arg()])
             .args(["--resolve", &format!("{S3_HOST}={}", self.ip)])
             .arg(&self.mount);
+        if self.spec.mount == Mount::Nfs {
+            command.arg("--nfs");
+        }
         if let Some(jev) = &self.jev {
             let key = self.dir.join("jev-key");
             fs::write(&key, "lab")?;
@@ -135,15 +147,17 @@ impl Client {
         if !is_mounted(&self.mount) {
             return Ok(());
         }
-        let status = Command::new("fusermount3")
-            .args(["-u", "-z"])
-            .arg(&self.mount)
-            .status()?;
-        ensure!(
-            status.success(),
-            "fusermount3 -u -z {}: {status}",
-            self.mount.display()
-        );
+        let status = match self.spec.mount {
+            Mount::Fuse => Command::new("fusermount3")
+                .args(["-u", "-z"])
+                .arg(&self.mount)
+                .status()?,
+            Mount::Nfs => Command::new("sudo")
+                .args(["umount", "-f"])
+                .arg(&self.mount)
+                .status()?,
+        };
+        ensure!(status.success(), "unmounting {}: {status}", self.mount.display());
         Ok(())
     }
 
@@ -152,6 +166,7 @@ impl Client {
     }
 
     pub(crate) fn stats(&self) -> Result<Value> {
+        ensure!(self.spec.mount == Mount::Fuse, "stats xattr is FUSE-only");
         let json = xattr::get(&self.mount, STATS_XATTR)?
             .with_context(|| format!("{} has no {STATS_XATTR}", self.mount.display()))?;
         Ok(serde_json::from_slice(&json)?)
@@ -160,7 +175,7 @@ impl Client {
     /// Waits until every write closed so far is committed or set aside.
     pub(crate) fn wait_committed(&self) -> Result<()> {
         let deadline = Instant::now() + COMMIT_TIMEOUT;
-        while self.stats()?["pending_commits"] != 0 {
+        while self.pending()? {
             ensure!(
                 Instant::now() < deadline,
                 "{} has pending commits after {COMMIT_TIMEOUT:?}",
@@ -169,6 +184,18 @@ impl Client {
             thread::sleep(process::POLL);
         }
         Ok(())
+    }
+
+    fn pending(&self) -> Result<bool> {
+        if self.spec.mount == Mount::Fuse {
+            return Ok(self.stats()?["pending_commits"] != 0);
+        }
+        let records = fs::read_dir(self.dir.join("journal"))?;
+        Ok(records.filter_map(|record| record.ok()).any(|record| {
+            let path = record.path();
+            path.extension().is_some_and(|extension| extension == "json")
+                && path.file_name().is_some_and(|name| name != "nfs.json")
+        }))
     }
 }
 
