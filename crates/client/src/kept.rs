@@ -11,9 +11,9 @@ use tokio::sync::Notify;
 
 use crate::cache::Cache;
 use crate::fs::{Inodes, Kernel};
+use crate::lock;
 use crate::reader::Reader;
 use crate::remote::Remote;
-use crate::lock;
 
 const REFRESH: Duration = Duration::from_secs(1);
 
