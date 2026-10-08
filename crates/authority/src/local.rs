@@ -167,14 +167,16 @@ impl Authority {
     }
 
     pub(crate) fn check_local_token(&self, id: &str, user: &str, now_ms: i64) -> Result<bool, proto::Error> {
-        self.db
+        let active = self
+            .db
             .query_row(
                 "SELECT EXISTS (SELECT 1 FROM local_tokens
                  WHERE id = ?1 AND user = ?2 AND revoked = 0 AND expires_ms > ?3)",
                 params![id, user, now_ms],
                 |row| row.get(0),
             )
-            .map_err(Fail::from)
+            .map_err(Fail::from)?;
+        Ok(active)
     }
 }
 
