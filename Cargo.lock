@@ -1611,10 +1611,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "blake3",
  "clap",
+ "ed25519-dalek",
  "jsonwebtoken",
  "herdfs-core",
+ "rand 0.10.3",
  "reqwest",
  "rusqlite",
  "rusty-s3",

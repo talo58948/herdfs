@@ -9,11 +9,13 @@ use rusqlite::{OptionalExtension, Row, params, types::Type};
 
 use crate::{Call, Result, refuse};
 
-/// Bumped when the schema changes. v0 keeps no data worth migrating, so an
-/// older database is recreated.
-pub(crate) const SCHEMA_VERSION: i64 = 9;
+/// Bumped when the schema changes. Databases older than the last supported
+/// migration are recreated.
+pub(crate) const SCHEMA_VERSION: i64 = 10;
+pub(crate) const MIGRATES_FROM: i64 = 9;
 
 pub(crate) const DROP_ALL: &str = "
+DROP TABLE IF EXISTS local_tokens;
 DROP TABLE IF EXISTS collection;
 DROP TABLE IF EXISTS unreferenced;
 DROP TABLE IF EXISTS commits;
@@ -97,6 +99,12 @@ CREATE TABLE IF NOT EXISTS commits (
     PRIMARY KEY (principal, request_id)
 );
 CREATE INDEX IF NOT EXISTS commits_by_entry ON commits (entry);
+CREATE TABLE IF NOT EXISTS local_tokens (
+    id TEXT PRIMARY KEY,
+    user TEXT NOT NULL,
+    expires_ms INTEGER NOT NULL,
+    revoked INTEGER NOT NULL DEFAULT 0
+);
 ";
 
 const ENTRY: &str = "SELECT e.id, e.path, e.kind, e.mode, e.mtime_ms, e.head, coalesce(v.size, 0), e.target

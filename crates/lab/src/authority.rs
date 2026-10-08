@@ -83,7 +83,13 @@ impl Authority {
 
     /// Starts the authority on its database in `dir`, after killing a running one, and waits
     /// until `/v1/health` answers.
-    pub(crate) fn restart(&mut self, dir: &Path, store_port: u16, issuer: &Issuer) -> Result<()> {
+    pub(crate) fn restart(
+        &mut self,
+        dir: &Path,
+        store_port: u16,
+        issuer: &Issuer,
+        local_issuer: bool,
+    ) -> Result<()> {
         self.kill();
         let listen = format!("127.0.0.1:{}", self.port);
         let mut command = Command::new(process::binary(process::AUTHORITY)?);
@@ -93,9 +99,13 @@ impl Authority {
             .args(["--s3-endpoint", &format!("http://127.0.0.1:{store_port}")])
             .args(["--s3-public-endpoint", &format!("http://{S3_HOST}:{store_port}")])
             .args(["--s3-bucket", store::BUCKET, "--s3-region", store::REGION])
-            .args(["--oidc-issuer", issuer.url(), "--oidc-audience", issuer::AUDIENCE])
             .args(self.collection.map(Collection::args).unwrap_or_default())
             .envs(store::STORE_CREDENTIALS);
+        if local_issuer {
+            command.arg("--local-issuer");
+        } else {
+            command.args(["--oidc-issuer", issuer.url(), "--oidc-audience", issuer::AUDIENCE]);
+        }
         let mut authority = Proc::spawn("authority", command, &dir.join("authority.log"))?;
         let health = format!("http://{listen}/v1/health");
         authority.wait_until("healthy", || {
@@ -104,6 +114,16 @@ impl Authority {
         })?;
         self.process = Some(authority);
         Ok(())
+    }
+
+    pub(crate) fn issue_token(&self, dir: &Path, user: &str) -> Result<String> {
+        let output = process::run(
+            Command::new(process::binary(process::AUTHORITY)?)
+                .args(["issue-token", "--db"])
+                .arg(dir.join("authority.db"))
+                .args(["--user", user]),
+        )?;
+        Ok(output.trim().to_owned())
     }
 
     pub(crate) fn rpc(&self, token: &str, request: &Request) -> Result<Response, proto::Error> {

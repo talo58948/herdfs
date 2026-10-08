@@ -24,6 +24,9 @@ pub(super) struct LoginArgs {
     /// Public OIDC client id.
     #[arg(long)]
     client_id: String,
+    /// Loopback callback port; 0 asks the operating system for a random port.
+    #[arg(long, default_value_t = 53682)]
+    redirect_port: u16,
     #[command(flatten)]
     token: TokenArgs,
 }
@@ -42,7 +45,7 @@ pub(super) async fn login(args: &LoginArgs, json: bool) -> anyhow::Result<()> {
         .error_for_status()?
         .json::<Discovery>()
         .await?;
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let listener = redirect_listener(args.redirect_port).await?;
     let redirect = format!("http://{}/callback", listener.local_addr()?);
     let verifier = random_urlsafe();
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
@@ -84,6 +87,14 @@ pub(super) async fn login(args: &LoginArgs, json: bool) -> anyhow::Result<()> {
         println!("signed in");
     }
     Ok(())
+}
+
+async fn redirect_listener(port: u16) -> anyhow::Result<TcpListener> {
+    TcpListener::bind(("127.0.0.1", port)).await.with_context(|| {
+        format!(
+            "OIDC redirect port {port} is unavailable; stop the process using it, choose --redirect-port PORT, or use --redirect-port 0 for a random port"
+        )
+    })
 }
 
 async fn callback(
@@ -205,6 +216,20 @@ mod tests {
             panic!("issuer error callback succeeded")
         };
         assert!(error.to_string().contains("access_denied: cancelled"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_busy_redirect_port_has_a_clear_error() -> anyhow::Result<()> {
+        // contract: U1
+        let occupied = TcpListener::bind("127.0.0.1:0").await?;
+        let port = occupied.local_addr()?.port();
+        let Err(error) = redirect_listener(port).await else {
+            panic!("two listeners bound redirect port {port}")
+        };
+        let message = error.to_string();
+        assert!(message.contains(&port.to_string()), "{message}");
+        assert!(message.contains("--redirect-port 0"), "{message}");
         Ok(())
     }
 }

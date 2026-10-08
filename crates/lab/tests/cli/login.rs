@@ -30,6 +30,12 @@ fn browser_login_refreshes_for_a_mount_and_logout_removes_the_token() -> Result<
     let stdout = login.stdout.take().context("login stdout")?;
     let mut lines = BufReader::new(stdout).lines();
     let authorize = lines.next().context("login did not print its URL")??;
+    let authorize_url = reqwest::Url::parse(&authorize)?;
+    let redirect = authorize_url
+        .query_pairs()
+        .find_map(|(key, value)| (key == "redirect_uri").then(|| value.into_owned()))
+        .context("authorization URL has no redirect_uri")?;
+    assert_eq!(redirect, "http://127.0.0.1:53682/callback");
     let response = reqwest::blocking::get(authorize)?;
     ensure!(response.status().is_success(), "loopback callback failed");
     ensure!(login.wait()?.success(), "login command failed");

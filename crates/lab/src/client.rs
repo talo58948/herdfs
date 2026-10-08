@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 
-use crate::issuer::Issuer;
 use crate::jev::FakeJev;
 use crate::mount;
 use crate::process::{self, Proc};
@@ -115,10 +114,10 @@ impl Client {
     }
 
     /// Mounts its space with a fresh token, after killing a running mount.
-    pub(crate) fn start(&mut self, issuer: &Issuer, authority_port: u16) -> Result<()> {
+    pub(crate) fn start(&mut self, issued_token: &str, authority_port: u16) -> Result<()> {
         self.kill()?;
         let token = self.dir.join("token");
-        fs::write(&token, issuer.token(&self.spec.user, &self.spec.groups))?;
+        fs::write(&token, issued_token)?;
         let mut command = Command::new(process::binary(process::CLIENT)?);
         command
             .args(["mount", "--authority", &self.authority_url(authority_port)])

@@ -70,7 +70,7 @@ fall back per setting. A late confident answer may only add work to a still-open
 
 ## Identity and permissions
 
-- The authority validates OIDC JWTs: signature via the issuer's JWKS (discovery document), `iss`, `aud`, `exp`. The principal is `user:<sub>`; the `groups` claim adds `group:<name>` principals.
+- The authority validates OIDC JWTs: signature via the issuer's JWKS (discovery document), `iss`, `aud`, `exp`. In local mode it persists its own Ed25519 key beside the database, serves discovery and JWKS, and rejects a revoked `jti` immediately. The principal is `user:<sub>`; the `groups` claim adds `group:<name>` principals.
 - ACL rows are `(space, path, principal, perm)`. A principal's permission on a path is the highest perm granted on that path or any ancestor. Perms: `read` < `write` < `admin`. The creator of a space gets `admin` on its root.
 - Read ops need `read` on the path. Mutations need `write` on the path; for create, mkdir and rename, on both source and destination. `SetAcl` and `Fork` need `admin`.
 - ACL rows attach to paths, not entries. They stay where they are when an entry is renamed or removed, so a moved subtree takes the grants of its new place, and a new entry at an old path inherits that path's grants.
@@ -84,6 +84,10 @@ herdfs-authority --listen 127.0.0.1:7000 --db PATH
     --s3-endpoint http://127.0.0.1:9000 --s3-public-endpoint http://s3.lab:9000
     --s3-bucket herdfs --s3-region us-east-1          # keys: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
     --oidc-issuer http://127.0.0.1:7100 --oidc-audience herdfs
+    # or: --local-issuer
+
+herdfs-authority issue-token --db PATH --user NAME [--days N]
+herdfs-authority revoke-token --db PATH ID
 
 herdfs mount --authority http://127.0.0.2:7000 --space NAME --token-file PATH
     --cache DIR --cache-bytes N --journal DIR
