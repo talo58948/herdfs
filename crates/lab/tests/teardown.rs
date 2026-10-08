@@ -10,7 +10,10 @@ use herdfs_lab::{Lab, LabConfig, Profile, Strategy, child_processes};
 fn dropping_the_lab_leaves_no_child_processes() -> Result<()> {
     let config = LabConfig::default().client("a", "alice", &[], Profile::Lan, Strategy::Stream);
     let lab = Lab::start_infra(config)?;
-    assert!(!child_processes(process::id())?.is_empty(), "the lab runs MinIO and toxiproxy");
+    assert!(
+        !child_processes(process::id())?.is_empty(),
+        "the lab runs MinIO and toxiproxy"
+    );
     drop(lab);
     assert_eq!(child_processes(process::id())?, Vec::<String>::new());
     Ok(())

@@ -8,15 +8,18 @@ use anyhow::{Result, ensure};
 use herdfs_lab::Links;
 
 use crate::{
-    VISIBLE_AFTER, assert_bytes, entry_names, random_bytes, read_at, read_entry, readlink_entry,
-    save, two_clients, write_entry,
+    VISIBLE_AFTER, assert_bytes, entry_names, random_bytes, read_at, read_entry, readlink_entry, save,
+    two_clients, write_entry,
 };
 
 const TRIALS: usize = 3;
 const SWITCHES: usize = 3;
 
 fn list(dir: &File) -> Result<()> {
-    ensure!(entry_names(dir)?.len() == SWITCHES, "held directory has all children");
+    ensure!(
+        entry_names(dir)?.len() == SWITCHES,
+        "held directory has all children"
+    );
     Ok(())
 }
 

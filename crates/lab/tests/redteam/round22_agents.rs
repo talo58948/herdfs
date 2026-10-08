@@ -11,12 +11,12 @@ use crate::TestChild;
 
 fn start_runner(mount: &Path, host: &Path) -> Result<TestChild> {
     let mut command = TestChild::agents()?;
-    command
-        .arg("--mount")
-        .arg(mount)
-        .arg("--host")
-        .arg(host)
-        .args(["--command", "cat; echo ran", "--poll-ms", "20"]);
+    command.arg("--mount").arg(mount).arg("--host").arg(host).args([
+        "--command",
+        "cat; echo ran",
+        "--poll-ms",
+        "20",
+    ]);
     TestChild::spawn(command)
 }
 

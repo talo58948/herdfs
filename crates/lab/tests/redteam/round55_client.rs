@@ -9,8 +9,8 @@ use anyhow::{Result, ensure};
 use herdfs_lab::{Lab, Links};
 
 use crate::{
-    VISIBLE_AFTER, assert_bytes, cache_lab, open_entry, random_bytes, read_at, read_entry, save,
-    stat_count, two_clients, wait_pending,
+    VISIBLE_AFTER, assert_bytes, cache_lab, open_entry, random_bytes, read_at, read_entry, save, stat_count,
+    two_clients, wait_pending,
 };
 use rustix::fs::OFlags;
 
@@ -45,8 +45,8 @@ fn write_below_moved_parent(
     held.metadata()?;
 
     lab.cut("b", Links::Authority)?;
-    let written = open_entry(&held, "child", OFlags::WRONLY)
-        .and_then(|mut child| child.write_all(b"OFFLINE!"));
+    let written =
+        open_entry(&held, "child", OFlags::WRONLY).and_then(|mut child| child.write_all(b"OFFLINE!"));
     lab.restore("b", Links::Authority)?;
     if written.is_ok() {
         lab.wait_committed("b")?;

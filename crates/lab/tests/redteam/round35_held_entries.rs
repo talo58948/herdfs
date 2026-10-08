@@ -20,8 +20,8 @@ use anyhow::{Result, ensure};
 use herdfs_lab::Links;
 
 use crate::{
-    VISIBLE_AFTER, assert_bytes, entry_names, mkdir_entry, readlink_entry, rename_entry,
-    rmdir_entry, save, symlink_entry, two_clients, unlink_entry, write_entry,
+    VISIBLE_AFTER, assert_bytes, entry_names, mkdir_entry, readlink_entry, rename_entry, rmdir_entry, save,
+    symlink_entry, two_clients, unlink_entry, write_entry,
 };
 
 const TRIALS: usize = 3;

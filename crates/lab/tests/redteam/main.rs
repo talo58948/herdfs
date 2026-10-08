@@ -107,7 +107,11 @@ fn open_entry(dir: &File, name: &str, flags: OFlags) -> io::Result<File> {
 }
 
 fn read_held(file: &File) -> io::Result<Vec<u8>> {
-    read_at(file, 0, usize::try_from(file.metadata()?.len()).map_err(io::Error::other)?)
+    read_at(
+        file,
+        0,
+        usize::try_from(file.metadata()?.len()).map_err(io::Error::other)?,
+    )
 }
 
 fn read_entry(dir: &File, name: &str) -> io::Result<Vec<u8>> {
@@ -117,20 +121,11 @@ fn read_entry(dir: &File, name: &str) -> io::Result<Vec<u8>> {
 }
 
 fn write_entry(dir: &File, name: &str, bytes: &[u8]) -> io::Result<()> {
-    open_entry(
-        dir,
-        name,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC,
-    )?
-    .write_all(bytes)
+    open_entry(dir, name, OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC)?.write_all(bytes)
 }
 
 fn save_entry(dir: &File, name: &str, bytes: &[u8]) -> io::Result<()> {
-    let mut file = open_entry(
-        dir,
-        name,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC,
-    )?;
+    let mut file = open_entry(dir, name, OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC)?;
     file.write_all(bytes)?;
     file.sync_all()
 }
@@ -152,7 +147,7 @@ fn unlink_entry(dir: &File, name: &str) -> io::Result<()> {
 }
 
 fn rmdir_entry(dir: &File, name: &str) -> io::Result<()> {
-    Ok(rustix::fs::unlinkat(dir, name, AtFlags::REMOVEDIR)? )
+    Ok(rustix::fs::unlinkat(dir, name, AtFlags::REMOVEDIR)?)
 }
 
 fn rename_entry(from: &File, name: &str, to: &File, new_name: &str) -> io::Result<()> {
@@ -172,7 +167,9 @@ fn entry_names(dir: &File) -> io::Result<Vec<OsString>> {
     let fd = rustix::io::dup(dir)?;
     Dir::read_from(fd)?
         .filter_map(|entry| match entry {
-            Ok(entry) if entry.file_name().to_bytes() == b"." || entry.file_name().to_bytes() == b".." => None,
+            Ok(entry) if entry.file_name().to_bytes() == b"." || entry.file_name().to_bytes() == b".." => {
+                None
+            }
             Ok(entry) => Some(Ok(OsString::from_vec(entry.file_name().to_bytes().to_vec()))),
             Err(error) => Some(Err(error.into())),
         })

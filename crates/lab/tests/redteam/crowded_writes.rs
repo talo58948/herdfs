@@ -1,9 +1,9 @@
 //! Round 13: saves of one file while other processes on the same client stat it without pause.
 
-use std::fs::OpenOptions;
-use std::io;
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
+use std::fs::OpenOptions;
+use std::io;
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;

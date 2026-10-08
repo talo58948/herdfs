@@ -20,6 +20,7 @@ use crate::{Profile, SPACE};
 /// The cache limit of a client unless [`crate::LabConfig::cache_bytes`] sets another.
 pub(crate) const CACHE_BYTES: u64 = 1 << 30;
 const STATS_XATTR: &str = "user.herdfs.stats";
+const PLAN_XATTR: &str = "user.herdfs.plan";
 /// Long enough for a few commit retries, which back off from 1 s.
 /// A 1 GiB file takes about a minute to commit on a loaded box.
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -30,6 +31,8 @@ pub enum Strategy {
     Stream,
     Fetch,
     Pin,
+    /// An explicit PREFETCH/READ_AHEAD/KEEP access plan.
+    Plan(&'static str),
     Rule,
     /// Seeded random choices.
     Chaos(u64),
@@ -42,6 +45,7 @@ impl Strategy {
             Self::Stream => "stream".into(),
             Self::Fetch => "fetch".into(),
             Self::Pin => "pin".into(),
+            Self::Plan(plan) => plan.into(),
             Self::Rule => "rule".into(),
             Self::Chaos(seed) => format!("chaos:{seed}"),
             Self::Jev => "jev".into(),
@@ -146,6 +150,12 @@ impl Client {
     pub(crate) fn stats(&self) -> Result<Value> {
         let json = xattr::get(&self.mount, STATS_XATTR)?
             .with_context(|| format!("{} has no {STATS_XATTR}", self.mount.display()))?;
+        Ok(serde_json::from_slice(&json)?)
+    }
+
+    pub(crate) fn plan(&self, path: &Path) -> Result<Value> {
+        let json = xattr::get(self.mount.join(path), PLAN_XATTR)?
+            .with_context(|| format!("{} has no {PLAN_XATTR}", path.display()))?;
         Ok(serde_json::from_slice(&json)?)
     }
 

@@ -64,7 +64,15 @@ fn exchange(left: &Path, right: &Path) -> Result<()> {
     let left = CString::new(left.as_os_str().as_bytes())?;
     let right = CString::new(right.as_os_str().as_bytes())?;
     // SAFETY: both paths are NUL-terminated and remain alive for the call.
-    let result = unsafe { libc::renameatx_np(libc::AT_FDCWD, left.as_ptr(), libc::AT_FDCWD, right.as_ptr(), libc::RENAME_SWAP) };
+    let result = unsafe {
+        libc::renameatx_np(
+            libc::AT_FDCWD,
+            left.as_ptr(),
+            libc::AT_FDCWD,
+            right.as_ptr(),
+            libc::RENAME_SWAP,
+        )
+    };
     ensure!(result == 0, "renameatx_np: {}", std::io::Error::last_os_error());
     Ok(())
 }

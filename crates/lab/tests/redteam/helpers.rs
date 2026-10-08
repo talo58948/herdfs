@@ -115,7 +115,11 @@ pub(crate) fn wait_for_rewrite(lab: &Lab, path: &str, known: &Version) -> Result
 
 pub(crate) fn journaled(lab: &Lab) -> Result<bool> {
     for record in std::fs::read_dir(lab.client_dir("a").join("journal"))? {
-        if record?.path().extension().is_some_and(|extension| extension == "json") {
+        if record?
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
             return Ok(true);
         }
     }
@@ -198,7 +202,10 @@ pub(crate) fn random_bytes(len: usize) -> Vec<u8> {
 }
 
 pub(crate) fn assert_bytes(got: &[u8], expected: &[u8], what: &str) {
-    let differs = got.iter().zip(expected).position(|(got, expected)| got != expected);
+    let differs = got
+        .iter()
+        .zip(expected)
+        .position(|(got, expected)| got != expected);
     assert!(
         got == expected,
         "{what}: {} bytes, {} expected; first difference at {differs:?}",

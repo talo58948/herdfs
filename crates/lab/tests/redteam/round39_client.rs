@@ -8,8 +8,7 @@ use anyhow::{Result, ensure};
 use herdfs_lab::{Lab, LabConfig, Links, Profile, Strategy};
 
 use crate::{
-    VISIBLE_AFTER, assert_bytes, random_bytes, read_at, read_held, save, save_entry, two_clients,
-    write_entry,
+    VISIBLE_AFTER, assert_bytes, random_bytes, read_at, read_held, save, save_entry, two_clients, write_entry,
 };
 
 const TRIALS: usize = 3;
@@ -54,11 +53,7 @@ fn create_existing_opens_a_recreated_listed_name() -> Result<()> {
     save(&a.join("control"), b"control")?;
     list_name(b, "control")?;
     let control = open_with_create(&b.join("control"))?;
-    assert_bytes(
-        &read_held(&control)?,
-        b"control",
-        "control",
-    );
+    assert_bytes(&read_held(&control)?, b"control", "control");
 
     let mut failures = 0;
     for trial in 0..TRIALS {
@@ -70,10 +65,7 @@ fn create_existing_opens_a_recreated_listed_name() -> Result<()> {
         save(&a.join(&name), replacement.as_bytes())?;
 
         let opened = open_with_create(&b.join(&name));
-        let read = opened
-            .as_ref()
-            .ok()
-            .and_then(|file| read_held(file).ok());
+        let read = opened.as_ref().ok().and_then(|file| read_held(file).ok());
         eprintln!("trial {trial}: open={opened:?}, read={read:?}");
         failures += usize::from(read.as_deref() != Some(replacement.as_bytes()));
     }

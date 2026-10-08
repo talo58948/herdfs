@@ -1,5 +1,4 @@
-//! A fake Jev for each client that decides with Jev (F8): it answers as the test sets it, too
-//! slowly, or not at all, and counts the questions it gets.
+//! Fake Jev for F8: one response carries the three independent plan answers.
 
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -15,32 +14,36 @@ use tokio::runtime::{self, Runtime};
 
 use crate::Lab;
 
-/// How the fake Jev answers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JevAnswers {
+    pub prefetch: (&'static str, f64),
+    pub read_ahead: (&'static str, f64),
+    pub keep: (&'static str, f64),
+}
+
+/// How the fake Jev answers one three-question request.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum JevMode {
-    /// Answers this choice with this confidence.
-    Answer(&'static str, f64),
-    /// Answers only after this long, past the client's timeout.
+    Answers(JevAnswers),
+    /// Omits the confidence of this one named answer.
+    Malformed(&'static str),
     Slow(Duration),
-    /// Fails every question with 503.
     Down,
 }
 
 #[derive(Clone)]
 struct Shared {
     mode: Arc<Mutex<JevMode>>,
-    questions: Arc<AtomicUsize>,
+    requests: Arc<AtomicUsize>,
 }
 
 pub struct FakeJev {
     url: String,
     shared: Shared,
-    /// Serves the endpoint until the fake is dropped.
     _runtime: Runtime,
 }
 
 impl FakeJev {
-    /// Starts a fake that is down until a test sets its mode.
     pub(crate) fn start() -> Result<Self> {
         let runtime = runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -50,7 +53,7 @@ impl FakeJev {
         let url = format!("http://{}/v1/evaluate", listener.local_addr()?);
         let shared = Shared {
             mode: Arc::new(Mutex::new(JevMode::Down)),
-            questions: Arc::default(),
+            requests: Arc::default(),
         };
         let app = Router::new().fallback(answer).with_state(shared.clone());
         runtime.spawn(async { axum::serve(listener, app).await });
@@ -69,31 +72,61 @@ impl FakeJev {
         *self.shared.mode.lock().unwrap_or_else(PoisonError::into_inner) = mode;
     }
 
-    /// The questions asked so far.
-    pub fn questions(&self) -> usize {
-        self.shared.questions.load(SeqCst)
+    pub fn requests(&self) -> usize {
+        self.shared.requests.load(SeqCst)
     }
 }
 
 impl Lab {
-    /// The fake Jev that client `name` asks; the client must mount with `Strategy::Jev`.
     pub fn jev(&self, name: &str) -> &FakeJev {
         let jev = self.client(name).jev.as_ref();
         jev.unwrap_or_else(|| panic!("client {name} does not decide with Jev"))
     }
 }
 
-async fn answer(State(shared): State<Shared>) -> Result<Json<Value>, StatusCode> {
-    shared.questions.fetch_add(1, SeqCst);
+async fn answer(State(shared): State<Shared>, Json(request): Json<Value>) -> Result<Json<Value>, StatusCode> {
+    let questions = request["questions"].as_object().ok_or(StatusCode::BAD_REQUEST)?;
+    if !["prefetch", "read_ahead", "keep"].iter().all(|name| {
+        questions
+            .get(*name)
+            .is_some_and(|question| question["type"] == "choice")
+    }) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    shared.requests.fetch_add(1, SeqCst);
     let mode = *shared.mode.lock().unwrap_or_else(PoisonError::into_inner);
-    let (choice, confidence) = match mode {
-        JevMode::Answer(choice, confidence) => (choice, confidence),
+    let answers = match mode {
+        JevMode::Answers(answers) => reply(answers),
+        JevMode::Malformed(name) => {
+            let mut reply = reply(JevAnswers {
+                prefetch: ("index", 0.9),
+                read_ahead: ("large", 0.9),
+                keep: ("yes", 0.9),
+            });
+            reply["answers"][name]
+                .as_object_mut()
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+                .remove("confidence");
+            reply
+        }
         JevMode::Slow(delay) => {
             tokio::time::sleep(delay).await;
-            ("fetch", 1.0)
+            reply(JevAnswers {
+                prefetch: ("whole", 1.0),
+                read_ahead: ("none", 1.0),
+                keep: ("no", 1.0),
+            })
         }
         JevMode::Down => return Err(StatusCode::SERVICE_UNAVAILABLE),
     };
-    let answer = json!({"type": "choice", "choice": choice, "confidence": confidence});
-    Ok(Json(json!({"answers": {"strategy": answer}})))
+    Ok(Json(answers))
+}
+
+fn reply(answers: JevAnswers) -> Value {
+    let answer = |(choice, confidence)| json!({"type": "choice", "choice": choice, "confidence": confidence});
+    json!({"answers": {
+        "prefetch": answer(answers.prefetch),
+        "read_ahead": answer(answers.read_ahead),
+        "keep": answer(answers.keep),
+    }})
 }

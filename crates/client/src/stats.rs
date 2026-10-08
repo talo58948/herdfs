@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use serde_json::json;
 
-use crate::strategy::Strategy;
+use crate::strategy::{AccessPlan, Keep, Prefetch, ReadAhead, Setting};
 
 #[derive(Default)]
 pub struct Stats {
@@ -19,7 +19,9 @@ pub struct Stats {
     pub jev_answers: AtomicU64,
     pub jev_unsure: AtomicU64,
     pub jev_errors: AtomicU64,
-    decisions: [AtomicU64; Strategy::ALL.len()],
+    prefetch: [AtomicU64; Prefetch::ALL.len()],
+    read_ahead: [AtomicU64; ReadAhead::ALL.len()],
+    keep: [AtomicU64; Keep::ALL.len()],
 }
 
 pub fn bump(counter: &AtomicU64, by: u64) {
@@ -27,14 +29,15 @@ pub fn bump(counter: &AtomicU64, by: u64) {
 }
 
 impl Stats {
-    pub fn decided(&self, strategy: Strategy) {
-        bump(&self.decisions[strategy as usize], 1);
+    pub fn decided(&self, plan: AccessPlan) {
+        bump(&self.prefetch[plan.prefetch as usize], 1);
+        bump(&self.read_ahead[plan.read_ahead as usize], 1);
+        bump(&self.keep[plan.keep as usize], 1);
     }
 
     /// The counters as JSON. Pending commits are counted by the journal, the round trip (seconds)
     /// by the remote.
     pub fn json(&self, pending_commits: usize, round_trip: Option<f64>) -> Vec<u8> {
-        let decided = |strategy: Strategy| (strategy.name(), self.decisions[strategy as usize].load(Relaxed));
         json!({
             "bytes_fetched": self.bytes_fetched.load(Relaxed),
             "chunks_fetched": self.chunks_fetched.load(Relaxed),
@@ -46,9 +49,21 @@ impl Stats {
             "jev_answers": self.jev_answers.load(Relaxed),
             "jev_unsure": self.jev_unsure.load(Relaxed),
             "jev_errors": self.jev_errors.load(Relaxed),
-            "decisions": BTreeMap::from(Strategy::ALL.map(decided)),
+            "decisions": {
+                "prefetch": counts::<Prefetch>(&self.prefetch),
+                "read_ahead": counts::<ReadAhead>(&self.read_ahead),
+                "keep": counts::<Keep>(&self.keep),
+            },
         })
         .to_string()
         .into_bytes()
     }
+}
+
+fn counts<T: Setting>(counts: &[AtomicU64]) -> BTreeMap<&'static str, u64> {
+    T::ALL
+        .iter()
+        .enumerate()
+        .map(|(index, setting)| (setting.name(), counts[index].load(Relaxed)))
+        .collect()
 }

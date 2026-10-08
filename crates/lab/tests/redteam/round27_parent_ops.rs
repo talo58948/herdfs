@@ -12,8 +12,8 @@ use herdfs_core::chunk;
 use herdfs_lab::{ADMIN, Lab, LabConfig, Profile, StoppedProcess, Strategy, process_with_arg};
 
 use crate::{
-    VISIBLE_AFTER, create_entry, random_bytes, read_entry, rename_entry, save, two_clients,
-    unlink_entry, write_entry,
+    VISIBLE_AFTER, create_entry, random_bytes, read_entry, rename_entry, save, two_clients, unlink_entry,
+    write_entry,
 };
 
 const SLOW_AUTHORITY: Profile = Profile::Custom {

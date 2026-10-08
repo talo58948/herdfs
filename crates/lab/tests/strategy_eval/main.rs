@@ -2,30 +2,45 @@
 //! against the measured best strategy. Jev is asked about each case with the client's own
 //! question. Reads the AI Gateway key from `~/.config/herdfs/ai-gateway-key`, and writes the
 //! table to `results/strategy_eval.json`.
-//! contract: none; R5 measures how well Jev decides, which P1 and P2 do not promise.
+//! contract: P2, P3
 
 mod cases;
+mod workload;
 
 use std::path::Path;
 use std::time::Instant;
 use std::{env, fs};
 
 use anyhow::{Context, Result, ensure};
-use herdfs_client::{Jev, OpenContext, Strategy};
+use herdfs_client::{AccessPlan, Jev, JevAnswer, OpenContext};
 use serde_json::json;
 
-use crate::cases::{Case, MIB, measure_all};
+use crate::cases::{Case, MIB, PLANS, measure_all};
 
 const JEV_URL: &str = "https://ai-gateway.vercel.sh/v1/evaluate";
 
+// contract: P3
+#[test]
+fn fixed_deciders_cover_every_plan_setting() {
+    let mut names: Vec<String> = PLANS.iter().map(|(_, plan, _)| plan.name()).collect();
+    names.sort();
+    names.dedup();
+    assert_eq!(names.len(), 24, "every finite plan is measured once");
+    assert!(PLANS.iter().any(|(name, ..)| *name == "stream"));
+    assert!(PLANS.iter().any(|(name, ..)| *name == "fetch"));
+    assert!(PLANS.iter().any(|(name, ..)| *name == "pin"));
+    assert!(PLANS.iter().any(|(_, plan, _)| plan.name() == "index/none/no"));
+    assert!(PLANS.iter().any(|(_, plan, _)| plan.name() == "none/large/no"));
+}
+
 /// Jev's raw answer for a case (`None` if the ask failed), and how long it took.
 struct Asked {
-    answer: Option<(Strategy, f64)>,
+    answer: Option<JevAnswer>,
     millis: u128,
 }
 
 #[test]
-#[ignore = "R5: runs for about 15 minutes and asks Jev over the network"]
+#[ignore = "R5 asks real Jev over the network"]
 fn jev_beats_every_fixed_strategy_by_regret() -> Result<()> {
     let key_file = Path::new(&env::var("HOME")?).join(".config/herdfs/ai-gateway-key");
     let jev = Jev::new(&key_file, JEV_URL).with_context(|| format!("reading {}", key_file.display()))?;
@@ -33,36 +48,28 @@ fn jev_beats_every_fixed_strategy_by_regret() -> Result<()> {
     let contexts: Vec<OpenContext> = cases.iter().map(context).collect();
     let asked = ask_all(&jev, &contexts)?;
     // As the client's decider does: an unsure or failed answer leaves the rule's choice.
-    let by_jev = contexts
-        .iter()
-        .zip(&asked)
-        .map(|(context, asked)| match asked.answer {
-            Some((strategy, confidence)) if confidence >= Jev::CONFIDENT => strategy,
-            _ => rule(context),
-        });
-    let mut deciders: Vec<(&str, Vec<Strategy>)> = Strategy::ALL
+    let by_jev = contexts.iter().zip(&asked).map(|(context, asked)| {
+        asked
+            .answer
+            .map_or_else(|| rule(context), |answer| answer.plan(rule(context)))
+    });
+    let mut deciders: Vec<(&str, Vec<AccessPlan>)> = PLANS
         .into_iter()
-        .map(|strategy| (strategy.name(), vec![strategy; cases.len()]))
+        .map(|(name, plan, _)| (name, vec![plan; cases.len()]))
         .collect();
     deciders.push(("rule", contexts.iter().map(rule).collect()));
     deciders.push(("jev", by_jev.collect()));
-    // Jev's answers whatever their confidence, to show what the threshold costs. Not asserted.
-    let raw = contexts
-        .iter()
-        .zip(&asked)
-        .map(|(context, asked)| asked.answer.map_or(rule(context), |(strategy, _)| strategy));
-    deciders.push(("jev-raw", raw.collect()));
     let scores: Vec<(f64, f64)> = deciders
         .iter()
         .map(|(_, choices)| score(&cases, choices))
         .collect();
     report(&cases, &asked, &deciders, &scores)?;
 
-    let best_fixed = scores[..3]
+    let best_fixed = scores[..PLANS.len()]
         .iter()
         .map(|(mean, _)| *mean)
         .fold(f64::INFINITY, f64::min);
-    let (mean, p90) = scores[4];
+    let (mean, p90) = scores[PLANS.len() + 1];
     ensure!(
         mean < best_fixed && p90 <= 1.5,
         "Jev's regret: mean {mean:.2} (the best fixed decider's is {best_fixed:.2}), p90 {p90:.2} (at most 1.5)"
@@ -85,11 +92,11 @@ fn context(case: &Case) -> OpenContext {
 }
 
 /// The client's rule decider: fetch files under 64 MiB whole, stream larger ones.
-fn rule(context: &OpenContext) -> Strategy {
+fn rule(context: &OpenContext) -> AccessPlan {
     if context.size < 64 * MIB {
-        Strategy::Fetch
+        AccessPlan::FETCH
     } else {
-        Strategy::Stream
+        AccessPlan::STREAM
     }
 }
 
@@ -109,7 +116,7 @@ fn ask_all(jev: &Jev, contexts: &[OpenContext]) -> Result<Vec<Asked>> {
 }
 
 /// Mean and p90 regret of `choices`, one per case.
-fn score(cases: &[Case], choices: &[Strategy]) -> (f64, f64) {
+fn score(cases: &[Case], choices: &[AccessPlan]) -> (f64, f64) {
     let mut regrets: Vec<f64> = cases
         .iter()
         .zip(choices)
@@ -124,34 +131,34 @@ fn score(cases: &[Case], choices: &[Strategy]) -> (f64, f64) {
 fn report(
     cases: &[Case],
     asked: &[Asked],
-    deciders: &[(&str, Vec<Strategy>)],
+    deciders: &[(&str, Vec<AccessPlan>)],
     scores: &[(f64, f64)],
 ) -> Result<()> {
     println!(
-        "{:<22} {:>7} {:>7} {:>7}  {:<7} {:<7} {:<7} jev's answer",
-        "case", "stream", "fetch", "pin", "best", "rule", "jev"
+        "{:<22} {:<16} {:<16} {:<16} jev's answer",
+        "case", "best", "rule", "jev"
     );
     let mut rows = Vec::new();
     for (index, (case, asked)) in cases.iter().zip(asked).enumerate() {
-        let [stream, fetch, pin] = case.seconds;
-        let decisions: Vec<&str> = deciders
+        let decisions: Vec<String> = deciders
             .iter()
             .map(|(_, choices)| choices[index].name())
             .collect();
-        let answer = asked
-            .answer
-            .map(|(strategy, confidence)| (strategy.name(), confidence));
+        let answer = asked.answer;
         let (best, name) = (case.best().name(), case.name());
-        let said = answer.map_or("failed".into(), |(choice, confidence)| {
-            format!("{choice} {confidence:.2}")
-        });
+        let said = match answer {
+            Some(answer) => serde_json::to_string(&answer)?,
+            None => "failed".into(),
+        };
         println!(
-            "{name:<22} {stream:>7.2} {fetch:>7.2} {pin:>7.2}  {best:<7} {:<7} {:<7} {said} in {} ms",
-            decisions[3], decisions[4], asked.millis
+            "{name:<22} {best:<16} {:<16} {:<16} {said} in {} ms",
+            decisions[PLANS.len()],
+            decisions[PLANS.len() + 1],
+            asked.millis
         );
         rows.push(json!({
-            "case": name, "seconds": case.seconds, "bytes": case.bytes, "best": best, "round_trip": case.round_trip,
-            "rule": decisions[3], "jev": decisions[4], "jev_answer": answer, "jev_ms": asked.millis,
+            "case": name, "seconds": &case.seconds, "bytes": &case.bytes, "best": best, "round_trip": case.round_trip,
+            "rule": decisions[PLANS.len()], "jev": decisions[PLANS.len() + 1], "jev_answer": answer, "jev_ms": asked.millis,
         }));
     }
     let mut regret = serde_json::Map::new();

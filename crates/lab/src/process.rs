@@ -249,9 +249,7 @@ pub fn process_cpu_time(pid: u32) -> Result<Duration> {
         let seconds = match parts.as_slice() {
             [minutes, seconds] => minutes.parse::<f64>()? * 60.0 + seconds.parse::<f64>()?,
             [hours, minutes, seconds] => {
-                hours.parse::<f64>()? * 3600.0
-                    + minutes.parse::<f64>()? * 60.0
-                    + seconds.parse::<f64>()?
+                hours.parse::<f64>()? * 3600.0 + minutes.parse::<f64>()? * 60.0 + seconds.parse::<f64>()?
             }
             _ => bail!("unexpected ps CPU time {elapsed:?}"),
         };

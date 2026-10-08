@@ -27,14 +27,22 @@ fn mount_points() -> Result<Vec<std::path::PathBuf>> {
     let output = super::process::run(Command::new("mount"))?;
     Ok(output
         .lines()
-        .filter_map(|line| line.split_once(" on ")?.1.split_once(" (").map(|(path, _)| path.into()))
+        .filter_map(|line| {
+            line.split_once(" on ")?
+                .1
+                .split_once(" (")
+                .map(|(path, _)| path.into())
+        })
         .collect())
 }
 
 /// Force-detaches `path` after its mount process has stopped.
 pub(crate) fn detach(path: &Path) -> Result<()> {
     #[cfg(target_os = "linux")]
-    let status = Command::new("fusermount3").args(["-u", "-z"]).arg(path).status()?;
+    let status = Command::new("fusermount3")
+        .args(["-u", "-z"])
+        .arg(path)
+        .status()?;
     #[cfg(target_os = "macos")]
     let status = Command::new("umount").arg("-f").arg(path).status()?;
     ensure!(status.success(), "forced unmount of {}: {status}", path.display());

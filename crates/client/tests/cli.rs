@@ -48,3 +48,26 @@ fn mount_rejects_an_unknown_strategy_and_jev_without_its_key() {
         assert!(stderr.contains(error), "{stderr}");
     }
 }
+
+// contract: P3
+#[test]
+fn explain_prints_the_plan_xattr_as_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("file");
+    std::fs::write(&path, b"bytes").unwrap();
+    let plan = br#"{"plan":{"prefetch":"index","read_ahead":"large","keep":"no"},"source":"jev","bytes_fetched":42}"#;
+    xattr::set(&path, "user.herdfs.plan", plan).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_herdfs"))
+        .arg("explain")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let explained: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let expected: serde_json::Value = serde_json::from_slice(plan).unwrap();
+    assert_eq!(explained, expected);
+}

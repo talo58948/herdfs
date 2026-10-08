@@ -13,10 +13,8 @@ use fuser::{
 use tokio::runtime::Handle as Runtime;
 
 use super::answer::{self, Answer, inode, open_mode};
-use super::{Space, namespace::AttrChange};
+use super::{Space, namespace::AttrChange, xattr};
 use crate::{Result, unix_ms};
-
-const STATS_XATTR: &str = "user.herdfs.stats";
 
 pub struct Fuse {
     space: Arc<Space>,
@@ -259,16 +257,14 @@ impl Filesystem for Fuse {
     }
 
     fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
-        if ino != INodeNo::ROOT || name != STATS_XATTR {
-            return reply.error(Errno::NO_XATTR);
+        match xattr::get(&self.space, inode(ino), name) {
+            Some(value) => answer::xattr(&value, size, reply),
+            None => reply.error(Errno::NO_XATTR),
         }
-        answer::xattr(&self.space.stats(), size, reply);
     }
 
     fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
-        let names = [STATS_XATTR.as_bytes(), b"\0"].concat();
-        let names = if ino == INodeNo::ROOT { &names[..] } else { &[] };
-        answer::xattr(names, size, reply);
+        answer::xattr(&xattr::list(&self.space, inode(ino)), size, reply);
     }
 
     fn create(

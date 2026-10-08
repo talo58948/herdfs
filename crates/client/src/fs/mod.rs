@@ -11,6 +11,8 @@ mod inode;
 mod inodes;
 mod kernel;
 mod namespace;
+mod read;
+mod xattr;
 
 use std::sync::{Arc, Mutex, atomic::AtomicU64};
 use std::time::{Duration, Instant, SystemTime};
@@ -30,7 +32,7 @@ use crate::{
     reader::Reader,
     remote::Remote,
     stats::Stats,
-    strategy::Decider,
+    strategy::{AccessRecord, Decider},
 };
 
 /// How long the kernel and this client may reuse an attribute or listing (T_vis, C2).
@@ -114,6 +116,8 @@ pub struct Space {
     pub(crate) journal: Arc<Journal>,
     pub(crate) stats: Arc<Stats>,
     decider: Mutex<Decider>,
+    /// Latest access record by entry, retained after its handle closes for `explain`.
+    accesses: Mutex<Lru<EntryId, Arc<AccessRecord>>>,
     pub(crate) kernel: Arc<Kernel>,
     /// The mounting user and group, shown as the owner of every entry.
     owner: (u32, u32),
@@ -144,6 +148,7 @@ impl Space {
             journal,
             stats,
             decider: Mutex::new(decider),
+            accesses: Mutex::default(),
             kernel,
             owner: (
                 rustix::process::geteuid().as_raw(),
