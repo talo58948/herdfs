@@ -77,27 +77,23 @@ async fn capture(
     mut combined: File,
 ) -> io::Result<()> {
     let mut buffer = [0; 8192];
-    let mut separate_error = None;
-    let mut combined_error = None;
+    let mut first_error = None;
     loop {
         let read = source.read(&mut buffer).await?;
         if read == 0 {
-            if separate_error.is_none()
-                && let Err(err) = separate.sync_all().await
-            {
-                separate_error = Some(err);
+            if let Some(err) = first_error {
+                return Err(err);
             }
-            return separate_error.or(combined_error).map_or(Ok(()), Err);
+            return separate.sync_all().await;
         }
-        if separate_error.is_none()
-            && let Err(err) = separate.write_all(&buffer[..read]).await
-        {
-            separate_error = Some(err);
+        if first_error.is_some() {
+            // Draining keeps the child from blocking on a full pipe.
+            continue;
         }
-        if combined_error.is_none()
-            && let Err(err) = combined.write_all(&buffer[..read]).await
-        {
-            combined_error = Some(err);
+        if let Err(err) = separate.write_all(&buffer[..read]).await {
+            first_error = Some(err);
+        } else if let Err(err) = combined.write_all(&buffer[..read]).await {
+            first_error = Some(err);
         }
     }
 }
@@ -106,13 +102,10 @@ async fn wait(session: &Session, child: &mut Child) -> anyhow::Result<(ExitStatu
     tokio::select! {
         exit = child.wait() => Ok((exit.context("wait")?, false)),
         cancelled = cancellation(session) => {
-            if let Err(err) = cancelled {
-                kill_group(child)?;
-                child.wait().await.context("wait after cancel error")?;
-                return Err(err).context("watch cancel");
-            }
             kill_group(child)?;
-            Ok((child.wait().await.context("wait after cancel")?, true))
+            let exit = child.wait().await.context("wait after cancel")?;
+            cancelled.context("watch cancel")?;
+            Ok((exit, true))
         }
     }
 }
