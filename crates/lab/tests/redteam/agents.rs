@@ -39,7 +39,9 @@ fn ended(session: &Path) -> Result<String> {
     loop {
         match fs::read_to_string(session.join("status")) {
             // Empty until the runner's first write to it commits.
-            Ok(status) if !matches!(status.trim_end(), "" | "running") => return Ok(status),
+            Ok(status) if !matches!(status.trim_end(), "" | "queued" | "running") => {
+                return Ok(status);
+            }
             Err(error) if error.kind() != ErrorKind::NotFound => return Err(error.into()),
             _ => {}
         }
