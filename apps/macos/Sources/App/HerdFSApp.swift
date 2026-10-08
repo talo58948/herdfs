@@ -22,7 +22,7 @@ struct HerdFSApp: App {
         MenuBarExtra("HerdFS", systemImage: "externaldrive.connected.to.line.below") {
             MenuView(model: delegate.model)
                 .frame(width: 380)
-                .onAppear(perform: delegate.model.menuOpened)
+                .onAppear { delegate.model.menuOpened() }
         }
         .menuBarExtraStyle(.window)
     }

@@ -30,20 +30,20 @@ struct MenuView: View {
             Divider()
             Toggle("Open at login", isOn: Binding(
                 get: { model.openAtLogin },
-                set: model.setOpenAtLogin
+                set: { model.setOpenAtLogin($0) }
             ))
             if model.loginRequiresApproval {
-                Button("Approve Open at Login…", action: model.showLoginItemSettings)
+                Button("Approve Open at Login…") { model.showLoginItemSettings() }
             }
             if !model.finderEnabled {
                 HStack {
                     Text("Finder extension is disabled").foregroundStyle(.secondary)
                     Spacer()
-                    Button("Enable…", action: model.showFinderSettings)
+                    Button("Enable…") { model.showFinderSettings() }
                 }
             }
             HStack {
-                Button("Sign in…", action: model.signIn).disabled(model.busy)
+                Button("Sign in…") { model.signIn() }.disabled(model.busy)
                 Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }
             }
@@ -68,7 +68,7 @@ struct MenuView: View {
             GridRow {
                 HStack {
                     Spacer()
-                    Button("Save settings", action: model.saveConfiguration)
+                    Button("Save settings") { model.saveConfiguration() }
                         .controlSize(.small)
                 }
                 .gridCellColumns(2)
