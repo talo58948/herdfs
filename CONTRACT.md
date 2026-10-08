@@ -1,6 +1,6 @@
-# Contract (v0)
+# Contract (v0.1)
 
-Every test names the lines it checks with a `// contract: C9, S2` comment. Code that serves no line here does not belong in v0.
+Every test names the lines it checks with a `// contract: C9, S2` comment. Code that serves no line here does not belong in herdfs.
 
 "Commit" means the authority has acknowledged a new version. Parameters: T_vis = 1 s, grant TTL = 60 s, Jev timeout = 2 s, collection grace = 1 h, collection interval = 10 min.
 
@@ -17,8 +17,8 @@ Every test names the lines it checks with a `// contract: C9, S2` comment. Code 
 | C6 | Concurrent guarded commits on the same base: exactly one succeeds; the rest get `Conflict`. API-level in v0. |
 | C7 | Rename is atomic within a space; a directory rename moves the whole subtree at once. Other clients follow a rename within T_vis: operations on an entry they hold reach it at its new path. |
 | C8 | Every access strategy returns identical bytes for the same version. |
-| C9 | A cold read of `[off, off+len)` fetches at most the chunks overlapping that range, plus configured prefetch. |
-| C10 | Mounting a space uses local disk proportional to metadata and cache, not to data size. |
+| C9 | A cold read of `[off, off+len)` fetches at most the chunks overlapping that range, plus the prefetch and read-ahead of its access plan (P3). |
+| C10 | Mounting a space uses local disk proportional to metadata, cache and what the user keeps downloaded (P4), not to data size. |
 | C11 | The cache never serves bytes of a different version. A tampered cached chunk fails its hash and is refetched. |
 | C12 | Content writes made offline to existing files are journaled and committed on reconnect, under C5, when the write replaces the file (truncate) or this client holds the file's current bytes. Namespace changes (create, mkdir, rename, remove) need the authority and fail with `EIO` while it is unreachable. |
 | C13 | A fork copies no chunk bytes, includes all commits acknowledged before it, and is isolated from its parent afterwards. Its time grows with entry count only (≤ 1 s per 100k entries). |
@@ -43,6 +43,19 @@ Every test names the lines it checks with a `// contract: C9, S2` comment. Code 
 
 | ID | Promise |
 |---|---|
-| P1 | The strategy is decided at `open` only, and `open` never waits for Jev: a remembered answer applies at once; otherwise the default applies and Jev's later answer may start a prefetch for that open. |
-| P2 | If Jev errors, times out or is unsure, the default applies and the filesystem stays available. |
+| P1 | An access plan is decided when a file is opened (on macOS, at its first access after 1 s without one), and that never waits for Jev: a remembered answer applies at once; otherwise the rule's plan applies, and Jev's later answer may add prefetch or read-ahead for that access, never take any away. |
+| P2 | If Jev errors, times out or is unsure about a setting, the rule's value for that setting applies and the filesystem stays available. Byte ranges are computed by the client from the file, never taken from Jev. |
+| P3 | An access plan sets three things independently: what to prefetch when the access starts (nothing, the regions holding the file's index, its first window, or all of it), read-ahead after sequential reads (none, small, large), and whether its chunks stay cached until the access ends. The index regions are found from the format (Parquet footer, ZIP central directory, MP4 `moov`), else the first and last window. `herdfs explain PATH` shows the plan of the file's latest access, where it came from (remembered, rule or Jev) and the bytes it fetched. |
+| P4 | A file or folder the user keeps downloaded has the latest version of everything below it cached, and readable offline once `herdfs status` reports it ready; it is never evicted until the user unpins it. Only kept-downloaded bytes may exceed the cache budget. |
 | A1 | The agents plugin uses only the public filesystem. Permission to spawn a session is write access at its directory under `/.agents/<host>/`; a grant on `/.agents/<host>/` covers every session there. |
+| A2 | A session's `status` moves from `queued` to `running` to `done`, `failed: <reason>` or `cancelled`, never back. Writing a `cancel` file stops it within 5 s. The runner writes `exit_code`, `stdout` and `stderr` beside `output`. |
+
+## macOS and the desktop
+
+| ID | Promise |
+|---|---|
+| M1 | On macOS (Apple silicon, 26 or newer) a space mounts without a kernel extension, system extension, Apple-signed code or admin password: the client serves it to the system's NFS client on loopback. Every line above holds on macOS except as M2 states. |
+| M2 | On macOS an open file shows a newer version only after it is reopened, not between reads as C3 says; and Finder's extended attributes and resource forks are kept in `._` files, stored like any other file. |
+| U1 | The menu-bar app signs in through the browser and keeps the refresh token in the Keychain, mounts the user's spaces at login, and shows for each space whether it is mounted and connected, its pending uploads (which can be paused), and its cache and kept-downloaded use. |
+| U2 | In Finder, files in a space carry a badge when kept downloaded, downloading, waiting to upload, or failing, and offer Keep Downloaded, Unpin, Copy Link, Version History and Share. |
+| U3 | Everything a principal may do through the authority (history, restore, grants, forks) is available from the `herdfs` CLI; the app's Finder actions run the same commands. |
