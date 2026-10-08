@@ -67,7 +67,7 @@ impl Space {
                 Some(_) => None,
                 None => self.head(entry, mode).await?,
             };
-            upgrade = self.start(file.as_ref(), pid, &handle);
+            upgrade = self.start(file.as_ref(), super::access::process_name_for(pid), &handle);
         }
         if truncate {
             self.prepare(entry, true).await?;

@@ -8,7 +8,7 @@ use std::{fs::File, future::Future, sync::Arc};
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{Entry, EntryId};
 
-use super::{InodeNo, OpenMode, Space, TTL};
+use super::{InodeNo, OpenMode, Space};
 use crate::{Error, Result, reader::Head};
 
 type Held = (Entry, Instant, bool);
@@ -36,7 +36,8 @@ impl Space {
     /// A fresh child held under a fresh parent, without asking the authority.
     pub(super) async fn fresh_child(&self, parent: InodeNo, name: &str) -> Result<Option<Entry>> {
         let (held, reuse) = self.held_child(parent, name)?;
-        let Some((entry, ..)) = held.filter(|(_, at, current)| reuse && *current && at.elapsed() < TTL)
+        let Some((entry, ..)) =
+            held.filter(|(_, at, current)| reuse && *current && at.elapsed() < self.metadata_ttl)
         else {
             return Ok(None);
         };
@@ -67,7 +68,7 @@ impl Space {
         // A listing leaves entries it never followed.
         if let Some((entry, at, _)) = held
             .clone()
-            .filter(|(_, at, current)| reuse && *current && at.elapsed() < TTL)
+            .filter(|(_, at, current)| reuse && *current && at.elapsed() < self.metadata_ttl)
         {
             self.move_on(&entry).await;
             let (entry, local) = self.inodes.view(entry);
@@ -92,7 +93,7 @@ impl Space {
         let bound = self.bound(parent)?;
         let path = bound.as_ref().and_then(|(path, _)| path.join(name).ok());
         let held = path.as_ref().and_then(|path| self.inodes.at(path));
-        let reuse = bound.is_some_and(|(_, at)| at.elapsed() < TTL);
+        let reuse = bound.is_some_and(|(_, at)| at.elapsed() < self.metadata_ttl);
         Ok((held, reuse))
     }
 

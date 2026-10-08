@@ -1,22 +1,27 @@
-//! `herdfs mount`: connects to the authority, resumes pending commits and serves FUSE.
+//! `herdfs mount`: connects to the authority, resumes pending commits and serves a filesystem.
 
-use std::{net::IpAddr, path::PathBuf};
+use std::{net::IpAddr, path::PathBuf, sync::Arc};
 
-use crate::strategy::StrategyArg;
+use crate::{
+    cache::Cache,
+    fs::{Inodes, Kernel, Space},
+    journal::{Committer, Journal},
+    remote::Remote,
+    stats::Stats,
+    strategy::{Decider, Jev, StrategyArg},
+};
+use anyhow::Context;
+use herdfs_core::SpacePath;
 #[cfg(target_os = "linux")]
 use {
-    crate::{
-        cache::Cache,
-        fs::{Fuse, Inodes, Kernel, Space},
-        journal::{Committer, Journal},
-        remote::Remote,
-        stats::Stats,
-        strategy::{Decider, Jev},
-    },
-    anyhow::Context,
+    crate::fs::Fuse,
     fuser::{Config, MountOption, Session},
-    herdfs_core::SpacePath,
-    std::sync::Arc,
+};
+#[cfg(unix)]
+use {
+    crate::fs::{Identity, Nfs},
+    nfsserve::tcp::{NFSTcp, NFSTcpListener},
+    std::{fs, os::unix::fs::PermissionsExt, process::Command},
     tokio::signal::unix::{SignalKind, signal},
 };
 
@@ -53,12 +58,22 @@ pub struct MountArgs {
     /// HOST=IP: connect to IP for HOST, keeping the URL's port and host, like curl's --resolve.
     #[arg(long, value_parser = parse_resolve)]
     resolve: Vec<(String, IpAddr)>,
+    /// Serve loopback NFSv3 instead of FUSE (the default on macOS).
+    #[arg(long, default_value_t = cfg!(target_os = "macos"))]
+    nfs: bool,
     mountpoint: PathBuf,
 }
 
 /// Mounts the space and serves it until it is unmounted or the process gets SIGINT or SIGTERM.
-#[cfg(target_os = "linux")]
 pub fn mount(args: &MountArgs) -> anyhow::Result<()> {
+    if args.nfs {
+        return mount_nfs(args);
+    }
+    mount_fuse(args)
+}
+
+#[cfg(target_os = "linux")]
+fn mount_fuse(args: &MountArgs) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let _context = runtime.enter();
     let space = runtime.block_on(connect(args))?;
@@ -86,11 +101,10 @@ pub fn mount(args: &MountArgs) -> anyhow::Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn mount(_args: &MountArgs) -> anyhow::Result<()> {
-    anyhow::bail!("mounting is not yet supported on this platform")
+fn mount_fuse(_args: &MountArgs) -> anyhow::Result<()> {
+    anyhow::bail!("FUSE mounting is supported only on Linux; use --nfs")
 }
 
-#[cfg(target_os = "linux")]
 async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
     let (authority, space, token_file) = (&args.authority, &args.space, &args.token_file);
     let remote = Remote::new(authority, space, token_file.clone(), &args.resolve)
@@ -115,19 +129,109 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
         }
     };
     let kernel = Arc::new(Kernel::new(root.id));
-    let space = Arc::new(Space::new(
-        remote.clone(),
-        cache,
-        journal,
-        stats,
-        decider,
-        kernel,
-        inodes,
-    ));
+    let space = Space::new(remote.clone(), cache, journal, stats, decider, kernel, inodes);
+    let space = Arc::new(if args.nfs {
+        space.without_metadata_cache()
+    } else {
+        space
+    });
     let committer = Committer { space: space.clone() };
     tokio::spawn(Arc::new(committer).run(woken));
     tokio::spawn(remote.probe());
     Ok(space)
+}
+
+#[cfg(unix)]
+fn mount_nfs(args: &MountArgs) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let _context = runtime.enter();
+    let space = runtime.block_on(connect(args))?;
+    let identity = Arc::new(Identity::open(&args.journal)?);
+    let address = format!("127.0.0.1:{}", identity.port());
+    let nfs = Nfs::new(space.clone(), space.kernel.root(), identity.clone());
+    let listener = runtime
+        .block_on(NFSTcpListener::bind(&address, nfs))
+        .with_context(|| format!("binding the loopback NFS server at {address}"))?;
+    let port = listener.get_listen_port();
+    if identity.port() == 0 {
+        identity.set_port(port)?;
+    }
+    fs::create_dir_all(&args.mountpoint)?;
+    fs::set_permissions(&args.mountpoint, fs::Permissions::from_mode(0o700))?;
+    let mut server = runtime.spawn(async move { listener.handle_forever().await });
+    if let Err(error) = platform_mount(&args.mountpoint, port) {
+        server.abort();
+        return Err(error);
+    }
+    tracing::info!(mountpoint = %args.mountpoint.display(), space = args.space, port, "mounted");
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    let stopped = runtime.block_on(async {
+        tokio::select! {
+            _ = interrupt.recv() => Ok(()),
+            _ = terminate.recv() => Ok(()),
+            result = &mut server => Err(anyhow::anyhow!("NFS server stopped: {result:?}")),
+        }
+    });
+    let unmounted = platform_unmount(&args.mountpoint, false)
+        .or_else(|error| platform_unmount(&args.mountpoint, true).context(error));
+    server.abort();
+    stopped?;
+    unmounted
+}
+
+#[cfg(not(unix))]
+fn mount_nfs(_args: &MountArgs) -> anyhow::Result<()> {
+    anyhow::bail!("NFS mounting is supported only on Unix")
+}
+
+#[cfg(target_os = "macos")]
+fn platform_mount(mountpoint: &std::path::Path, port: u16) -> anyhow::Result<()> {
+    let options = format!(
+        "vers=3,tcp,hard,intr,locallocks,noquota,rdirplus,actimeo=1,nonegnamecache,readahead=0,rsize=131072,wsize=131072,port={port},mountport={port}"
+    );
+    run_mount(
+        Command::new("/sbin/mount_nfs")
+            .args(["-o", &options, "127.0.0.1:/"])
+            .arg(mountpoint),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn platform_mount(mountpoint: &std::path::Path, port: u16) -> anyhow::Result<()> {
+    let options = format!(
+        "vers=3,tcp,nolock,noacl,actimeo=1,lookupcache=none,rsize=131072,wsize=131072,port={port},mountport={port}"
+    );
+    run_mount(
+        Command::new("sudo")
+            .arg("mount.nfs")
+            .args(["-o", &options, "127.0.0.1:/"])
+            .arg(mountpoint),
+    )
+}
+
+#[cfg(unix)]
+fn platform_unmount(mountpoint: &std::path::Path, force: bool) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("/sbin/umount");
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut command = Command::new("sudo");
+        command.arg("umount");
+        command
+    };
+    if force {
+        command.arg("-f");
+    }
+    run_mount(command.arg(mountpoint))
+}
+
+#[cfg(unix)]
+fn run_mount(command: &mut Command) -> anyhow::Result<()> {
+    let shown = format!("{command:?}");
+    let status = command.status().with_context(|| format!("running {shown}"))?;
+    anyhow::ensure!(status.success(), "{shown} failed with {status}");
+    Ok(())
 }
 
 fn parse_resolve(value: &str) -> Result<(String, IpAddr), String> {

@@ -10,9 +10,7 @@ use std::{
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{EntryId, ErrorCode};
 
-use super::{
-    Attributes, DirectoryEntry, InodeNo, MAX_NAME, OpenMode, PERMISSIONS, Space, TTL, handles::Handle,
-};
+use super::{Attributes, DirectoryEntry, InodeNo, MAX_NAME, OpenMode, PERMISSIONS, Space, handles::Handle};
 use crate::{Error, Result, journal::Local, lock};
 
 pub struct AttrChange {
@@ -60,14 +58,14 @@ impl Space {
     pub async fn lookup(self: Arc<Self>, parent: InodeNo, name: OsString) -> Result<(Attributes, Duration)> {
         let (entry, asked, local) = self.child(parent, child_name(&name)?).await?;
         let attr = self.looked_up(&entry, asked, local.as_deref());
-        Ok((attr, TTL.saturating_sub(asked.elapsed())))
+        Ok((attr, self.metadata_ttl.saturating_sub(asked.elapsed())))
     }
 
     /// The held inode's attributes, wherever another client has moved it (C7).
     pub async fn getattr(self: Arc<Self>, ino: InodeNo) -> Result<(Attributes, Duration)> {
         let (entry, asked, local) = self.entry(ino).await?;
         let attr = self.attr(&entry, local.as_deref());
-        Ok((attr, TTL.saturating_sub(asked.elapsed())))
+        Ok((attr, self.metadata_ttl.saturating_sub(asked.elapsed())))
     }
 
     pub async fn setattr(self: Arc<Self>, ino: InodeNo, change: AttrChange) -> Result<Attributes> {

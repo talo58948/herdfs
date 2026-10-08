@@ -34,11 +34,10 @@ impl Space {
     pub(super) fn start(
         &self,
         file: Option<&Arc<OpenVersion>>,
-        pid: u32,
+        comm: String,
         handle: &Handle,
     ) -> Option<Upgrade> {
         let path = self.path(self.ino(handle.entry)).ok().flatten();
-        let comm = process_name(pid);
         let extension = path
             .as_ref()
             .and_then(|path| std::path::Path::new(path.name()).extension());
@@ -121,6 +120,10 @@ impl Space {
             self.begin(strategy, file.as_ref(), handle);
         }
     }
+}
+
+pub(super) fn process_name_for(pid: u32) -> String {
+    process_name(pid)
 }
 
 #[cfg(target_os = "linux")]
