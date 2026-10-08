@@ -19,7 +19,7 @@ use axum::{
         DefaultBodyLimit, Path, State,
         rejection::{BytesRejection, JsonRejection},
     },
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     routing::{get, post, put},
 };
 use herdfs_core::{
@@ -192,15 +192,20 @@ impl Server {
     }
 }
 
-async fn discovery(State(server): State<Arc<Server>>) -> Option<Json<serde_json::Value>> {
-    server
-        .local_issuer
-        .as_ref()
-        .map(|issuer| Json(issuer.discovery()))
+async fn discovery(
+    State(server): State<Arc<Server>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let Some(issuer) = &server.local_issuer else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    Ok(Json(issuer.discovery()))
 }
 
-async fn jwks(State(server): State<Arc<Server>>) -> Option<Json<serde_json::Value>> {
-    server.local_issuer.as_ref().map(|issuer| Json(issuer.jwks()))
+async fn jwks(State(server): State<Arc<Server>>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let Some(issuer) = &server.local_issuer else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    Ok(Json(issuer.jwks()))
 }
 
 async fn rpc(
