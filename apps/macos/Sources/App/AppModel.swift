@@ -25,6 +25,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var loginRequiresApproval = SMAppService.mainApp.status == .requiresApproval
 
     private static let cacheBytes = "10737418240"
+    private static let processPathBufferSize = 4_096
     private let registry = MountRegistry()
     private var started = false
 
@@ -238,7 +239,7 @@ final class AppModel: ObservableObject {
     }
 
     private func processPath(_ pid: Int32) -> String? {
-        var buffer = [CChar](repeating: 0, count: Int(PROC_PIDPATHINFO_MAXSIZE))
+        var buffer = [CChar](repeating: 0, count: Self.processPathBufferSize)
         guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
         return URL(fileURLWithPath: String(cString: buffer)).standardizedFileURL.path
     }
@@ -259,13 +260,14 @@ final class AppModel: ObservableObject {
 
 private enum ErrorNotification {
     static func send(_ message: String) {
-        let center = UNUserNotificationCenter.current()
-        center.requestAuthorization(options: [.alert]) { allowed, _ in
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { allowed, _ in
             guard allowed else { return }
             let content = UNMutableNotificationContent()
             content.title = "HerdFS error"
             content.body = message
-            center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+            UNUserNotificationCenter.current().add(
+                UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+            )
         }
     }
 }
