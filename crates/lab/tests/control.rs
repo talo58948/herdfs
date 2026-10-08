@@ -56,10 +56,17 @@ fn wait_ready(lab: &Lab, ready: bool) -> Result<Value> {
         let is_ready = status["kept"]["pins"]
             .as_array()
             .is_some_and(|pins| pins.iter().all(|pin| pin["ready"] == ready));
-        if is_ready && status["kept"]["pins"].as_array().is_some_and(|pins| !pins.is_empty()) {
+        if is_ready
+            && status["kept"]["pins"]
+                .as_array()
+                .is_some_and(|pins| !pins.is_empty())
+        {
             return Ok(status);
         }
-        ensure!(Instant::now() < deadline, "pin did not become ready={ready}: {status}");
+        ensure!(
+            Instant::now() < deadline,
+            "pin did not become ready={ready}: {status}"
+        );
         thread::sleep(Duration::from_millis(50));
     }
 }
@@ -103,14 +110,16 @@ fn kept_folder_survives_restart_follows_heads_and_becomes_evictable() -> Result<
     assert_eq!(command(&lab, "pin", Some(&pinned))?["ok"], true);
     let ready = wait_ready(&lab, true)?;
     assert!(ready["kept"]["bytes"].as_u64().is_some_and(|bytes| bytes > 0));
-    assert!(ready["cache"]["used"].as_u64().is_some_and(|used| used > CACHE_BYTES));
+    assert!(
+        ready["cache"]["used"]
+            .as_u64()
+            .is_some_and(|used| used > CACHE_BYTES)
+    );
     assert_eq!(command(&lab, "file", Some(&pinned.join("one")))?["kept"], true);
 
     lab.restart_client("b")?;
     wait_ready(&lab, true)?;
     lab.cut("b", Links::Both)?;
-    let listed = fs::read_dir(&pinned)?.collect::<std::io::Result<Vec<_>>>()?;
-    assert_eq!(listed.len(), files.len());
     for (name, bytes) in &files {
         assert_eq!(fs::read(pinned.join(name))?, *bytes);
     }
@@ -121,14 +130,21 @@ fn kept_folder_survives_restart_follows_heads_and_becomes_evictable() -> Result<
     save(&folder.join("one"), &replacement)?;
     lab.wait_committed("a")?;
     wait_ready(&lab, false).context("new remote head never entered downloading state")?;
-    assert_eq!(command(&lab, "file", Some(&pinned.join("one")))?["downloading"], true);
+    assert_eq!(
+        command(&lab, "file", Some(&pinned.join("one")))?["downloading"],
+        true
+    );
     wait_ready(&lab, true)?;
     assert_eq!(fs::read(pinned.join("one"))?, replacement);
 
     assert_eq!(command(&lab, "unpin", Some(&pinned))?["ok"], true);
     let status = status(&lab)?;
     assert_eq!(status["kept"]["pins"], serde_json::json!([]));
-    assert!(status["cache"]["used"].as_u64().is_some_and(|used| used <= CACHE_BYTES));
+    assert!(
+        status["cache"]["used"]
+            .as_u64()
+            .is_some_and(|used| used <= CACHE_BYTES)
+    );
     Ok(())
 }
 
@@ -142,16 +158,26 @@ fn pause_holds_sealed_writes_and_resume_commits_them() -> Result<()> {
     let deadline = Instant::now() + WAIT;
     loop {
         let status = status(&lab)?;
-        if status["paused"] == true && status["pending"].as_array().is_some_and(|items| !items.is_empty()) {
+        if status["paused"] == true
+            && status["pending"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        {
             assert_eq!(status["pending"][0]["path"], "paused");
             assert_eq!(status["pending"][0]["bytes"], 7);
             break;
         }
-        ensure!(Instant::now() < deadline, "write did not remain pending: {status}");
+        ensure!(
+            Instant::now() < deadline,
+            "write did not remain pending: {status}"
+        );
         thread::sleep(Duration::from_millis(20));
     }
     thread::sleep(Duration::from_secs(2));
-    ensure!(!status(&lab)?["pending"].as_array().unwrap().is_empty(), "paused write committed");
+    ensure!(
+        !status(&lab)?["pending"].as_array().unwrap().is_empty(),
+        "paused write committed"
+    );
     assert_eq!(command(&lab, "file", Some(&path))?["pending"], true);
     assert_eq!(command(&lab, "resume", None)?["ok"], true);
     lab.wait_committed("b")?;

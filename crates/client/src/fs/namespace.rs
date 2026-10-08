@@ -198,14 +198,7 @@ impl Space {
     /// Lists the directory once, for the readdir calls on this handle to page through.
     pub async fn opendir(self: Arc<Self>, ino: InodeNo) -> Result<u64> {
         let asked = Instant::now();
-        let entries = match self.remote.list(self.entry_id(ino)).await {
-            Ok(entries) => entries,
-            Err(error) if error.is_offline() => {
-                let path = self.path(ino)?.ok_or(error)?;
-                self.inodes.children(&path)
-            }
-            Err(error) => return Err(error),
-        };
+        let entries = self.remote.list(self.entry_id(ino)).await?;
         let listed = |entry| {
             self.inodes.observe(entry, asked, true);
             let attr = self.attr(entry, None);

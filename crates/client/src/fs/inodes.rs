@@ -149,16 +149,6 @@ impl Inodes {
         table.evict();
     }
 
-    pub(crate) fn children(&self, parent: &SpacePath) -> Vec<Entry> {
-        let table = lock(&self.0);
-        table
-            .nodes
-            .values()
-            .filter(|node| node.bound.as_ref().is_some_and(|(path, _)| path.parent().as_ref() == Some(parent)))
-            .filter_map(|node| node.inode.state().cached().map(|(entry, ..)| entry))
-            .collect()
-    }
-
     /// Whether the entry is known, and its path with when it was confirmed, if it has one.
     pub fn bound(&self, id: EntryId) -> Option<Option<(SpacePath, Instant)>> {
         lock(&self.0).nodes.get(&id).map(|node| node.bound.clone())

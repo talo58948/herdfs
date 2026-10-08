@@ -160,6 +160,9 @@ impl Space {
         let Some((sealed, mut attempts)) = pending else {
             return Ok(());
         };
+        if self.commits.is_paused() {
+            return Ok(());
+        }
         let attempt = attempts.wait_for(|(covered, _)| *covered >= sealed).await;
         let committed = attempt.is_ok_and(|attempt| attempt.1);
         if committed { Ok(()) } else { Err(libc::EIO.into()) }
