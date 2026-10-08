@@ -192,9 +192,7 @@ impl Server {
     }
 }
 
-async fn discovery(
-    State(server): State<Arc<Server>>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+async fn discovery(State(server): State<Arc<Server>>) -> Result<Json<serde_json::Value>, StatusCode> {
     let Some(issuer) = &server.local_issuer else {
         return Err(StatusCode::NOT_FOUND);
     };
