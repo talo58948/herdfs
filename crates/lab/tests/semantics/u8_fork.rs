@@ -10,7 +10,7 @@ use std::{panic, thread};
 
 use anyhow::{Context, Result, bail};
 use herdfs_core::proto::{EntryId, ErrorCode, Request, Response};
-use herdfs_lab::{ADMIN, Lab, LabConfig, Profile, SPACE, Strategy};
+use herdfs_lab::{ADMIN, Lab, LabConfig, Profile, SPACE, Strategy, process_cpu_time};
 
 use crate::support::{self, VISIBLE_AFTER, counter, errno, noise, path, save};
 
@@ -18,8 +18,6 @@ const SMALL: usize = 10_000;
 const LARGE: usize = 50_000;
 /// Forks timed at each size, so the 10 ms clock ticks of CPU time are a small error.
 const TRIES: usize = 3;
-/// Clock ticks per second in `/proc/<pid>/stat` (USER_HZ), fixed at 100 on Linux.
-const CLOCK_TICKS: u64 = 100;
 const DIRS: usize = 100;
 /// Concurrent callers while filling the space.
 const FILLERS: usize = 8;
@@ -160,26 +158,16 @@ fn fork_name(entries: usize, attempt: usize) -> String {
 /// box the wall time of a fork also counts every other process's turns on the CPU.
 fn fork_per_entry(lab: &Lab, entries: usize) -> Result<f64> {
     let pid = lab.authority_pid().context("the authority runs")?;
-    let before = cpu_time(pid)?;
+    let before = process_cpu_time(pid)?;
     for attempt in 0..TRIES {
         let (space, name) = (SPACE.into(), fork_name(entries, attempt));
         let start = Instant::now();
         lab.rpc(ADMIN, &Request::Fork { space, name })?;
         eprintln!("u8: fork of {entries} entries took {:?}", start.elapsed());
     }
-    let spent = cpu_time(pid)? - before;
+    let spent = process_cpu_time(pid)? - before;
     eprintln!("u8: {TRIES} forks of {entries} entries took {spent:?} of CPU");
     Ok(spent.as_secs_f64() / (TRIES * entries) as f64)
-}
-
-/// User and system CPU time of process `pid` and all its threads, living or gone.
-fn cpu_time(pid: u32) -> Result<Duration> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    // After the command name come the state, then fields 4 to 13, then utime and stime.
-    let (_, fields) = stat.rsplit_once(") ").context("malformed /proc stat")?;
-    let fields: Vec<&str> = fields.split(' ').collect();
-    let ticks: u64 = fields[11].parse::<u64>()? + fields[12].parse::<u64>()?;
-    Ok(Duration::from_millis(ticks * 1000 / CLOCK_TICKS))
 }
 
 /// What writes in the fork must not change in its parent: its root listing, the big file's

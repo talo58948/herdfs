@@ -1,7 +1,6 @@
 //! Round 31: reopening a held entry offline after its old path was reused.
 
-use std::fs::{self, File, OpenOptions};
-use std::os::fd::AsRawFd;
+use std::fs::{self, File};
 use std::os::unix::fs::FileExt;
 use std::thread;
 
@@ -16,7 +15,7 @@ const REPLACEMENT: &[u8] = b"replacement";
 const TRIALS: usize = 3;
 
 /// Holds the original file on b, optionally moves it and reuses its old path on a, then reopens
-/// the held inode through `/proc/self/fd` for an offline write. Returns the write result and the
+/// writes through the held inode while offline. Returns the write result and the
 /// bytes at the original entry's authoritative path after reconnect.
 fn write_held_offline(lab: &Lab, trial: usize, moved: bool) -> Result<(std::io::Result<()>, Vec<u8>)> {
     let (a, b) = (lab.mount_path("a"), lab.mount_path("b"));
@@ -24,7 +23,7 @@ fn write_held_offline(lab: &Lab, trial: usize, moved: bool) -> Result<(std::io::
     let relocated = format!("relocated-{moved}-{trial}");
     save(&a.join(&original), OLD)?;
     thread::sleep(VISIBLE_AFTER);
-    let held = File::open(b.join(&original))?;
+    let held = File::options().read(true).write(true).open(b.join(&original))?;
     assert_bytes(&read_at(&held, 0, OLD.len())?, OLD, "b's held current bytes");
 
     let authoritative = if moved {
@@ -38,12 +37,8 @@ fn write_held_offline(lab: &Lab, trial: usize, moved: bool) -> Result<(std::io::
     };
 
     lab.cut("b", Links::Authority)?;
-    let through_fd = format!("/proc/self/fd/{}", held.as_raw_fd());
-    let written = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(through_fd)
-        .and_then(|file| file.write_all_at(CHANGED, 0));
+    let written = held.write_all_at(CHANGED, 0);
+    drop(held);
     lab.restore("b", Links::Authority)?;
     if written.is_ok() {
         lab.wait_committed("b")?;

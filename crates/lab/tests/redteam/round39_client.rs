@@ -1,14 +1,15 @@
 //! Round 39: held-entry, Pin, and journal crash probes through FUSE.
 
 use std::fs::{self, File, OpenOptions};
-use std::os::fd::AsRawFd;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, ensure};
 use herdfs_lab::{Lab, LabConfig, Links, Profile, Strategy};
 
-use crate::{VISIBLE_AFTER, assert_bytes, random_bytes, read_at, save, two_clients};
+use crate::{
+    VISIBLE_AFTER, assert_bytes, random_bytes, read_at, read_held, save, save_entry, two_clients, write_entry,
+};
 
 const TRIALS: usize = 3;
 
@@ -52,11 +53,7 @@ fn create_existing_opens_a_recreated_listed_name() -> Result<()> {
     save(&a.join("control"), b"control")?;
     list_name(b, "control")?;
     let control = open_with_create(&b.join("control"))?;
-    assert_bytes(
-        &fs::read(format!("/proc/self/fd/{}", control.as_raw_fd()))?,
-        b"control",
-        "control",
-    );
+    assert_bytes(&read_held(&control)?, b"control", "control");
 
     let mut failures = 0;
     for trial in 0..TRIALS {
@@ -68,10 +65,7 @@ fn create_existing_opens_a_recreated_listed_name() -> Result<()> {
         save(&a.join(&name), replacement.as_bytes())?;
 
         let opened = open_with_create(&b.join(&name));
-        let read = opened
-            .as_ref()
-            .ok()
-            .and_then(|file| fs::read(format!("/proc/self/fd/{}", file.as_raw_fd())).ok());
+        let read = opened.as_ref().ok().and_then(|file| read_held(file).ok());
         eprintln!("trial {trial}: open={opened:?}, read={read:?}");
         failures += usize::from(read.as_deref() != Some(replacement.as_bytes()));
     }
@@ -141,7 +135,6 @@ fn offline_child_after_create(
     fs::create_dir(a.join(&old))?;
     thread::sleep(VISIBLE_AFTER);
     let held = File::open(b.join(&old))?;
-    let through = format!("/proc/self/fd/{}", held.as_raw_fd());
     let authoritative = if moved {
         fs::rename(a.join(&old), a.join(&new))?;
         fs::create_dir(a.join(&old))?;
@@ -149,12 +142,11 @@ fn offline_child_after_create(
     } else {
         a.join(&old).join("child")
     };
-    let child = std::path::Path::new(&through).join("child");
-    save(&child, b"online")?;
+    save_entry(&held, "child", b"online")?;
     thread::sleep(VISIBLE_AFTER);
 
     lab.cut("b", Links::Authority)?;
-    let written = fs::write(child, b"offline");
+    let written = write_entry(&held, "child", b"offline");
     lab.restore("b", Links::Authority)?;
     if written.is_ok() {
         lab.wait_committed("b")?;

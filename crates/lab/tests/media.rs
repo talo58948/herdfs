@@ -1,6 +1,7 @@
 //! Ring R3, U1 and U2: a ~1 GiB MP4 made with ffmpeg on `maker`, then probed with `ffprobe` on
 //! `probe` and read at random on `seek`, both over a WAN link with a cold cache. The scenarios
 //! share one test because making and committing the file takes over a minute.
+#![cfg(target_os = "linux")] // strace, backing-device readahead, and O_DIRECT have no Darwin equivalent.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};

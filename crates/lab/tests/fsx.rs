@@ -48,13 +48,18 @@ fn pin() -> Result<()> {
 }
 
 #[test]
+fn index_large() -> Result<()> {
+    exercise(|_| Strategy::Plan("index/large/no"))
+}
+
+#[test]
 fn chaos() -> Result<()> {
     exercise(Strategy::Chaos)
 }
 
 /// Runs fsx on a mount whose strategy is chosen from the seed, then reads the result back.
 fn exercise(strategy: impl FnOnce(u64) -> Strategy) -> Result<()> {
-    // contract: C8, C1, C3, C2
+    // contract: C8, C9, P3, C1, C3, C2
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");
         return Ok(());
@@ -97,8 +102,11 @@ fn exercise(strategy: impl FnOnce(u64) -> Strategy) -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() == Ok("nfs") {
         return Ok(());
     }
-    let decisions = lab.stats("b")?["decisions"].clone();
-    let counts = decisions.as_object().context("stats have no decisions")?.values();
+    let decisions = lab.stats("b")?["decisions"]["prefetch"].clone();
+    let counts = decisions
+        .as_object()
+        .context("stats have no prefetch decisions")?
+        .values();
     let decided: u64 = counts.filter_map(|count| count.as_u64()).sum();
     ensure!(decided == READS, "b decided {decisions} for {READS} opens");
     Ok(())

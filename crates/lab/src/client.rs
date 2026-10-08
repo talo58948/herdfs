@@ -1,7 +1,9 @@
 //! A FUSE client: its mount process, its directories and its stats.
 
 use std::fs;
-use std::net::{Ipv4Addr, TcpStream};
+use std::net::Ipv4Addr;
+#[cfg(target_os = "linux")]
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -12,6 +14,7 @@ use serde_json::Value;
 
 use crate::issuer::Issuer;
 use crate::jev::FakeJev;
+use crate::mount;
 use crate::process::{self, Proc};
 use crate::store::S3_HOST;
 use crate::{Profile, SPACE};
@@ -19,6 +22,7 @@ use crate::{Profile, SPACE};
 /// The cache limit of a client unless [`crate::LabConfig::cache_bytes`] sets another.
 pub(crate) const CACHE_BYTES: u64 = 1 << 30;
 const STATS_XATTR: &str = "user.herdfs.stats";
+const PLAN_XATTR: &str = "user.herdfs.plan";
 /// Long enough for a few commit retries, which back off from 1 s.
 /// A 1 GiB file takes about a minute to commit on a loaded box.
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -29,6 +33,8 @@ pub enum Strategy {
     Stream,
     Fetch,
     Pin,
+    /// An explicit PREFETCH/READ_AHEAD/KEEP access plan.
+    Plan(&'static str),
     Rule,
     /// Seeded random choices.
     Chaos(u64),
@@ -49,6 +55,7 @@ impl Strategy {
             Self::Stream => "stream".into(),
             Self::Fetch => "fetch".into(),
             Self::Pin => "pin".into(),
+            Self::Plan(plan) => plan.into(),
             Self::Rule => "rule".into(),
             Self::Chaos(seed) => format!("chaos:{seed}"),
             Self::Jev => "jev".into(),
@@ -136,6 +143,7 @@ impl Client {
                 .args(["--jev-url", jev.url()]);
         }
         let mut mount = Proc::spawn(&self.spec.name, command, &self.dir.join("client.log"))?;
+        #[cfg(target_os = "linux")]
         if self.spec.mount == Mount::Nfs {
             mount.wait_until("serving NFS", || {
                 nfs_port(&self.dir)
@@ -146,7 +154,7 @@ impl Client {
                 nfs_port(&self.dir).context("NFS server did not publish its port")?,
             )?;
         }
-        mount.wait_until("mounted", || is_mounted(&self.mount))?;
+        mount.wait_until("mounted", || mount::mounted(&self.mount))?;
         self.process = Some(mount);
         Ok(())
     }
@@ -154,21 +162,13 @@ impl Client {
     /// SIGKILLs the mount process, then detaches the mount it leaves behind.
     pub(crate) fn kill(&mut self) -> Result<()> {
         self.process = None;
-        if !is_mounted(&self.mount) {
+        if !mount::mounted(&self.mount) {
             return Ok(());
         }
-        let status = match self.spec.mount {
-            Mount::Fuse => Command::new("fusermount3")
-                .args(["-u", "-z"])
-                .arg(&self.mount)
-                .status()?,
-            Mount::Nfs => Command::new("sudo")
-                .args(["umount", "-f"])
-                .arg(&self.mount)
-                .status()?,
-        };
-        ensure!(status.success(), "unmounting {}: {status}", self.mount.display());
-        Ok(())
+        match self.spec.mount {
+            Mount::Fuse => mount::detach(&self.mount),
+            Mount::Nfs => mount::detach_nfs(&self.mount),
+        }
     }
 
     pub(crate) fn pid(&self) -> Option<u32> {
@@ -179,6 +179,12 @@ impl Client {
         ensure!(self.spec.mount == Mount::Fuse, "stats xattr is FUSE-only");
         let json = xattr::get(&self.mount, STATS_XATTR)?
             .with_context(|| format!("{} has no {STATS_XATTR}", self.mount.display()))?;
+        Ok(serde_json::from_slice(&json)?)
+    }
+
+    pub(crate) fn plan(&self, path: &Path) -> Result<Value> {
+        let json = xattr::get(self.mount.join(path), PLAN_XATTR)?
+            .with_context(|| format!("{} has no {PLAN_XATTR}", path.display()))?;
         Ok(serde_json::from_slice(&json)?)
     }
 
@@ -219,21 +225,14 @@ impl Drop for Client {
         }
     }
 }
-
-fn is_mounted(path: &Path) -> bool {
-    let Ok(table) = fs::read_to_string("/proc/self/mountinfo") else {
-        return false;
-    };
-    // The fifth field of each line is the mount point.
-    table.lines().any(|line| line.split(' ').nth(4) == path.to_str())
-}
-
+#[cfg(target_os = "linux")]
 fn nfs_port(dir: &Path) -> Option<u16> {
     let identity = fs::read(dir.join("journal.nfs.json")).ok()?;
     let identity: Value = serde_json::from_slice(&identity).ok()?;
     u16::try_from(identity["port"].as_u64()?).ok()
 }
 
+#[cfg(target_os = "linux")]
 fn mount_nfs(mountpoint: &Path, port: u16) -> Result<()> {
     let options = format!(
         "vers=3,tcp,nolock,noacl,noac,lookupcache=none,rsize=131072,wsize=131072,port={port},mountport={port}"

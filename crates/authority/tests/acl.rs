@@ -7,7 +7,7 @@
 
 mod support;
 
-use herdfs_core::proto::{ErrorCode, Perm, Request, Response};
+use herdfs_core::proto::{AclRow, ErrorCode, Perm, Request, Response, SpaceAccess};
 use support::{Fixture, SPACE, alice, bob, carol, path, user};
 
 #[test]
@@ -115,4 +115,111 @@ fn any_grant_in_a_space_shows_its_root_but_listing_it_needs_read() {
     };
     assert_eq!(fx.call(&carol(), list), Err(ErrorCode::Denied));
     assert_eq!(fx.stat(&bob(), ""), Err(ErrorCode::Denied));
+}
+
+#[test]
+fn spaces_lists_only_spaces_reached_by_the_callers_grants() {
+    // contract: U3, S3
+    let mut fx = Fixture::new();
+    fx.call(
+        &bob(),
+        Request::CreateSpace {
+            space: "private".into(),
+        },
+    )
+    .unwrap();
+    fx.set_acl("deep", "user:bob", Some(Perm::Write));
+    fx.set_acl("", "group:eng", Some(Perm::Read));
+
+    assert_eq!(
+        fx.call(&bob(), Request::Spaces),
+        Ok(Response::Spaces {
+            spaces: vec![
+                SpaceAccess {
+                    space: "private".into(),
+                    root_perm: Some(Perm::Admin),
+                },
+                SpaceAccess {
+                    space: SPACE.into(),
+                    root_perm: None,
+                },
+            ],
+        })
+    );
+    assert_eq!(
+        fx.call(&carol(), Request::Spaces),
+        Ok(Response::Spaces {
+            spaces: vec![SpaceAccess {
+                space: SPACE.into(),
+                root_perm: Some(Perm::Read),
+            }],
+        })
+    );
+    assert_eq!(
+        fx.call(&user("dave", &[]), Request::Spaces),
+        Ok(Response::Spaces { spaces: vec![] })
+    );
+
+    fx.call(
+        &bob(),
+        Request::DeleteSpace {
+            space: "private".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        fx.call(&bob(), Request::Spaces),
+        Ok(Response::Spaces {
+            spaces: vec![SpaceAccess {
+                space: SPACE.into(),
+                root_perm: None,
+            }],
+        })
+    );
+}
+
+#[test]
+fn access_lists_ancestor_rows_only_for_an_admin() {
+    // contract: U3, S3
+    let mut fx = Fixture::new();
+    fx.mkdir(&alice(), "team").unwrap();
+    fx.mkdir(&alice(), "team/project").unwrap();
+    fx.set_acl("", "user:bob", Some(Perm::Read));
+    fx.set_acl("team", "group:eng", Some(Perm::Write));
+    fx.set_acl("team/project", "user:bob", Some(Perm::Admin));
+    fx.set_acl("team/project/deep", "user:secret", Some(Perm::Read));
+    fx.set_acl("elsewhere", "user:secret", Some(Perm::Read));
+    let request = || Request::Access {
+        space: SPACE.into(),
+        path: path("team/project"),
+    };
+
+    assert_eq!(fx.call(&carol(), request()), Err(ErrorCode::Denied));
+    assert_eq!(
+        fx.call(&bob(), request()),
+        Ok(Response::Access {
+            grants: vec![
+                AclRow {
+                    path: path(""),
+                    principal: "user:alice".into(),
+                    perm: Perm::Admin,
+                },
+                AclRow {
+                    path: path(""),
+                    principal: "user:bob".into(),
+                    perm: Perm::Read,
+                },
+                AclRow {
+                    path: path("team"),
+                    principal: "group:eng".into(),
+                    perm: Perm::Write,
+                },
+                AclRow {
+                    path: path("team/project"),
+                    principal: "user:bob".into(),
+                    perm: Perm::Admin,
+                },
+            ],
+        })
+    );
 }

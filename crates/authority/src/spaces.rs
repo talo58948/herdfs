@@ -1,12 +1,14 @@
 //! Spaces: creating, forking, deleting, and checking that one exists.
 
+use std::collections::BTreeMap;
+
 use herdfs_core::{
     SpacePath,
-    proto::{ErrorCode, Perm, Response},
+    proto::{ErrorCode, Perm, Response, SpaceAccess},
 };
 use rusqlite::params;
 
-use crate::{Call, Result, refuse};
+use crate::{Call, Result, acl::perm_from_name, refuse};
 
 const ROOT_MODE: u32 = 0o755;
 
@@ -35,6 +37,32 @@ fn is_valid_name(name: &str) -> bool {
 }
 
 impl Call<'_> {
+    pub(crate) fn spaces(&self) -> Result<Response> {
+        let principals: Vec<String> = self.principals().collect();
+        let mut query = self
+            .db
+            .prepare_cached("SELECT space, path, perm FROM acl WHERE principal = ?1 ORDER BY space, path")?;
+        let mut spaces: BTreeMap<String, Option<Perm>> = BTreeMap::new();
+        for principal in principals {
+            let rows = query.query_map([principal], |row| {
+                let perm = crate::db::parse(row, 2, perm_from_name)?;
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, perm))
+            })?;
+            for row in rows {
+                let (space, path, perm) = row?;
+                let root_perm = spaces.entry(space).or_default();
+                if path.is_empty() {
+                    *root_perm = Some(root_perm.map_or(perm, |old| old.max(perm)));
+                }
+            }
+        }
+        let spaces = spaces
+            .into_iter()
+            .map(|(space, root_perm)| SpaceAccess { space, root_perm })
+            .collect();
+        Ok(Response::Spaces { spaces })
+    }
+
     pub(crate) fn create_space(&self, name: &str) -> Result<Response> {
         self.require_new_space(name)?;
         self.db

@@ -10,14 +10,17 @@ mod reader;
 mod remote;
 mod stats;
 mod strategy;
+mod token;
 mod version;
+
+pub mod cli;
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use error::{Error, Result};
 pub use mount::{MountArgs, mount};
-pub use strategy::{Jev, OpenContext, Strategy};
+pub use strategy::{AccessPlan, Jev, JevAnswer, Keep, OpenContext, Prefetch, ReadAhead};
 
 /// Locks `mutex` even if a panicking request poisoned it, so one bug fails one request
 /// instead of the whole mount.

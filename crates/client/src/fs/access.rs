@@ -1,4 +1,4 @@
-//! The access strategy of each read-only open (P1): decided at open, then begun.
+//! The access plan of each read-only access (P1-P3): decided immediately, then begun.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -7,17 +7,15 @@ use herdfs_core::proto::EntryId;
 
 use super::{Space, handles::Handle};
 use crate::lock;
-use crate::strategy::{OpenContext, Strategy, Upgrade};
+use crate::strategy::{AccessPlan, AccessRecord, Decided, Keep, OpenContext, PlanSource, Upgrade};
 use crate::version::OpenVersion;
 
-/// Opens of a file by one program count as repeated while each comes this soon after the last.
 const REOPENED_WITHIN: Duration = Duration::from_secs(300);
-
-/// How many (entry, process name) pairs of recent opens to keep.
+/// Recent opens and access records retained for Jev context and `explain`.
 const OPENS: u64 = 4096;
 
 impl Space {
-    /// Changes the version an inode follows, then moves its Pin handles to that version.
+    /// Changes the version an inode follows, then moves retained handles to that version.
     pub(crate) fn switch_version(
         &self,
         entry: EntryId,
@@ -25,40 +23,41 @@ impl Space {
     ) -> Option<bool> {
         let switched = self.inodes.with(entry, change).flatten()?;
         if switched {
-            self.follow_pins(entry);
+            self.follow_retained(entry);
         }
         Some(switched)
     }
 
-    /// Decides the access strategy for this open of `file` (P1), and begins it.
+    /// Decides the plan without waiting, and records this as the latest access of the inode.
     pub(super) fn start(
         &self,
         file: Option<&Arc<OpenVersion>>,
         comm: String,
-        handle: &Handle,
-    ) -> Option<Upgrade> {
-        let path = self.path(self.ino(handle.entry)).ok().flatten();
+        entry: EntryId,
+    ) -> (Arc<AccessRecord>, Option<Upgrade>) {
+        let path = self.path(self.ino(entry)).ok().flatten();
         let extension = path
             .as_ref()
             .and_then(|path| std::path::Path::new(path.name()).extension());
         let context = OpenContext {
             size: file.map_or(0, |file| file.version.size),
             extension: extension.map(|extension| extension.to_string_lossy().into()),
-            opens: self.opened(handle.entry, &comm),
+            opens: self.opened(entry, &comm),
             comm,
             coverage: file.map_or(1.0, |file| self.cache.coverage(&file.version.chunks)),
             throughput: self.reader.throughput.get(),
             round_trip: self.remote.round_trip.get().unwrap_or_default(),
         };
-        let (strategy, upgrade) = lock(&self.decider).decide(&context);
-        self.stats.decided(strategy);
-        tracing::debug!(?path, ?strategy, ?context, "access strategy");
-        self.begin(strategy, file, handle);
-        upgrade
+        let decision = lock(&self.decider).decide(&context);
+        self.stats.decided(decision.decided.plan);
+        tracing::debug!(?path, plan = ?decision.decided.plan, source = ?decision.decided.source, ?context, "access plan");
+        let record = Arc::new(AccessRecord::new(decision.decided));
+        let mut accesses = lock(&self.accesses);
+        accesses.insert(entry, 1, record.clone());
+        accesses.evict(OPENS, |_| false);
+        (record, decision.upgrade)
     }
 
-    /// How many times `comm` opened `entry` before, each within [`REOPENED_WITHIN`] of the last,
-    /// counting this open for the next.
     fn opened(&self, entry: EntryId, comm: &str) -> u32 {
         let mut opens = lock(&self.opens);
         let key = (entry, comm.to_owned());
@@ -71,54 +70,97 @@ impl Space {
         count
     }
 
-    /// Pins every chunk for Pin, and prefetches them in the background for Fetch and Pin.
-    fn begin(&self, strategy: Strategy, file: Option<&Arc<OpenVersion>>, handle: &Handle) {
-        if strategy == Strategy::Pin {
-            let mut pinned = lock(&handle.pinned);
-            let chunks = file
-                .into_iter()
-                .flat_map(|file| &file.version.chunks)
-                .map(|chunk| chunk.id)
-                .collect::<Vec<_>>();
-            self.cache.pin(&chunks);
-            if let Some(old) = pinned.replace(chunks) {
-                self.cache.unpin(&old);
-            }
+    /// Begins prefetch and retention independently.
+    pub(super) fn begin(&self, file: Option<&Arc<OpenVersion>>, handle: &Handle) {
+        let Some(access) = &handle.access else {
+            return;
+        };
+        let plan = access.plan();
+        if plan.keep == Keep::Yes {
+            self.retain(file, handle);
         }
-        if strategy != Strategy::Stream
-            && let Some(file) = file
-        {
-            let (reader, file) = (self.reader.clone(), file.clone());
-            tokio::spawn(async move {
-                if let Err(err) = reader.prefetch(&file).await {
-                    tracing::warn!(%err, entry = file.version.entry.0, "prefetch failed");
-                }
-            });
+        let Some(file) = file else {
+            return;
+        };
+        let (reader, file, access) = (self.reader.clone(), file.clone(), access.clone());
+        tokio::spawn(async move {
+            if let Err(err) = reader.prefetch(&file, plan.prefetch, &access.bytes_fetched).await {
+                tracing::warn!(%err, entry = file.version.entry.0, "prefetch failed");
+            }
+        });
+    }
+
+    fn retain(&self, file: Option<&Arc<OpenVersion>>, handle: &Handle) {
+        let mut pinned = lock(&handle.pinned);
+        let chunks = file
+            .into_iter()
+            .flat_map(|file| &file.version.chunks)
+            .map(|chunk| chunk.id)
+            .collect::<Vec<_>>();
+        self.cache.pin(&chunks);
+        if let Some(old) = pinned.replace(chunks) {
+            self.cache.unpin(&old);
         }
     }
 
-    /// Moves Pin handles to the version their inode now follows.
-    fn follow_pins(&self, entry: EntryId) {
+    pub(super) fn read_ahead(&self, file: Arc<OpenVersion>, after: u64, access: Arc<AccessRecord>) {
+        let read_ahead = access.plan().read_ahead;
+        let reader = self.reader.clone();
+        tokio::spawn(async move {
+            if let Err(err) = reader
+                .read_ahead(&file, after, read_ahead, &access.bytes_fetched)
+                .await
+            {
+                tracing::warn!(%err, entry = file.version.entry.0, "read-ahead failed");
+            }
+        });
+    }
+
+    fn follow_retained(&self, entry: EntryId) {
         let handles = lock(&self.handles);
         let Some(file) = self.inodes.with(entry, |state| state.followed()).flatten() else {
             return;
         };
         for handle in handles.values().filter(|handle| handle.entry == entry) {
             if lock(&handle.pinned).is_some() {
-                self.begin(Strategy::Pin, Some(&file), handle);
+                self.begin(Some(&file), handle);
             }
         }
     }
 
-    /// Begins the strategy Jev chose after the open, unless the handle is closed by then.
+    /// Applies confident late settings monotonically while the access is still open.
     pub(super) async fn upgrade(self: Arc<Self>, fh: u64, upgrade: Upgrade) {
+        let Ok(answer) = upgrade.await else {
+            return;
+        };
         // Pinning under the handles lock: release either comes later and unpins, or came first.
-        if let Ok(strategy) = upgrade.await
-            && let Some(handle) = lock(&self.handles).get(&fh)
-        {
-            let file = self.inodes.with(handle.entry, |state| state.followed()).flatten();
-            self.begin(strategy, file.as_ref(), handle);
+        let handles = lock(&self.handles);
+        let Some(handle) = handles.get(&fh) else {
+            return;
+        };
+        let Some(access) = &handle.access else {
+            return;
+        };
+        let current = access.decided();
+        let plan = current.plan.merged(answer.plan(AccessPlan::NONE));
+        if plan == current.plan {
+            access.update(Decided {
+                answer: Some(answer),
+                ..current
+            });
+            return;
         }
+        access.update(Decided {
+            plan,
+            source: answer.source(PlanSource::Jev),
+            answer: Some(answer),
+        });
+        let file = self.inodes.with(handle.entry, |state| state.followed()).flatten();
+        self.begin(file.as_ref(), handle);
+    }
+
+    pub(super) fn explain(&self, entry: EntryId) -> Option<Vec<u8>> {
+        lock(&self.accesses).get(&entry)?.json().ok()
     }
 }
 

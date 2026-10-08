@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use herdfs_core::ChunkId;
 use herdfs_core::proto::{Request, Response};
-use herdfs_lab::{SPACE, STORE_CREDENTIALS, sweep};
+use herdfs_lab::{SPACE, STORE_CREDENTIALS, process_snapshot, sweep};
 use reqwest::{StatusCode, Url};
 
 use crate::{ALICE, BOB, EACCES, Reply, Scene, assert_same, contains, errno, set_acl};
@@ -72,12 +72,10 @@ fn bob_holds_no_store_credentials() -> Result<()> {
     let credentials = [access_name, secret_name, secret].map(String::from);
     assert_eq!(sweep(&[scene.lab.client_dir(BOB)], &credentials)?, []);
     let pid = scene.lab.client_pid(BOB).context("bob's mount runs")?;
-    for file in ["environ", "cmdline"] {
-        let text = fs::read(format!("/proc/{pid}/{file}"))?;
-        let held = |credential: &&String| contains(&text, credential.as_bytes());
-        let found: Vec<&String> = credentials.iter().filter(held).collect();
-        assert!(found.is_empty(), "bob's mount has {found:?} in its {file}");
-    }
+    let text = process_snapshot(pid)?;
+    let held = |credential: &&String| contains(&text, credential.as_bytes());
+    let found: Vec<&String> = credentials.iter().filter(held).collect();
+    assert!(found.is_empty(), "bob's mount process has {found:?}");
     Ok(())
 }
 

@@ -121,6 +121,7 @@ impl Call<'_> {
                 principal: self.who.user.clone(),
                 groups: self.who.groups.clone(),
             },
+            Request::Spaces => self.spaces()?,
             Request::CreateSpace { space } => self.create_space(&space)?,
             Request::Fork { space, name } => self.fork(&space, &name)?,
             Request::Stat { space, path } => self.stat(&space, &path)?,
@@ -194,6 +195,7 @@ impl Call<'_> {
                 principal,
                 perm,
             } => self.set_acl(&space, &path, &principal, perm)?,
+            Request::Access { space, path } => self.access(&space, &path)?,
         };
         Ok(Outcome::Reply(reply))
     }

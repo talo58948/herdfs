@@ -1,7 +1,10 @@
 //! Reads of remote versions through the verified chunk cache. Every strategy reads through
 //! here, so all of them return the same bytes (C8).
 
+mod index;
+
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{fs::File, io::Write};
@@ -60,16 +63,28 @@ impl Reader {
     }
 
     /// Bytes `[off, off + len)` of `file`, fetching only the chunks that overlap them (C9).
-    pub async fn read(&self, file: &OpenVersion, off: u64, len: u64) -> Result<Vec<u8>> {
-        self.read_with(file, off, len, |missing| self.fetch(file, missing))
+    pub async fn read(
+        &self,
+        file: &OpenVersion,
+        off: u64,
+        len: u64,
+        fetched: Option<&AtomicU64>,
+    ) -> Result<Vec<u8>> {
+        self.read_with(file, off, len, |missing| self.fetch(file, missing, fetched))
             .await
     }
 
-    /// Downloads every chunk not yet cached, for the Fetch and Pin strategies.
-    pub async fn prefetch(&self, file: &OpenVersion) -> Result<()> {
-        let fetch = |missing| self.fetch(file, missing);
-        let chunks = 0..file.version.chunks.len();
-        let missing: Vec<usize> = chunks.filter(|&i| !self.cache.contains(&file.id(i))).collect();
+    async fn prefetch_indices(
+        &self,
+        file: &OpenVersion,
+        indices: impl IntoIterator<Item = usize>,
+        fetched: &AtomicU64,
+    ) -> Result<()> {
+        let fetch = |missing| self.fetch(file, missing, Some(fetched));
+        let missing: Vec<usize> = indices
+            .into_iter()
+            .filter(|&index| !self.cache.contains(&file.id(index)))
+            .collect();
         for batch in missing.chunks(DOWNLOADS) {
             self.load(file, batch, fetch).await?;
         }
@@ -78,7 +93,7 @@ impl Reader {
 
     /// Writes all of `file` to `out`, to start a journal copy from it.
     pub async fn materialize(&self, file: &OpenVersion, out: &mut File) -> Result<()> {
-        let fetch = |missing| self.fetch(file, missing);
+        let fetch = |missing| self.fetch(file, missing, None);
         let indices: Vec<usize> = (0..file.version.chunks.len()).collect();
         for batch in indices.chunks(DOWNLOADS) {
             let chunks = self.load(file, batch, fetch).await?;
@@ -184,14 +199,25 @@ impl Reader {
     }
 
     /// Grants chunks of `file`, then downloads them, verifying each against its id.
-    async fn fetch<'a>(&'a self, file: &'a OpenVersion, wanted: Vec<usize>) -> Fetched<'a> {
+    async fn fetch<'a>(
+        &'a self,
+        file: &'a OpenVersion,
+        wanted: Vec<usize>,
+        fetched: Option<&'a AtomicU64>,
+    ) -> Fetched<'a> {
         let urls = self.urls(file, &wanted).await?;
         let downloads = wanted.into_iter().zip(urls);
-        let downloads = downloads.map(|(index, url)| self.download(file, index, url));
+        let downloads = downloads.map(move |(index, url)| self.download(file, index, url, fetched));
         Ok(stream::iter(downloads).buffered(DOWNLOADS).boxed())
     }
 
-    async fn download(&self, file: &OpenVersion, index: usize, url: String) -> Result<Vec<u8>> {
+    async fn download(
+        &self,
+        file: &OpenVersion,
+        index: usize,
+        url: String,
+        fetched: Option<&AtomicU64>,
+    ) -> Result<Vec<u8>> {
         let started = Instant::now();
         let chunk = self.remote.download(&url, file.version.chunks[index]).await;
         let Ok(bytes) = &chunk else {
@@ -200,6 +226,9 @@ impl Reader {
         };
         bump(&self.stats.chunks_fetched, 1);
         bump(&self.stats.bytes_fetched, bytes.len() as u64);
+        if let Some(fetched) = fetched {
+            fetched.fetch_add(bytes.len() as u64, Relaxed);
+        }
         self.throughput
             .add(bytes.len() as f64 / started.elapsed().as_secs_f64());
         chunk

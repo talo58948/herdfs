@@ -1,4 +1,4 @@
-//! A test lab for herdfs on one Linux machine, without root: MinIO, toxiproxy, a test OIDC
+//! A test lab for herdfs on one machine, without root: MinIO, toxiproxy, a test OIDC
 //! issuer, the authority, and FUSE clients. Client N reaches the authority and the store through
 //! its own proxies on 127.0.0.N, shaped by its link profile.
 //!
@@ -12,12 +12,14 @@ mod direct;
 mod issuer;
 mod jev;
 mod lifecycle;
+mod mount;
 mod process;
 mod store;
 mod sweep;
 mod toxiproxy;
 
 use std::path::Path;
+use std::process::Command;
 
 use anyhow::Result;
 use serde_json::Value;
@@ -33,9 +35,12 @@ pub use crate::authority::Collection;
 pub use crate::chunks::overlapping_chunk_bytes;
 pub use crate::client::Strategy;
 pub use crate::issuer::{AUDIENCE, BadToken, Issuer};
-pub use crate::jev::{FakeJev, JevMode};
+pub use crate::jev::{FakeJev, JevAnswers, JevMode};
 pub use crate::lifecycle::LabConfig;
-pub use crate::process::run;
+pub use crate::mount::{abort_mount, mounted};
+pub use crate::process::{
+    StoppedProcess, child_processes, process_cpu_time, process_snapshot, process_with_arg, run,
+};
 pub use crate::store::STORE_CREDENTIALS;
 pub use crate::sweep::{Hit, canary, sweep};
 pub use crate::toxiproxy::{Links, Profile};
@@ -83,9 +88,19 @@ impl Lab {
         self.client(name).authority_url(self.authority.port)
     }
 
+    /// How many refresh-token grants the test issuer has served.
+    pub fn issuer_refresh_count(&self) -> u64 {
+        self.issuer.refresh_count()
+    }
+
     /// Client `name`'s counters, from the `user.herdfs.stats` xattr on its mount root.
     pub fn stats(&self, name: &str) -> Result<Value> {
         self.client(name).stats()
+    }
+
+    /// The latest access plan for `path`, from its `user.herdfs.plan` xattr.
+    pub fn plan(&self, name: &str, path: &Path) -> Result<Value> {
+        self.client(name).plan(path)
     }
 
     /// Waits until client `name` has committed, or set aside, every write closed so far.
@@ -126,6 +141,11 @@ pub fn missing_binaries() -> Option<String> {
         .into_iter()
         .find_map(|name| process::binary(name).err())
         .map(|error| error.to_string())
+}
+
+/// A command for the workspace's `herdfs` binary.
+pub fn herdfs_command() -> Result<Command> {
+    Ok(Command::new(process::binary(process::CLIENT)?))
 }
 
 /// A client name the lab does not know is a bug in the test.

@@ -2,7 +2,6 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::{io, time::Duration, time::Instant};
 
 use bytes::Bytes;
@@ -10,20 +9,19 @@ use herdfs_core::proto::{Entry, EntryId, Request, Response, Version, VersionId};
 use herdfs_core::{ChunkId, ChunkRef, SpacePath};
 use reqwest::header::CONTENT_TYPE;
 
-use crate::{Average, Error, Result, journal::Record};
+use crate::{Average, Error, Result, journal::Record, token};
 
 mod link;
 mod send;
 
 pub use link::Link;
-use send::{CONNECT_TIMEOUT, READ_TIMEOUT, read_token};
+use send::{CONNECT_TIMEOUT, READ_TIMEOUT};
 
 pub struct Remote {
     http: reqwest::Client,
     authority: String,
     space: String,
-    token_file: PathBuf,
-    token: Mutex<String>,
+    token: token::Source,
     /// Seconds from sending an authority call to its answer, over recent calls.
     pub round_trip: Average,
     pub link: Link,
@@ -49,8 +47,7 @@ impl Remote {
             http: builder.build()?,
             authority: authority.trim_end_matches('/').to_owned(),
             space: space.to_owned(),
-            token: Mutex::new(read_token(&token_file)?),
-            token_file,
+            token: token::Source::new(token_file)?,
             round_trip: Average::default(),
             link: Link::default(),
         })
@@ -218,7 +215,11 @@ impl Remote {
 
     /// Sends the request that `request` builds for this client's space.
     async fn call(&self, request: impl FnOnce(String) -> Request) -> Result<Response> {
-        let (url, request) = (format!("{}/v1/rpc", self.authority), request(self.space.clone()));
+        self.request(request(self.space.clone())).await
+    }
+
+    pub(crate) async fn request(&self, request: Request) -> Result<Response> {
+        let url = format!("{}/v1/rpc", self.authority);
         // Serialized once, for every try and for the deadline of a commit, which runs in the
         // background with a chunk list that may be long.
         let body = Bytes::from(serde_json::to_vec(&request).map_err(io::Error::from)?);

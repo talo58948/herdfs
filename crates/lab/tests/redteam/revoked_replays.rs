@@ -2,56 +2,15 @@
 
 use std::fs::{self, File};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use anyhow::{Result, bail, ensure};
-use herdfs_core::SpacePath;
-use herdfs_core::proto::{Perm, Request, Response, Version};
-use herdfs_lab::{ADMIN, Lab, LabConfig, Links, Profile, SPACE, Strategy};
+use anyhow::{Result, ensure};
+use herdfs_core::proto::Perm;
+use herdfs_lab::{ADMIN, Lab, LabConfig, Links, Profile, Strategy};
 
-use crate::save;
+use crate::{SLOW_ANSWERS, save, set_alice, wait_for_rewrite};
 
 const TRIALS: usize = 3;
-const COMMITTED_WITHIN: Duration = Duration::from_secs(30);
-const SLOW_ANSWERS: Profile = Profile::Custom {
-    round_trip_ms: 1_000,
-    kilobytes_per_sec: 100_000,
-    store_first_byte_ms: 0,
-};
-
-fn history(lab: &Lab, path: &str) -> Result<Vec<Version>> {
-    let request = Request::History {
-        space: SPACE.into(),
-        path: SpacePath::try_from(path)?,
-    };
-    match lab.rpc(ADMIN, &request)? {
-        Response::History { versions } => Ok(versions),
-        reply => bail!("history answers with versions, not {reply:?}"),
-    }
-}
-
-fn wait_for_rewrite(lab: &Lab, path: &str, first: &Version) -> Result<Version> {
-    let deadline = Instant::now() + COMMITTED_WITHIN;
-    loop {
-        if let Some(version) = history(lab, path)?.into_iter().find(|version| version != first) {
-            return Ok(version);
-        }
-        ensure!(Instant::now() < deadline, "no commit after {COMMITTED_WITHIN:?}");
-        thread::sleep(Duration::from_millis(2));
-    }
-}
-
-fn set_alice(lab: &Lab, perm: Option<Perm>) -> Result<()> {
-    let request = Request::SetAcl {
-        space: SPACE.into(),
-        path: SpacePath::root(),
-        principal: "user:alice".into(),
-        perm,
-    };
-    lab.rpc(ADMIN, &request)?;
-    Ok(())
-}
-
 /// Repro: alice closes a rewrite and opens the file while it is pending. The authority commits
 /// the rewrite, but its reply is still crossing alice's slow link when that link is cut. Access is
 /// then revoked before the journal retries. The replay must confirm the retained commit so the

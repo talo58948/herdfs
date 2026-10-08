@@ -36,9 +36,9 @@ pub struct MountArgs {
     /// The space to mount.
     #[arg(long)]
     space: String,
-    /// File holding the bearer token, re-read when the authority answers 401.
+    /// Login token file, refreshed shortly before expiry.
     #[arg(long)]
-    token_file: PathBuf,
+    token_file: Option<PathBuf>,
     /// Chunk cache directory.
     #[arg(long)]
     cache: PathBuf,
@@ -48,7 +48,7 @@ pub struct MountArgs {
     /// Directory for writes not yet committed.
     #[arg(long)]
     journal: PathBuf,
-    /// stream, fetch, pin, rule (fetch below 64 MiB, else stream), chaos:SEED or jev.
+    /// A named plan, explicit PREFETCH/READ_AHEAD/KEEP, rule, chaos:SEED or jev.
     #[arg(long, default_value = "rule")]
     strategy: StrategyArg,
     /// File holding the Vercel AI Gateway key, for `--strategy jev`.
@@ -111,9 +111,14 @@ fn mount_fuse(_args: &MountArgs) -> anyhow::Result<()> {
 }
 
 async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
-    let (authority, space, token_file) = (&args.authority, &args.space, &args.token_file);
-    let remote = Remote::new(authority, space, token_file.clone(), &args.resolve)
+    let (authority, space) = (&args.authority, &args.space);
+    let token_file = args
+        .token_file
+        .clone()
+        .map_or_else(crate::token::default_path, Ok)?;
+    crate::token::read_access_token(&token_file)
         .with_context(|| format!("reading token file {}", token_file.display()))?;
+    let remote = Remote::new(authority, space, token_file, &args.resolve)?;
     let root = remote.stat(SpacePath::root()).await;
     let root = root.with_context(|| format!("cannot reach space {space:?} at the authority {authority}"))?;
     let cache = Cache::open(args.cache.clone(), args.cache_bytes)

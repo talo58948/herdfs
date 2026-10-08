@@ -1,57 +1,20 @@
 //! Round 23: settling a closed write before renaming it through moved parent directories.
 
 use std::fs::{self, File};
-use std::os::fd::AsRawFd;
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
 use herdfs_core::chunk;
+use herdfs_lab::{StoppedProcess, process_with_arg};
 
-use crate::{VISIBLE_AFTER, random_bytes, save, two_clients};
+use crate::{VISIBLE_AFTER, random_bytes, read_entry, rename_entry, save, two_clients, write_entry};
 
 const NEW_LEN: usize = 8 << 20;
 const TRIALS: usize = 3;
 const STALL: Duration = Duration::from_secs(1);
 const FINISH_WITHIN: Duration = Duration::from_secs(30);
-
-/// The pid of the lab's MinIO, whose command line names its data directory.
-fn store_pid(store_dir: &Path) -> Result<i32> {
-    let wanted = store_dir.as_os_str().as_encoded_bytes();
-    for proc in fs::read_dir("/proc")? {
-        let proc = proc?;
-        let Some(pid) = proc.file_name().to_str().and_then(|pid| pid.parse().ok()) else {
-            continue;
-        };
-        let Ok(cmdline) = fs::read(proc.path().join("cmdline")) else {
-            continue;
-        };
-        if cmdline.split(|&byte| byte == 0).any(|arg| arg == wanted) {
-            return Ok(pid);
-        }
-    }
-    bail!("no process serves {}", store_dir.display())
-}
-
-/// Keeps MinIO stopped until dropped.
-struct Stopped(i32);
-
-impl Stopped {
-    fn new(pid: i32) -> Result<Self> {
-        let status = Command::new("kill").args(["-STOP", &pid.to_string()]).status()?;
-        ensure!(status.success(), "stop MinIO {pid}");
-        Ok(Self(pid))
-    }
-}
-
-impl Drop for Stopped {
-    fn drop(&mut self) {
-        let _ = Command::new("kill").args(["-CONT", &self.0.to_string()]).status();
-    }
-}
 
 /// Closes b's rewrite, optionally moves and reuses both parent paths, then renames the file
 /// through the held directory descriptors while its upload is stalled. Returns whether rename
@@ -67,12 +30,10 @@ fn rename_while_stalled(lab: &herdfs_lab::Lab, trial: usize, move_parents: bool)
 
     let source_fd = File::open(b.join(&source))?;
     let destination_fd = File::open(b.join(&destination))?;
-    let source_file = PathBuf::from(format!("/proc/self/fd/{}/file", source_fd.as_raw_fd()));
-    let destination_file = PathBuf::from(format!("/proc/self/fd/{}/file", destination_fd.as_raw_fd()));
-    fs::read(&source_file).context("warm source file")?;
+    read_entry(&source_fd, "file").context("warm source file")?;
     thread::sleep(VISIBLE_AFTER);
-    let stopped = Stopped::new(store_pid(lab.store_dir())?)?;
-    fs::write(&source_file, random_bytes(NEW_LEN)).context("close rewrite")?;
+    let stopped = StoppedProcess::new(process_with_arg(lab.store_dir())?)?;
+    write_entry(&source_fd, "file", &random_bytes(NEW_LEN)).context("close rewrite")?;
 
     let (source_now, destination_now) = if move_parents {
         let source_now = format!("{source}-moved");
@@ -86,7 +47,7 @@ fn rename_while_stalled(lab: &herdfs_lab::Lab, trial: usize, move_parents: bool)
         (source, destination)
     };
     let (sent, finished) = mpsc::channel();
-    thread::spawn(move || sent.send(fs::rename(source_file, destination_file)));
+    thread::spawn(move || sent.send(rename_entry(&source_fd, "file", &destination_fd, "file")));
     let early = finished.recv_timeout(STALL).ok();
     let finished_early = early.is_some();
     if let Some(Err(err)) = &early {

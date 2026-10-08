@@ -147,7 +147,7 @@ mod tests {
     use crate::journal::Journal;
     use crate::remote::Remote;
     use crate::stats::Stats;
-    use crate::strategy::{Decider, Strategy};
+    use crate::strategy::{AccessPlan, Decider};
 
     fn adapter(root: &std::path::Path) -> (Nfs, Arc<Identity>) {
         let journal_dir = root.join("journal");
@@ -164,7 +164,7 @@ mod tests {
             Arc::new(cache),
             Arc::new(journal),
             Arc::new(Stats::default()),
-            Decider::Fixed(Strategy::Stream),
+            Decider::Fixed(AccessPlan::STREAM),
             kernel,
             inodes,
         ));

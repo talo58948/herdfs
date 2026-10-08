@@ -1,0 +1,37 @@
+name: Docs site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "CONTRACT.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-site
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: talo58948/herdfs-www
+          ref: main
+          ssh-key: ${{ secrets.WWW_DEPLOY_KEY }}
+      - name: Update the pinned docs commit
+        env:
+          HERDFS_SHA: ${{ github.sha }}
+        run: |
+          printf '%s\n' "$HERDFS_SHA" > herdfs-docs.lock
+          git diff --quiet -- herdfs-docs.lock && exit 0
+          git config user.name "herdfs docs bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add herdfs-docs.lock
+          git commit -m "Sync docs to herdfs ${HERDFS_SHA:0:7}"
+          git push origin HEAD:main

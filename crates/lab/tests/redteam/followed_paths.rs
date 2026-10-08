@@ -1,14 +1,12 @@
 //! Round 3: operations on entries this client holds, after another client moves them (C7).
 
 use std::fs::{self, File};
-use std::os::fd::AsRawFd;
-use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, ensure};
 
-use crate::{VISIBLE_AFTER, two_clients};
+use crate::{VISIBLE_AFTER, mkdir_entry, two_clients};
 
 /// When b makes `sub1` and stats `d`, after its listing: the stat within T_vis of it, so the
 /// listing's cached entries answer it.
@@ -38,7 +36,6 @@ fn operations_in_a_moved_directory_follow_it_after_t_vis() -> Result<()> {
     fs::create_dir(a.join("d"))?;
     thread::sleep(VISIBLE_AFTER);
     let held = File::open(b.join("d"))?;
-    let inside = |name: &str| PathBuf::from(format!("/proc/self/fd/{}/{name}", held.as_raw_fd()));
     thread::sleep(VISIBLE_AFTER);
 
     fs::read_dir(b)?.count();
@@ -47,12 +44,12 @@ fn operations_in_a_moved_directory_follow_it_after_t_vis() -> Result<()> {
     let renamed = Instant::now();
     fs::create_dir(a.join("d"))?;
     sleep_until(listed + SUB1_AT);
-    fs::create_dir(inside("sub1"))?;
+    mkdir_entry(&held, "sub1")?;
     sleep_until(listed + STAT_AT);
     fs::metadata(b.join("d"))?;
     let stated = listed.elapsed();
     sleep_until(renamed + SUB2_AFTER_RENAME);
-    fs::create_dir(inside("sub2"))?;
+    mkdir_entry(&held, "sub2")?;
     ensure!(
         stated < VISIBLE_AFTER - Duration::from_millis(200),
         "the stat came {stated:?} after the listing, too late to be answered from it"

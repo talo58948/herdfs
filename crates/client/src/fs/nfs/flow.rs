@@ -44,7 +44,9 @@ impl Nfs {
             state.epoch = Some(self.start_epoch(entry).await?);
         }
         state.last_data = Some(Instant::now());
-        let head = state.epoch.as_ref().and_then(|epoch| epoch.head.clone());
+        let epoch = state.epoch.as_ref();
+        let head = epoch.and_then(|epoch| epoch.head.clone());
+        let handle = epoch.map(|epoch| self.space.handle(epoch.handle)).transpose()?;
         drop(state);
 
         if let Some(copy) = self.local_copy(entry) {
@@ -58,7 +60,8 @@ impl Nfs {
             return Ok((Vec::new(), true));
         };
         let size = file.version.size;
-        let bytes = self.space.reader.read(&file, off, u64::from(count)).await?;
+        let handle = handle.ok_or(libc::EBADF)?;
+        let bytes = self.space.read_version(Some(file), off, count, &handle).await?;
         Ok((bytes, off.saturating_add(u64::from(count)) >= size))
     }
 
@@ -179,8 +182,9 @@ impl Nfs {
 
     async fn start_epoch(&self, entry: EntryId) -> Result<Epoch> {
         let head = self.space.head(entry, OpenMode::Read).await?;
-        let handle = Handle::new(entry, false, &self.space.inodes);
-        let upgrade = self.space.start(head.as_ref(), "nfs".to_owned(), &handle);
+        let (access, upgrade) = self.space.start(head.as_ref(), "nfs".to_owned(), entry);
+        let handle = Handle::new(entry, false, Some(access), &self.space.inodes);
+        self.space.begin(head.as_ref(), &handle);
         let handle = self.space.register(handle);
         if let Some(upgrade) = upgrade {
             tokio::spawn(self.space.clone().upgrade(handle, upgrade));

@@ -1,7 +1,6 @@
 //! Round 25: a namespace call while its held parent keeps moving to fresh paths.
 
 use std::fs::{self, File};
-use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::thread;
@@ -10,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, ensure};
 use herdfs_lab::{Lab, LabConfig, Profile, Strategy};
 
-use crate::VISIBLE_AFTER;
+use crate::{VISIBLE_AFTER, mkdir_entry};
 
 const SLOW_AUTHORITY: Profile = Profile::Custom {
     round_trip_ms: 2_000,
@@ -40,10 +39,9 @@ fn make_child(lab: &Lab, trial: usize, moving: bool) -> Result<(std::io::Result<
     thread::sleep(VISIBLE_AFTER);
     let held = File::open(b.join(&first))?;
     thread::sleep(VISIBLE_AFTER);
-    let child = PathBuf::from(format!("/proc/self/fd/{}/child", held.as_raw_fd()));
     let stop = AtomicBool::new(false);
     let (made, last, moves) = thread::scope(|scope| {
-        let mkdir = scope.spawn(|| fs::create_dir(child));
+        let mkdir = scope.spawn(|| mkdir_entry(&held, "child"));
         let rename = scope.spawn(|| -> Result<(PathBuf, usize)> {
             let mut current = a.join(first);
             let mut moves = 0;
