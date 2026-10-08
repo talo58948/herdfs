@@ -79,7 +79,6 @@ fn overlapping_history(trial: usize, overlap: bool) -> (bool, bool) {
 /// commit bases; a real revoke/re-grant is the control.
 // contract: C14, S8
 #[test]
-#[ignore = "ROUND56: overlapping ACL replacement resets uninterrupted history access"]
 fn an_overlapping_grant_keeps_the_original_history_boundary() {
     let mut lost = 0;
     for trial in 0..3 {
