@@ -65,16 +65,17 @@ impl Server {
         audience: String,
         grant_ttl: Duration,
     ) -> Self {
-        Self::with_issuer(
-            authority,
+        Self {
+            authority: Mutex::new(authority),
             bucket,
             public_bucket,
             credentials,
-            issuer,
-            audience,
-            None,
+            http: reqwest::Client::new(),
+            verifier: auth::Verifier::new(issuer, audience),
+            local_issuer: None,
             grant_ttl,
-        )
+            uploading: RwLock::new(()),
+        }
     }
 
     /// Runs with the persisted built-in issuer and immediate token revocation.
@@ -88,39 +89,17 @@ impl Server {
     ) -> Self {
         let issuer = local_issuer.issuer().to_owned();
         let audience = local_issuer.audience().to_owned();
-        Self::with_issuer(
+        let mut server = Self::new(
             authority,
             bucket,
             public_bucket,
             credentials,
             issuer,
             audience,
-            Some(local_issuer),
             grant_ttl,
-        )
-    }
-
-    fn with_issuer(
-        authority: Authority,
-        bucket: Bucket,
-        public_bucket: Bucket,
-        credentials: Credentials,
-        issuer: String,
-        audience: String,
-        local_issuer: Option<LocalIssuer>,
-        grant_ttl: Duration,
-    ) -> Self {
-        Self {
-            authority: Mutex::new(authority),
-            bucket,
-            public_bucket,
-            credentials,
-            http: reqwest::Client::new(),
-            verifier: auth::Verifier::new(issuer, audience),
-            local_issuer,
-            grant_ttl,
-            uploading: RwLock::new(()),
-        }
+        );
+        server.local_issuer = Some(local_issuer);
+        server
     }
 
     pub fn router(self: &Arc<Self>) -> Router {
