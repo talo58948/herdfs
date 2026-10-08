@@ -104,6 +104,7 @@ impl Model {
         use ErrorCode::*;
         match request {
             Request::Whoami => Ok(()),
+            Request::Spaces => Ok(()),
             Request::CreateSpace { space } => self.new_space(space),
             Request::Fork { space, name } => {
                 self.require(who, space, &SpacePath::root(), Perm::Admin)?;
@@ -225,6 +226,7 @@ impl Model {
                     .or_else(|| principal.strip_prefix("group:"));
                 ensure(name.is_some_and(|name| !name.is_empty()), Invalid)
             }
+            Request::Access { space, path } => self.require(who, space, path, Perm::Admin),
         }
     }
 

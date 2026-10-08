@@ -2,7 +2,7 @@
 
 use herdfs_core::{
     SpacePath,
-    proto::{ErrorCode, Perm, Response},
+    proto::{ErrorCode, Perm, Response, SpaceAccess},
 };
 use rusqlite::params;
 
@@ -35,6 +35,41 @@ fn is_valid_name(name: &str) -> bool {
 }
 
 impl Call<'_> {
+    pub(crate) fn spaces(&self) -> Result<Response> {
+        let principals: Vec<String> = self.principals().collect();
+        let mut query = self
+            .db
+            .prepare_cached("SELECT space, path, perm FROM acl WHERE principal = ?1 ORDER BY space, path")?;
+        let mut grants = Vec::new();
+        for principal in principals {
+            let rows = query.query_map([principal], |row| {
+                let perm = crate::db::parse(row, 2, |text| match text {
+                    "read" => Some(Perm::Read),
+                    "write" => Some(Perm::Write),
+                    "admin" => Some(Perm::Admin),
+                    _ => None,
+                })?;
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, perm))
+            })?;
+            grants.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+        }
+        grants.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut spaces: Vec<SpaceAccess> = Vec::new();
+        for (space, path, perm) in grants {
+            if let Some(found) = spaces.last_mut().filter(|found| found.space == space) {
+                if path.is_empty() {
+                    found.root_perm = Some(found.root_perm.map_or(perm, |old| old.max(perm)));
+                }
+                continue;
+            }
+            spaces.push(SpaceAccess {
+                space,
+                root_perm: path.is_empty().then_some(perm),
+            });
+        }
+        Ok(Response::Spaces { spaces })
+    }
+
     pub(crate) fn create_space(&self, name: &str) -> Result<Response> {
         self.require_new_space(name)?;
         self.db

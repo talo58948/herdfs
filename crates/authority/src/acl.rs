@@ -2,7 +2,7 @@
 
 use herdfs_core::{
     SpacePath,
-    proto::{ErrorCode, Perm, Response},
+    proto::{AclRow, ErrorCode, Perm, Response},
 };
 use rusqlite::params;
 
@@ -134,6 +134,33 @@ impl Call<'_> {
         Ok(Response::Done)
     }
 
+    pub(crate) fn access(&self, space: &str, path: &SpacePath) -> Result<Response> {
+        self.require(space, path, Perm::Admin)?;
+        let mut query = self.db.prepare_cached(
+            "SELECT path, principal, perm FROM acl WHERE space = ?1
+             ORDER BY length(path), path, principal",
+        )?;
+        let rows = query.query_map([space], |row| {
+            let grant_path = parse(row, 0, |text| SpacePath::try_from(text).ok())?;
+            let perm = parse(row, 2, |text| {
+                [Perm::Read, Perm::Write, Perm::Admin]
+                    .into_iter()
+                    .find(|perm| perm_name(*perm) == text)
+            })?;
+            Ok(AclRow {
+                path: grant_path,
+                principal: row.get(1)?,
+                perm,
+            })
+        })?;
+        let grants = rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|grant| path.is_within(&grant.path))
+            .collect();
+        Ok(Response::Access { grants })
+    }
+
     /// Makes the caller admin of the root of `space`.
     pub(crate) fn make_admin(&self, space: &str) -> Result<()> {
         self.db
@@ -146,7 +173,7 @@ impl Call<'_> {
     }
 
     /// The caller's user and group principals, as ACL rows name them.
-    fn principals(&self) -> impl Iterator<Item = String> + '_ {
+    pub(crate) fn principals(&self) -> impl Iterator<Item = String> + '_ {
         let groups = self.who.groups.iter().map(|group| format!("group:{group}"));
         std::iter::once(self.who.user.clone()).chain(groups)
     }
