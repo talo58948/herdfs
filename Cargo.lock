@@ -1191,12 +1191,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "intaglio"
-version = "1.15.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8eca9188c1b20836bb561bc09bb2f54e9ca99b271031b5f3ff183a00c08c98c8"
-
-[[package]]
 name = "ipnet"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1465,12 +1459,10 @@ dependencies = [
  "async-trait",
  "byteorder",
  "filetime",
- "intaglio",
  "num-derive",
  "num-traits",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1641,6 +1633,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "clap",
  "fuser",
@@ -1651,13 +1644,17 @@ dependencies = [
  "rand 0.10.3",
  "reqwest",
  "rustix",
+ "security-framework",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror",
+ "time",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "xattr",
 ]
 
 [[package]]
@@ -1677,15 +1674,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "jsonwebtoken",
  "libc",
  "herdfs-client",
  "herdfs-core",
  "rand 0.10.3",
  "reqwest",
+ "rustix",
  "rusty-s3",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "xattr",
@@ -2079,6 +2079,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",

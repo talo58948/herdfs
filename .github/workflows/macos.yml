@@ -1,0 +1,72 @@
+name: macOS app
+
+on:
+  push:
+    branches: [v01-macapp]
+    paths:
+      - apps/macos/**
+      - crates/**
+      - Cargo.*
+      - .github/workflows/macos.yml
+  pull_request:
+    paths:
+      - apps/macos/**
+      - crates/**
+      - Cargo.*
+      - .github/workflows/macos.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-arm64-cargo-${{ hashFiles('Cargo.lock') }}
+      - name: Build bundled CLI
+        run: |
+          rustup target add aarch64-apple-darwin
+          cargo build --release -p herdfs-client --target aarch64-apple-darwin
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate --spec apps/macos/project.yml
+      - name: Test Swift
+        run: |
+          xcodebuild test \
+            -project apps/macos/HerdFS.xcodeproj \
+            -scheme HerdFS \
+            -destination 'platform=macOS' \
+            -derivedDataPath apps/macos/DerivedData \
+            CODE_SIGNING_ALLOWED=NO
+      - name: Build and sign app
+        run: |
+          xcodebuild build \
+            -project apps/macos/HerdFS.xcodeproj \
+            -scheme HerdFS \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            -derivedDataPath apps/macos/DerivedData \
+            CODE_SIGNING_ALLOWED=NO
+          app=apps/macos/DerivedData/Build/Products/Release/HerdFS.app
+          codesign --force --sign - "$app/Contents/Resources/herdfs"
+          codesign --force --sign - \
+            --entitlements apps/macos/Sources/Finder/Finder.entitlements \
+            "$app/Contents/PlugIns/HerdFSFinder.appex"
+          codesign --force --sign - "$app"
+          codesign --verify --deep --strict "$app"
+          ditto -c -k --keepParent "$app" HerdFS.app.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HerdFS.app
+          path: HerdFS.app.zip
+          if-no-files-found: error
