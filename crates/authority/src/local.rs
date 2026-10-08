@@ -166,12 +166,7 @@ impl Authority {
         Ok(())
     }
 
-    pub(crate) fn check_local_token(
-        &self,
-        id: &str,
-        user: &str,
-        now_ms: i64,
-    ) -> Result<bool, proto::Error> {
+    pub(crate) fn check_local_token(&self, id: &str, user: &str, now_ms: i64) -> Result<bool, proto::Error> {
         self.db
             .query_row(
                 "SELECT EXISTS (SELECT 1 FROM local_tokens

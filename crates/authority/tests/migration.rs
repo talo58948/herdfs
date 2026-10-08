@@ -15,13 +15,7 @@ fn a_v9_database_gains_local_tokens_without_losing_data() {
     };
     let mut authority = Authority::open(&db).unwrap();
     authority
-        .handle(
-            &alice,
-            Request::CreateSpace {
-                space: "kept".into(),
-            },
-            1,
-        )
+        .handle(&alice, Request::CreateSpace { space: "kept".into() }, 1)
         .unwrap();
     drop(authority);
 
@@ -31,9 +25,7 @@ fn a_v9_database_gains_local_tokens_without_losing_data() {
     drop(old);
 
     let mut authority = Authority::open(&db).unwrap();
-    let Outcome::Reply(Response::Spaces { spaces }) = authority
-        .handle(&alice, Request::Spaces, 2)
-        .unwrap()
+    let Outcome::Reply(Response::Spaces { spaces }) = authority.handle(&alice, Request::Spaces, 2).unwrap()
     else {
         panic!("spaces returned the wrong response")
     };

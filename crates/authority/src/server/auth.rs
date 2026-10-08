@@ -8,8 +8,8 @@ use herdfs_core::proto::{self, ErrorCode};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
-use crate::Principal;
 use super::unauthenticated;
+use crate::Principal;
 
 /// The issuer's keys are fetched again this often, so a key it withdraws
 /// stops working and a new one starts within this time.

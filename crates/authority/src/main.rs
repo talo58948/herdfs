@@ -139,11 +139,10 @@ async fn serve(args: Args) -> anyhow::Result<()> {
         s3_bucket: Some(s3_bucket),
         s3_region: Some(s3_region),
         oidc_audience,
-        issuer:
-            IssuerArgs {
-                oidc_issuer,
-                local_issuer,
-            },
+        issuer: IssuerArgs {
+            oidc_issuer,
+            local_issuer,
+        },
         ..
     } = args
     else {

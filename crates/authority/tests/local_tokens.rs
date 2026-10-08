@@ -43,19 +43,20 @@ async fn local_tokens_require_an_active_id_for_their_subject() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("authority.db");
     let (mut authority, base) = start(&db).await;
-    let stored: Stored = serde_json::from_slice(
-        &fs::read(dir.path().join("authority.db.local-issuer.json")).unwrap(),
-    )
-    .unwrap();
+    let stored: Stored =
+        serde_json::from_slice(&fs::read(dir.path().join("authority.db.local-issuer.json")).unwrap())
+            .unwrap();
     let future = now() + 86_400;
 
     register(&db, "stale", "alice", 1);
     let (id, valid) = issue(&db, "alice");
     let connection = rusqlite::Connection::open(&db).unwrap();
     let stale: bool = connection
-        .query_row("SELECT EXISTS (SELECT 1 FROM local_tokens WHERE id = 'stale')", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM local_tokens WHERE id = 'stale')",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert!(!stale);
     let (status, reply) = rpc(&base, &valid).await;
@@ -104,9 +105,7 @@ async fn local_issuer_rejects_ephemeral_and_changed_listen_addresses() {
     let db = dir.path().join("authority.db");
     let ephemeral = authority_command(&db, "127.0.0.1:0").output().unwrap();
     assert!(!ephemeral.status.success());
-    assert!(
-        String::from_utf8_lossy(&ephemeral.stderr).contains("fixed, nonzero --listen port")
-    );
+    assert!(String::from_utf8_lossy(&ephemeral.stderr).contains("fixed, nonzero --listen port"));
 
     let (mut authority, base) = start(&db).await;
     authority.kill().unwrap();
@@ -127,7 +126,10 @@ async fn local_issuer_rejects_ephemeral_and_changed_listen_addresses() {
         .unwrap();
     let error = String::from_utf8_lossy(&changed.stderr);
     assert!(!changed.status.success());
-    assert!(error.contains("changing --listen requires deleting the key file"), "{error}");
+    assert!(
+        error.contains("changing --listen requires deleting the key file"),
+        "{error}"
+    );
     assert!(error.contains("reissuing every token"), "{error}");
 }
 
@@ -199,7 +201,11 @@ fn issue(db: &Path, user: &str) -> (String, String) {
         .args(["--user", user, "--days", "1"])
         .output()
         .unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let token = String::from_utf8(output.stdout).unwrap().trim().to_owned();
     let id = String::from_utf8(output.stderr)
         .unwrap()
@@ -227,9 +233,12 @@ fn sign(
     exp: u64,
     other: Option<(&str, SigningKey)>,
 ) -> String {
-    let secret: [u8; 32] = URL_SAFE_NO_PAD.decode(&stored.secret).unwrap().try_into().unwrap();
-    let (issuer, key) = other
-        .unwrap_or_else(|| (stored.issuer.as_str(), SigningKey::from_bytes(&secret)));
+    let secret: [u8; 32] = URL_SAFE_NO_PAD
+        .decode(&stored.secret)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let (issuer, key) = other.unwrap_or_else(|| (stored.issuer.as_str(), SigningKey::from_bytes(&secret)));
     let claims = Claims {
         iss: issuer,
         aud: "herdfs",
@@ -265,7 +274,10 @@ async fn wait_healthy(base: &str) {
         {
             return;
         }
-        assert!(started.elapsed() <= Duration::from_secs(10), "authority did not become healthy");
+        assert!(
+            started.elapsed() <= Duration::from_secs(10),
+            "authority did not become healthy"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
