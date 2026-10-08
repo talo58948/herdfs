@@ -223,10 +223,17 @@ impl Model {
                 perm,
             } => {
                 assert_eq!(*reply, Response::Done);
-                let granted_seq = self.versions.keys().next_back().map_or(0, |id| id.0);
+                let latest_seq = self.versions.keys().next_back().map_or(0, |id| id.0);
+                // contract: S8 — an overlap continues the old access interval.
+                let granted_seq = self.spaces[space]
+                    .acl
+                    .iter()
+                    .filter(|((at, row_principal), _)| row_principal == principal && path.is_within(at))
+                    .map(|(_, (_, granted_seq))| *granted_seq)
+                    .min()
+                    .unwrap_or(latest_seq);
                 let acl = &mut self.spaces.get_mut(space).expect("space exists").acl;
                 let key = (path.clone(), principal.clone());
-                // A changed perm keeps the row's grant sequence (S8).
                 match perm {
                     Some(perm) => acl.entry(key).or_insert((*perm, granted_seq)).0 = *perm,
                     None => drop(acl.remove(&key)),
