@@ -74,7 +74,7 @@ impl Drop for Handle {
 }
 
 impl Space {
-    pub async fn open(self: Arc<Self>, ino: InodeNo, mode: OpenMode, pid: u32) -> Result<u64> {
+    pub async fn open(self: Arc<Self>, ino: InodeNo, mode: OpenMode, comm: &str) -> Result<u64> {
         let entry = self.entry_id(ino);
         let (writable, truncate) = (mode.writes(), mode.truncates());
         let (file, access, upgrade) = if writable {
@@ -86,7 +86,7 @@ impl Space {
                 Some(_) => None,
                 None => self.head(entry, mode).await?,
             };
-            let (access, upgrade) = self.start(file.as_ref(), pid, entry);
+            let (access, upgrade) = self.start(file.as_ref(), comm.to_owned(), entry);
             (file, Some(access), upgrade)
         };
         let handle = Handle::new(entry, writable, access, &self.inodes);

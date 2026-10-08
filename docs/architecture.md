@@ -101,6 +101,28 @@ Permission to spawn a session is write access at its session directory, and a gr
 
 Client observability: `getfattr -n user.herdfs.stats MOUNT` returns JSON counters: `bytes_fetched`, `chunks_fetched`, `cache_hits`, `grants`, `commits`, `pending_commits`, `decisions` per plan setting, `jev_answers`, `jev_unsure`, `jev_errors`, and `round_trip_ms` to the authority. `herdfs explain PATH` reads `user.herdfs.plan` from the file and prints the latest access's settings, source, Jev confidence when present, and fetched bytes.
 
+## macOS: loopback NFS
+
+On Apple silicon macOS 26 and newer, `herdfs mount` serves NFSv3 on
+`127.0.0.1` and mounts that export with the system NFS client, so it needs no
+kernel extension, signed system extension or administrator password (M1).
+Durable opaque handles carry the space entry id under a per-export identity;
+the adapter maps them back through `Locate` rather than relying on an inode
+remembered by this process.
+
+Because NFS exposes neither open nor close, reads pin an immutable version for
+one data-access epoch and advance after one second idle. WRITE, size SETATTR
+and COMMIT are ordered per handle. They share a whole-file write generation;
+FILE_SYNC and COMMIT wait for the authority while online, while an offline
+COMMIT returns after the generation is sealed in the journal (M2). Finder's
+AppleDouble resource forks and extended attributes are ordinary `._` files.
+
+The parent `$HOME/HerdFS` is mode 0700. The remaining local risk is NFSv3
+AUTH_SYS: any process already running as the mounting user can make equivalent
+loopback requests, and root on that Mac can impersonate that local user. The
+mount still carries only that client's principal and object-store grants, so
+this does not expand what the client itself may read (S1-S4).
+
 ## Deliberately out of v0.1
 
 Hard links; access times (atime is reported as mtime) and a separate ctime (reported as mtime); using a file after it is unlinked while open (fails with `ENOENT`); cross-host `flock`/`fcntl` locks (locks coordinate processes on one client only, not across clients; so a database such as SQLite must not be written from two clients at once); shared-writable `mmap` coherence across hosts; device and special files; Windows, iOS and Intel Macs; a Finder Trash on a space (Finder deletes from network volumes at once; history of a deleted file goes with it); per-uid mapping inside one mount; an S3-compatible API on herdfs; remote execution as a read-path strategy;  FS-level guarded writes. Each of these fails cleanly (`ENOTSUP`/`EPERM`), is simply absent, or, for locks, is scoped to one client as stated.

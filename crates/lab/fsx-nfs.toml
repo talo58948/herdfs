@@ -1,0 +1,19 @@
+# Linux flushes dirty pages as FILE_SYNC before fsx's per-op size check. Keep hundreds of each
+# write kind in 50,000 operations without turning the ring into thousands of authority barriers.
+flen = 4194304
+
+[weights]
+read = 150
+write = 1
+mapread = 30
+mapwrite = 1
+truncate = 3
+fsync = 1
+fdatasync = 1
+close_open = 2
+invalidate = 1
+sendfile = 2
+posix_fadvise = 1
+copy_file_range = 2
+posix_fallocate = 1
+punch_hole = 0

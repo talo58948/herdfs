@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["vendor/nfsserve"]
 
 [workspace.package]
 edition = "2024"
@@ -11,6 +12,7 @@ publish = false
 herdfs-client = { path = "crates/client" }
 herdfs-core = { path = "crates/core" }
 anyhow = "1"
+async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"
 blake3 = "1"
@@ -21,6 +23,7 @@ fuser = { version = "0.18", default-features = false }
 futures = "0.3"
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 libc = "0.2"
+nfsserve = { path = "vendor/nfsserve" }
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }

@@ -2,6 +2,8 @@
 
 use std::fs;
 use std::net::Ipv4Addr;
+#[cfg(target_os = "linux")]
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -39,6 +41,14 @@ pub enum Strategy {
     Jev,
 }
 
+/// Filesystem adapter a lab client mounts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Mount {
+    #[default]
+    Fuse,
+    Nfs,
+}
+
 impl Strategy {
     fn arg(self) -> String {
         match self {
@@ -61,6 +71,7 @@ pub(crate) struct ClientSpec {
     pub(crate) profile: Profile,
     pub(crate) strategy: Strategy,
     pub(crate) cache_bytes: u64,
+    pub(crate) mount: Mount,
 }
 
 pub(crate) struct Client {
@@ -120,6 +131,9 @@ impl Client {
             .args(["--strategy", &self.spec.strategy.arg()])
             .args(["--resolve", &format!("{S3_HOST}={}", self.ip)])
             .arg(&self.mount);
+        if self.spec.mount == Mount::Nfs {
+            command.arg("--nfs");
+        }
         if let Some(jev) = &self.jev {
             let key = self.dir.join("jev-key");
             fs::write(&key, "lab")?;
@@ -129,6 +143,17 @@ impl Client {
                 .args(["--jev-url", jev.url()]);
         }
         let mut mount = Proc::spawn(&self.spec.name, command, &self.dir.join("client.log"))?;
+        #[cfg(target_os = "linux")]
+        if self.spec.mount == Mount::Nfs {
+            mount.wait_until("serving NFS", || {
+                nfs_port(&self.dir)
+                    .is_some_and(|port| TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_ok())
+            })?;
+            mount_nfs(
+                &self.mount,
+                nfs_port(&self.dir).context("NFS server did not publish its port")?,
+            )?;
+        }
         mount.wait_until("mounted", || mount::mounted(&self.mount))?;
         self.process = Some(mount);
         Ok(())
@@ -140,7 +165,10 @@ impl Client {
         if !mount::mounted(&self.mount) {
             return Ok(());
         }
-        mount::detach(&self.mount)
+        match self.spec.mount {
+            Mount::Fuse => mount::detach(&self.mount),
+            Mount::Nfs => mount::detach_nfs(&self.mount),
+        }
     }
 
     pub(crate) fn pid(&self) -> Option<u32> {
@@ -148,6 +176,7 @@ impl Client {
     }
 
     pub(crate) fn stats(&self) -> Result<Value> {
+        ensure!(self.spec.mount == Mount::Fuse, "stats xattr is FUSE-only");
         let json = xattr::get(&self.mount, STATS_XATTR)?
             .with_context(|| format!("{} has no {STATS_XATTR}", self.mount.display()))?;
         Ok(serde_json::from_slice(&json)?)
@@ -162,7 +191,7 @@ impl Client {
     /// Waits until every write closed so far is committed or set aside.
     pub(crate) fn wait_committed(&self) -> Result<()> {
         let deadline = Instant::now() + COMMIT_TIMEOUT;
-        while self.stats()?["pending_commits"] != 0 {
+        while self.pending()? {
             ensure!(
                 Instant::now() < deadline,
                 "{} has pending commits after {COMMIT_TIMEOUT:?}",
@@ -172,6 +201,21 @@ impl Client {
         }
         Ok(())
     }
+
+    fn pending(&self) -> Result<bool> {
+        if self.spec.mount == Mount::Fuse {
+            return Ok(self.stats()?["pending_commits"] != 0);
+        }
+        // Journal records are JSON files in this directory; NFS identity is journal.nfs.json
+        // beside it. This is deliberately the lab's on-disk format probe for mounts without xattrs.
+        let records = fs::read_dir(self.dir.join("journal"))?;
+        Ok(records.filter_map(|record| record.ok()).any(|record| {
+            record
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "json")
+        }))
+    }
 }
 
 impl Drop for Client {
@@ -180,4 +224,24 @@ impl Drop for Client {
             eprintln!("lab: {error:#}");
         }
     }
+}
+#[cfg(target_os = "linux")]
+fn nfs_port(dir: &Path) -> Option<u16> {
+    let identity = fs::read(dir.join("journal.nfs.json")).ok()?;
+    let identity: Value = serde_json::from_slice(&identity).ok()?;
+    u16::try_from(identity["port"].as_u64()?).ok()
+}
+
+#[cfg(target_os = "linux")]
+fn mount_nfs(mountpoint: &Path, port: u16) -> Result<()> {
+    let options = format!(
+        "vers=3,tcp,nolock,noacl,noac,lookupcache=none,rsize=131072,wsize=131072,port={port},mountport={port}"
+    );
+    let status = Command::new("sudo")
+        .arg("mount.nfs")
+        .args(["-o", &options, "127.0.0.1:/"])
+        .arg(mountpoint)
+        .status()?;
+    ensure!(status.success(), "mounting {}: {status}", mountpoint.display());
+    Ok(())
 }

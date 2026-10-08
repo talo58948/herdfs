@@ -32,11 +32,10 @@ impl Space {
     pub(super) fn start(
         &self,
         file: Option<&Arc<OpenVersion>>,
-        pid: u32,
+        comm: String,
         entry: EntryId,
     ) -> (Arc<AccessRecord>, Option<Upgrade>) {
         let path = self.path(self.ino(entry)).ok().flatten();
-        let comm = process_name(pid);
         let extension = path
             .as_ref()
             .and_then(|path| std::path::Path::new(path.name()).extension());
@@ -166,7 +165,7 @@ impl Space {
 }
 
 #[cfg(target_os = "linux")]
-fn process_name(pid: u32) -> String {
+pub(super) fn process_name(pid: u32) -> String {
     std::fs::read_to_string(format!("/proc/{pid}/comm"))
         .unwrap_or_default()
         .trim_end()
@@ -175,7 +174,7 @@ fn process_name(pid: u32) -> String {
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-fn process_name(pid: u32) -> String {
+pub(super) fn process_name(pid: u32) -> String {
     let Ok(pid) = i32::try_from(pid) else {
         return String::new();
     };
@@ -190,6 +189,6 @@ fn process_name(pid: u32) -> String {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn process_name(_pid: u32) -> String {
+pub(super) fn process_name(_pid: u32) -> String {
     String::new()
 }

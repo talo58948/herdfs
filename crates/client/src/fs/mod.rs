@@ -11,7 +11,9 @@ mod inode;
 mod inodes;
 mod kernel;
 mod namespace;
+mod nfs;
 mod read;
+mod sync;
 mod xattr;
 
 use std::sync::{Arc, Mutex, atomic::AtomicU64};
@@ -23,6 +25,7 @@ pub use fuse::Fuse;
 use handles::Handle;
 pub use inodes::Inodes;
 pub use kernel::Kernel;
+pub(crate) use nfs::{Identity, Nfs};
 use herdfs_core::proto::{Entry, EntryId, Kind};
 
 use crate::{
@@ -59,6 +62,7 @@ pub(crate) enum FileKind {
     Symlink,
 }
 
+#[derive(Clone)]
 pub(crate) struct Attributes {
     ino: InodeNo,
     size: u64,
@@ -128,6 +132,7 @@ pub struct Space {
     /// Directory listings taken at opendir, by handle.
     listings: Mutex<HashMap<u64, Listing>>,
     next_handle: AtomicU64,
+    metadata_ttl: Duration,
 }
 
 impl Space {
@@ -159,7 +164,13 @@ impl Space {
             handles: Mutex::default(),
             listings: Mutex::default(),
             next_handle: AtomicU64::new(1),
+            metadata_ttl: TTL,
         }
+    }
+
+    pub(crate) fn without_metadata_cache(mut self) -> Self {
+        self.metadata_ttl = Duration::ZERO;
+        self
     }
 
     /// Inode numbers are entry ids plus one, except that the root is always inode 1.
@@ -223,6 +234,11 @@ impl Space {
             gid: self.owner.1,
             blksize: 4096,
         }
+    }
+
+    fn known_attr(&self, entry: EntryId) -> Option<Attributes> {
+        let (entry, local) = self.inodes.with(entry, |state| state.view()).flatten()?;
+        Some(self.attr(&entry, local.as_deref()))
     }
 
     /// The counters behind `user.herdfs.stats`.
