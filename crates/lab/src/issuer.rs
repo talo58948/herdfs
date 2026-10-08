@@ -1,14 +1,22 @@
 //! A test OIDC issuer: a discovery document, a JWKS, and tokens good and bad.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use axum::extract::State;
-use axum::routing::get;
+use axum::extract::{Form, Query, State};
+use axum::http::StatusCode;
+use axum::response::Redirect;
+use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::Serialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::runtime::{self, Runtime};
 
@@ -28,6 +36,24 @@ MC4CAQAwBQYDK2VwBCIEIBP07PlepLfvlKZqgy6JhKsWVMTh/6B+w2gP1/Cem1JL
 const NONE_HEADER: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0";
 /// Long enough to outlast any test run.
 const TOKEN_TTL: Duration = Duration::from_secs(24 * 3600);
+const LOGIN_TTL: Duration = Duration::from_secs(5);
+const REFRESH_TTL: Duration = Duration::from_secs(120);
+
+#[derive(Clone)]
+struct AppState {
+    url: String,
+    key: Arc<EncodingKey>,
+    codes: Arc<Mutex<HashMap<String, Code>>>,
+    refresh: Arc<Mutex<HashMap<String, String>>>,
+    refreshes: Arc<AtomicU64>,
+}
+
+struct Code {
+    challenge: String,
+    client_id: String,
+    redirect_uri: String,
+    sub: String,
+}
 
 /// A token the authority must reject (contract S5). Each is valid except for its one defect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,8 +81,9 @@ struct Claims<'a> {
 /// Serves discovery and a JWKS on 127.0.0.1 and mints tokens, until dropped.
 pub struct Issuer {
     url: String,
-    key: EncodingKey,
+    key: Arc<EncodingKey>,
     rogue: EncodingKey,
+    refreshes: Arc<AtomicU64>,
     /// Serves discovery and the JWKS until the issuer is dropped.
     _runtime: Runtime,
 }
@@ -69,15 +96,27 @@ impl Issuer {
             .build()?;
         let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0"))?;
         let url = format!("http://{}", listener.local_addr()?);
+        let key = Arc::new(EncodingKey::from_ed_pem(KEY.as_bytes())?);
+        let refreshes = Arc::new(AtomicU64::new(0));
+        let state = AppState {
+            url: url.clone(),
+            key: key.clone(),
+            codes: Arc::default(),
+            refresh: Arc::default(),
+            refreshes: refreshes.clone(),
+        };
         let app = Router::new()
             .route("/.well-known/openid-configuration", get(discovery))
             .route("/jwks", get(jwks))
-            .with_state(url.clone());
+            .route("/authorize", get(authorize))
+            .route("/token", post(token))
+            .with_state(state);
         runtime.spawn(async { axum::serve(listener, app).await });
         Ok(Self {
             url,
-            key: EncodingKey::from_ed_pem(KEY.as_bytes())?,
+            key,
             rogue: EncodingKey::from_ed_pem(ROGUE_KEY.as_bytes())?,
+            refreshes,
             _runtime: runtime,
         })
     }
@@ -88,6 +127,10 @@ impl Issuer {
 
     pub fn token(&self, sub: &str, groups: &[impl AsRef<str>]) -> String {
         sign(&self.claims(sub, groups), &self.key)
+    }
+
+    pub fn refreshes(&self) -> u64 {
+        self.refreshes.load(Ordering::Relaxed)
     }
 
     pub(crate) fn bad_token(&self, sub: &str, kind: BadToken) -> String {
@@ -114,18 +157,22 @@ impl Issuer {
     }
 
     fn claims<'a>(&'a self, sub: &'a str, groups: &'a [impl AsRef<str>]) -> Claims<'a> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Claims {
-            iss: &self.url,
-            sub,
-            aud: AUDIENCE,
-            groups: groups.iter().map(AsRef::as_ref).collect(),
-            iat: now,
-            exp: now + TOKEN_TTL.as_secs(),
-        }
+        claims(&self.url, sub, groups, TOKEN_TTL)
+    }
+}
+
+fn claims<'a>(issuer: &'a str, sub: &'a str, groups: &'a [impl AsRef<str>], ttl: Duration) -> Claims<'a> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Claims {
+        iss: issuer,
+        sub,
+        aud: AUDIENCE,
+        groups: groups.iter().map(AsRef::as_ref).collect(),
+        iat: now,
+        exp: now + ttl.as_secs(),
     }
 }
 
@@ -139,10 +186,13 @@ fn sign(claims: &Claims, key: &EncodingKey) -> String {
     jsonwebtoken::encode(&header, claims, key).expect("the embedded test keys sign any claims")
 }
 
-async fn discovery(State(url): State<String>) -> Json<Value> {
+async fn discovery(State(state): State<AppState>) -> Json<Value> {
+    let url = state.url;
     Json(json!({
         "issuer": url,
         "jwks_uri": format!("{url}/jwks"),
+        "authorization_endpoint": format!("{url}/authorize"),
+        "token_endpoint": format!("{url}/token"),
         "id_token_signing_alg_values_supported": ["EdDSA"],
     }))
 }
@@ -151,4 +201,80 @@ async fn jwks() -> Json<Value> {
     Json(json!({"keys": [{
         "kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "use": "sig", "kid": KEY_ID, "x": KEY_X,
     }]}))
+}
+
+async fn authorize(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Redirect, StatusCode> {
+    let get = |name| query.get(name).cloned().ok_or(StatusCode::BAD_REQUEST);
+    if get("response_type")? != "code" || get("code_challenge_method")? != "S256" {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let redirect_uri = get("redirect_uri")?;
+    let state_parameter = get("state")?;
+    let code = format!("{:032x}", rand::random::<u128>());
+    let grant = Code {
+        challenge: get("code_challenge")?,
+        client_id: get("client_id")?,
+        redirect_uri: redirect_uri.clone(),
+        sub: "login".into(),
+    };
+    lock(&state.codes).insert(code.clone(), grant);
+    let mut redirect = reqwest::Url::parse(&redirect_uri).map_err(|_| StatusCode::BAD_REQUEST)?;
+    redirect
+        .query_pairs_mut()
+        .extend_pairs([("code", code.as_str()), ("state", state_parameter.as_str())]);
+    Ok(Redirect::to(redirect.as_str()))
+}
+
+async fn token(
+    State(state): State<AppState>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    match form.get("grant_type").map(String::as_str) {
+        Some("authorization_code") => authorization_code(&state, &form),
+        Some("refresh_token") => refresh_token(&state, &form),
+        _ => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
+fn authorization_code(state: &AppState, form: &HashMap<String, String>) -> Result<Json<Value>, StatusCode> {
+    let code = form.get("code").ok_or(StatusCode::BAD_REQUEST)?;
+    let grant = lock(&state.codes).remove(code).ok_or(StatusCode::BAD_REQUEST)?;
+    let verifier = form.get("code_verifier").ok_or(StatusCode::BAD_REQUEST)?;
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    if challenge != grant.challenge
+        || form.get("client_id") != Some(&grant.client_id)
+        || form.get("redirect_uri") != Some(&grant.redirect_uri)
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let refresh = format!("{:032x}", rand::random::<u128>());
+    lock(&state.refresh).insert(refresh.clone(), grant.sub.clone());
+    Ok(tokens(state, &grant.sub, &refresh, LOGIN_TTL))
+}
+
+fn refresh_token(state: &AppState, form: &HashMap<String, String>) -> Result<Json<Value>, StatusCode> {
+    let refresh = form.get("refresh_token").ok_or(StatusCode::BAD_REQUEST)?;
+    let sub = lock(&state.refresh)
+        .get(refresh)
+        .cloned()
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    state.refreshes.fetch_add(1, Ordering::Relaxed);
+    Ok(tokens(state, &sub, refresh, REFRESH_TTL))
+}
+
+fn tokens(state: &AppState, sub: &str, refresh: &str, ttl: Duration) -> Json<Value> {
+    let access = sign(&claims(&state.url, sub, &[] as &[&str], ttl), &state.key);
+    Json(json!({
+        "access_token": access,
+        "refresh_token": refresh,
+        "token_type": "Bearer",
+        "expires_in": ttl.as_secs(),
+    }))
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

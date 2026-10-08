@@ -10,7 +10,10 @@ mod reader;
 mod remote;
 mod stats;
 mod strategy;
+mod token;
 mod version;
+
+pub mod cli;
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

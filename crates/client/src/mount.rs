@@ -29,8 +29,8 @@ pub struct MountArgs {
     /// The space to mount.
     #[arg(long)]
     space: String,
-    /// File holding the bearer token, re-read when the authority answers 401.
-    #[arg(long)]
+    /// Login token file, refreshed shortly before expiry.
+    #[arg(long, default_value_os_t = crate::token::default_path())]
     token_file: PathBuf,
     /// Chunk cache directory.
     #[arg(long)]
