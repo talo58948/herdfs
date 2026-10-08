@@ -28,13 +28,14 @@ targets:
     postBuildScripts:
       - name: Copy bundled CLI
         script: |
+          mkdir -p "${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
           cp "${SRCROOT}/../../target/aarch64-apple-darwin/release/herdfs" \
-            "${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/herdfs"
-          chmod 755 "${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/herdfs"
+            "${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/herdfs"
+          chmod 755 "${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/herdfs"
         inputFiles:
           - $(SRCROOT)/../../target/aarch64-apple-darwin/release/herdfs
         outputFiles:
-          - $(TARGET_BUILD_DIR)/$(EXECUTABLE_FOLDER_PATH)/herdfs
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/herdfs
   HerdFSFinder:
     type: app-extension
     platform: macOS

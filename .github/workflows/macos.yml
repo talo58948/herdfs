@@ -58,7 +58,7 @@ jobs:
             -derivedDataPath apps/macos/DerivedData \
             CODE_SIGNING_ALLOWED=NO
           app=apps/macos/DerivedData/Build/Products/Release/HerdFS.app
-          codesign --force --sign - "$app/Contents/MacOS/herdfs"
+          codesign --force --sign - "$app/Contents/Resources/herdfs"
           codesign --force --sign - \
             --entitlements apps/macos/Sources/Finder/Finder.entitlements \
             "$app/Contents/PlugIns/HerdFSFinder.appex"

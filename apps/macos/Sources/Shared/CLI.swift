@@ -44,7 +44,7 @@ struct CLIArguments: Equatable, Sendable {
 
 enum CLI {
     static var executableURL: URL {
-        Bundle.main.bundleURL.appending(path: "Contents/MacOS/herdfs")
+        Bundle.main.bundleURL.appending(path: "Contents/Resources/herdfs")
     }
 
     static func json<Value: Decodable & Sendable>(
