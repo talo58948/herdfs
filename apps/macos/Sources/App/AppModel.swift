@@ -241,7 +241,9 @@ final class AppModel: ObservableObject {
     private func processPath(_ pid: Int32) -> String? {
         var buffer = [CChar](repeating: 0, count: Self.processPathBufferSize)
         guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
-        return URL(fileURLWithPath: String(cString: buffer)).standardizedFileURL.path
+        let end = buffer.firstIndex(of: 0) ?? buffer.endIndex
+        let path = String(decoding: buffer[..<end].map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        return URL(fileURLWithPath: path).standardizedFileURL.path
     }
 
     private func updateServiceStates() {
