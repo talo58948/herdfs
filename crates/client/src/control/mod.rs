@@ -4,7 +4,7 @@ mod registry;
 mod server;
 
 pub(crate) use registry::{Registration, find_mount, only_mount};
-pub(crate) use server::serve;
+pub(crate) use server::{Guard, serve};
 
 use std::path::Path;
 

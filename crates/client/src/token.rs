@@ -19,6 +19,7 @@ const REFRESH_MARGIN: Duration = Duration::from_secs(30);
 #[derive(Serialize, Deserialize)]
 pub(crate) struct TokenFile {
     access_token: String,
+    #[cfg_attr(target_os = "macos", serde(default, skip_serializing))]
     refresh_token: String,
     expires_at: u64,
     client_id: String,
@@ -101,7 +102,10 @@ impl Stored {
 fn read(path: &Path) -> Result<Stored> {
     let text = fs::read_to_string(path)?;
     match serde_json::from_str(&text) {
-        Ok(token) => Ok(Stored::Login(token)),
+        Ok(mut token) => {
+            load_refresh(path, &mut token)?;
+            Ok(Stored::Login(token))
+        }
         Err(_) if !text.trim_start().starts_with('{') => Ok(Stored::Legacy(text.trim().to_owned())),
         Err(error) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error).into()),
     }
@@ -115,6 +119,7 @@ pub(crate) fn read_access_token(path: &Path) -> Result<String> {
 }
 
 pub(crate) fn write(path: &Path, token: &TokenFile) -> Result<()> {
+    store_refresh(path, &token.refresh_token)?;
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -133,11 +138,63 @@ pub(crate) fn write(path: &Path, token: &TokenFile) -> Result<()> {
 }
 
 pub(crate) fn remove(path: &Path) -> Result<()> {
+    remove_refresh(path)?;
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(Error::Io(error)),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn load_refresh(path: &Path, token: &mut TokenFile) -> Result<()> {
+    use security_framework::passwords::get_generic_password;
+
+    if !token.refresh_token.is_empty() {
+        write(path, token)?;
+        return Ok(());
+    }
+    let bytes = get_generic_password("herdfs", &path.to_string_lossy())
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    token.refresh_token = String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn load_refresh(_path: &Path, _token: &mut TokenFile) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn store_refresh(path: &Path, refresh: &str) -> Result<()> {
+    security_framework::passwords::set_generic_password(
+        "herdfs",
+        &path.to_string_lossy(),
+        refresh.as_bytes(),
+    )
+    .map_err(|error| std::io::Error::other(error.to_string()))?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn store_refresh(_path: &Path, _refresh: &str) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn remove_refresh(path: &Path) -> Result<()> {
+    const ITEM_NOT_FOUND: i32 = -25_300;
+    match security_framework::passwords::delete_generic_password("herdfs", &path.to_string_lossy()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.code() == ITEM_NOT_FOUND => Ok(()),
+        Err(error) => Err(std::io::Error::other(error.to_string()).into()),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn remove_refresh(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 pub(crate) fn default_path() -> anyhow::Result<PathBuf> {

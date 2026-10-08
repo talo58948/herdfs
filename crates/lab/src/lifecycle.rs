@@ -10,7 +10,7 @@ use herdfs_core::proto::{Perm, Request};
 use reqwest::blocking::Client as Http;
 
 use crate::authority::{Authority, Collection};
-use crate::client::{CACHE_BYTES, Client, ClientSpec};
+use crate::client::{CACHE_BYTES, Client, ClientSpec, Mount};
 use crate::issuer::Issuer;
 use crate::process::{self, Proc};
 use crate::store::{S3_HOST, Store};
@@ -22,11 +22,27 @@ use crate::{ADMIN, Lab, Profile, SPACE, Strategy, no_client};
 const PORT_TRIES: usize = 3;
 
 /// The clients of a lab.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct LabConfig {
     clients: Vec<ClientSpec>,
     on_tmpfs: bool,
     collection: Option<Collection>,
+    mount: Mount,
+}
+
+impl Default for LabConfig {
+    fn default() -> Self {
+        let mount = match env::var("LAB_MOUNT").as_deref() {
+            Ok("nfs") => Mount::Nfs,
+            _ => Mount::Fuse,
+        };
+        Self {
+            clients: Vec::new(),
+            on_tmpfs: false,
+            collection: None,
+            mount,
+        }
+    }
 }
 
 impl LabConfig {
@@ -51,6 +67,7 @@ impl LabConfig {
             profile,
             strategy,
             cache_bytes: CACHE_BYTES,
+            mount: self.mount,
         });
         self
     }

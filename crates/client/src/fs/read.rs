@@ -18,7 +18,13 @@ impl Space {
             .await
     }
 
-    async fn read_version(&self, file: Head, off: u64, len: u32, handle: &Handle) -> Result<Vec<u8>> {
+    pub(super) async fn read_version(
+        &self,
+        file: Head,
+        off: u64,
+        len: u32,
+        handle: &Handle,
+    ) -> Result<Vec<u8>> {
         let Some(file) = file else {
             return Ok(Vec::new());
         };

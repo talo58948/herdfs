@@ -22,6 +22,10 @@ impl Kernel {
         }
     }
 
+    pub fn root(&self) -> EntryId {
+        self.root
+    }
+
     /// Inode numbers are entry ids plus one, except that the root is always inode 1.
     pub fn ino(&self, entry: EntryId) -> InodeNo {
         InodeNo(if entry == self.root { 1 } else { entry.0 + 1 })

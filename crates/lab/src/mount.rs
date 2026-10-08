@@ -49,6 +49,16 @@ pub(crate) fn detach(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Force-detaches a loopback NFS mount after its server has stopped.
+pub(crate) fn detach_nfs(path: &Path) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    let status = Command::new("sudo").args(["umount", "-f"]).arg(path).status()?;
+    #[cfg(target_os = "macos")]
+    let status = Command::new("umount").arg("-f").arg(path).status()?;
+    ensure!(status.success(), "forced unmount of {}: {status}", path.display());
+    Ok(())
+}
+
 /// Aborts a stuck mount so blocked kernel requests return.
 pub fn abort_mount(path: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
