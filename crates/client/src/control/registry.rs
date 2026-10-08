@@ -39,7 +39,7 @@ impl Drop for Registered {
 
 pub(crate) fn find_mount(path: &Path) -> anyhow::Result<Registration> {
     let path = super::absolute(path)?;
-    registrations()?
+    registrations(false)?
         .into_iter()
         .filter(|mount| path.starts_with(&mount.mountpoint))
         .max_by_key(|mount| mount.mountpoint.as_os_str().len())
@@ -50,12 +50,12 @@ pub(crate) fn only_mount(path: Option<&Path>) -> anyhow::Result<Registration> {
     if let Some(path) = path {
         return find_mount(path);
     }
-    let mounts = registrations()?;
+    let mounts = registrations(true)?;
     ensure!(mounts.len() == 1, "expected one mounted space, found {}", mounts.len());
     Ok(mounts.into_iter().next().expect("length checked above"))
 }
 
-fn registrations() -> anyhow::Result<Vec<Registration>> {
+fn registrations(live_only: bool) -> anyhow::Result<Vec<Registration>> {
     let dir = directory()?;
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -73,7 +73,7 @@ fn registrations() -> anyhow::Result<Vec<Registration>> {
                 .with_context(|| format!("parsing {}", path.display()))
         })
         .filter(|registration| match registration {
-            Ok(mount) => process_exists(mount.pid),
+            Ok(mount) => !live_only || process_exists(mount.pid),
             Err(_) => true,
         })
         .collect()
