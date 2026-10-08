@@ -59,6 +59,7 @@ pub struct Lab {
     toxiproxy: Toxiproxy,
     store: Store,
     issuer: Issuer,
+    local_issuer: bool,
     store_port: u16,
     dir: TempDir,
 }

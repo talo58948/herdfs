@@ -27,6 +27,12 @@ pub(super) struct Verifier {
     refreshing: Mutex<()>,
 }
 
+pub(super) struct Authenticated {
+    pub(super) principal: Principal,
+    pub(super) subject: String,
+    pub(super) token_id: Option<String>,
+}
+
 #[derive(Default)]
 struct Keys {
     set: JwkSet,
@@ -39,6 +45,7 @@ struct Keys {
 #[derive(Deserialize)]
 struct Claims {
     sub: String,
+    jti: Option<String>,
     #[serde(default)]
     groups: Vec<String>,
 }
@@ -60,7 +67,7 @@ impl Verifier {
     }
 
     /// The caller named by the request's bearer token.
-    pub(super) async fn principal(&self, headers: &HeaderMap) -> Result<Principal, proto::Error> {
+    pub(super) async fn authenticate(&self, headers: &HeaderMap) -> Result<Authenticated, proto::Error> {
         let token = headers
             .get(AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
@@ -69,18 +76,18 @@ impl Verifier {
         // Fails for `alg: none`, which jsonwebtoken does not know.
         let header = decode_header(token).map_err(|error| unauthenticated(error.to_string()))?;
         let kid = header.kid.ok_or_else(|| unauthenticated("token has no key id"))?;
-        if let Ok(principal) = self.validate(token, &kid).await {
+        if let Ok(authenticated) = self.validate(token, &kid).await {
             if let Ok(_refreshing) = self.refreshing.try_lock() {
                 self.refresh().await;
             }
-            return Ok(principal);
+            return Ok(authenticated);
         }
         let _refreshing = self.refreshing.lock().await;
         self.refresh().await;
         self.validate(token, &kid).await
     }
 
-    async fn validate(&self, token: &str, kid: &str) -> Result<Principal, proto::Error> {
+    async fn validate(&self, token: &str, kid: &str) -> Result<Authenticated, proto::Error> {
         let key = self.key(kid).await?;
         // Pinning the key's family stops a token from picking a weaker algorithm.
         let mut validation = Validation::new_for_family(key.family());
@@ -91,9 +98,13 @@ impl Verifier {
         let claims = decode::<Claims>(token, &key, &validation)
             .map_err(|error| unauthenticated(error.to_string()))?
             .claims;
-        Ok(Principal {
-            user: format!("user:{}", claims.sub),
-            groups: claims.groups,
+        Ok(Authenticated {
+            principal: Principal {
+                user: format!("user:{}", claims.sub),
+                groups: claims.groups,
+            },
+            subject: claims.sub,
+            token_id: claims.jti,
         })
     }
 

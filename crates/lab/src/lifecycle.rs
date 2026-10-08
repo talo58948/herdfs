@@ -28,6 +28,7 @@ pub struct LabConfig {
     on_tmpfs: bool,
     collection: Option<Collection>,
     mount: Mount,
+    local_issuer: bool,
 }
 
 impl Default for LabConfig {
@@ -41,6 +42,7 @@ impl Default for LabConfig {
             on_tmpfs: false,
             collection: None,
             mount,
+            local_issuer: false,
         }
     }
 }
@@ -84,6 +86,12 @@ impl LabConfig {
         self
     }
 
+    /// Uses tokens issued by the authority instead of the test OIDC issuer.
+    pub fn local_issuer(mut self) -> Self {
+        self.local_issuer = true;
+        self
+    }
+
     /// Limits client `name`'s chunk cache to `bytes` instead of 1 GiB.
     pub fn cache_bytes(mut self, name: &str, bytes: u64) -> Self {
         let client = self.clients.iter_mut().find(|client| client.name == name);
@@ -103,7 +111,8 @@ impl Lab {
             lab.restart_authority()?;
             Ok(lab)
         })?;
-        lab.rpc(ADMIN, &Request::CreateSpace { space: SPACE.into() })?;
+        let admin = lab.token_for(ADMIN, &[])?;
+        lab.rpc_with(&admin, &Request::CreateSpace { space: SPACE.into() })?;
         for client in &lab.clients {
             let principal = format!("user:{}", client.spec.user);
             let grant = Request::SetAcl {
@@ -112,10 +121,13 @@ impl Lab {
                 principal,
                 perm: Some(Perm::Write),
             };
-            lab.rpc(ADMIN, &grant)?;
+            lab.rpc_with(&admin, &grant)?;
         }
-        for client in &mut lab.clients {
-            client.start(&lab.issuer, lab.authority.port)?;
+        for index in 0..lab.clients.len() {
+            let user = lab.clients[index].spec.user.clone();
+            let groups = lab.clients[index].spec.groups.clone();
+            let token = lab.token_for(&user, &groups)?;
+            lab.clients[index].start(&token, lab.authority.port)?;
         }
         Ok(lab)
     }
@@ -154,6 +166,7 @@ impl Lab {
         let store = Store::start(dir.path(), store_port, &http)?;
         let toxiproxy = Toxiproxy::start(dir.path(), toxiproxy_port, http.clone())?;
         let issuer = Issuer::start()?;
+        let local_issuer = config.local_issuer;
         let clients = (config.clients.into_iter().zip(&loopback[1..]))
             .map(|(spec, &ip)| Client::new(spec, ip, dir.path()))
             .collect::<Result<Vec<_>>>()?;
@@ -168,6 +181,7 @@ impl Lab {
             toxiproxy,
             store,
             issuer,
+            local_issuer,
             store_port,
             dir,
         })
@@ -182,7 +196,7 @@ impl Lab {
     /// `/v1/health` answers.
     pub fn restart_authority(&mut self) -> Result<()> {
         self.authority
-            .restart(self.dir.path(), self.store_port, &self.issuer)
+            .restart(self.dir.path(), self.store_port, &self.issuer, self.local_issuer)
     }
 
     /// SIGKILLs client `name`'s mount process and detaches its mount.
@@ -192,9 +206,12 @@ impl Lab {
 
     /// Mounts client `name` again, after killing it if it runs. Its cache and journal persist.
     pub fn restart_client(&mut self, name: &str) -> Result<()> {
+        let client = self.clients.iter().find(|client| client.spec.name == name);
+        let client = client.unwrap_or_else(|| no_client(name));
+        let token = self.token_for(&client.spec.user, &client.spec.groups)?;
         let client = self.clients.iter_mut().find(|client| client.spec.name == name);
         let client = client.unwrap_or_else(|| no_client(name));
-        client.start(&self.issuer, self.authority.port)
+        client.start(&token, self.authority.port)
     }
 
     /// Mounts client `name` on `space` from now on, such as a fork, after killing it if it runs.
@@ -214,6 +231,13 @@ impl Lab {
         let runner = Proc::spawn("agents", runner, &client.dir.join("agents.log"))?;
         self.agents.push(runner);
         Ok(())
+    }
+
+    fn token_for(&self, user: &str, groups: &[String]) -> Result<String> {
+        if self.local_issuer {
+            return self.authority.issue_token(self.dir.path(), user);
+        }
+        Ok(self.issuer.token(user, groups))
     }
 }
 

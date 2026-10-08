@@ -5,6 +5,7 @@
 mod acl;
 mod collect;
 mod db;
+mod local;
 mod namespace;
 pub mod server;
 mod spaces;
@@ -13,6 +14,7 @@ mod versions;
 use std::path::Path;
 
 pub use collect::{Collected, Policy};
+pub use local::LocalIssuer;
 use herdfs_core::{
     ChunkId, ChunkRef,
     proto::{self, ErrorCode, Kind, Perm, Request, Response},
