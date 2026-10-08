@@ -1,16 +1,17 @@
 # Quickstart
 
-This is the shortest path from a source checkout to one mounted space. The lab follows the same sequence: start the store, issuer and authority; create a space; set its ACL; then start a client.
+This is the shortest path from a source checkout to one mounted space. Start the store and authority, sign in, create a space, then mount it.
 
 ## Prerequisites
 
-- Linux with FUSE support, access to `/dev/fuse`, and `fusermount3` for unmounting.
+- Linux with FUSE support, access to `/dev/fuse`, and `fusermount3` for unmounting. macOS support is in progress.
 - A Rust toolchain with Cargo.
 - An existing bucket in an S3-compatible store. You need its internal endpoint, the endpoint clients can reach, region, access key and secret key.
-- An OIDC issuer with a discovery document and JWKS. Its signed JWTs must contain `iss`, `sub`, `aud` and `exp`; `aud` must match `--oidc-audience`. An optional `groups` array supplies group principals.
-- `curl` for the two setup RPCs below.
+- An OIDC issuer with discovery and JWKS documents. Its signed JWTs must contain `iss`, `sub`, `aud` and `exp`; `aud` must match `--oidc-audience`. An optional `groups` array supplies group principals.
+- A public OIDC client for `herdfs login`. It must allow authorization-code login with PKCE, loopback callbacks and the `openid offline_access` scopes.
+- A browser on the Linux machine for login.
 
-herdfs does not create the bucket or issue login tokens.
+herdfs does not create the bucket or configure the identity provider.
 
 ## Build
 
@@ -47,45 +48,37 @@ export AWS_SECRET_ACCESS_KEY='your-secret-key'
 
 `--s3-public-endpoint` is placed in presigned download URLs, so every client must be able to reach it. A healthy authority answers at `http://127.0.0.1:7000/v1/health`.
 
-## Create a space and grant access
+## Sign in and create a space
 
-There is no shipped administration CLI. Space creation and ACL changes use the authenticated JSON API. Put any valid creator JWT in `/path/to/creator.jwt` and a JWT whose `sub` is `alice` in `/path/to/alice.jwt`.
-
-Create `demo`; its creator receives `admin` on the root automatically:
+Sign in as the user who will mount the space. The command opens the issuer in a browser and saves renewable tokens at `~/.config/herdfs/token`:
 
 ```sh
-CREATOR_TOKEN="$(tr -d '\n' < /path/to/creator.jwt)"
-curl -fsS http://127.0.0.1:7000/v1/rpc \
-  -H "Authorization: Bearer $CREATOR_TOKEN" \
-  -H 'Content-Type: application/json' \
-  --data '{"op":"create_space","space":"demo"}'
+./target/release/herdfs login \
+  --issuer https://issuer.example \
+  --client-id herdfs-cli
 ```
 
-Grant Alice write access at the root. Root is encoded as the empty path:
+Create `demo`. Its creator receives `admin` on the root automatically:
 
 ```sh
-curl -fsS http://127.0.0.1:7000/v1/rpc \
-  -H "Authorization: Bearer $CREATOR_TOKEN" \
-  -H 'Content-Type: application/json' \
-  --data '{"op":"set_acl","space":"demo","path":"","principal":"user:alice","perm":"write"}'
+./target/release/herdfs create-space \
+  --authority http://127.0.0.1:7000 \
+  demo
 ```
 
-Permissions are `read`, `write` and `admin`. A principal is `user:` followed by the token subject, or `group:` followed by a name from the token's `groups` claim.
+Use `herdfs share` to grant another `user:` or `group:` principal access. Permissions are `read`, `write` and `admin`.
 
 ## Mount and use the space
 
-In another terminal, prepare local state and copy Alice's raw JWT into the token file:
+In another terminal, prepare local state and start the mount. It uses the saved login token by default:
 
 ```sh
 STATE=/tmp/herdfs-demo
 mkdir -p "$STATE/cache" "$STATE/journal" "$STATE/mnt"
-cp /path/to/alice.jwt "$STATE/token"
-chmod 600 "$STATE/token"
 
 ./target/release/herdfs mount \
   --authority http://127.0.0.1:7000 \
   --space demo \
-  --token-file "$STATE/token" \
   --cache "$STATE/cache" \
   --cache-bytes 1073741824 \
   --journal "$STATE/journal" \
@@ -100,4 +93,4 @@ cat /tmp/herdfs-demo/mnt/hello.txt
 fusermount3 -u /tmp/herdfs-demo/mnt
 ```
 
-The default access strategy is `rule`. See [Access strategies and Jev](strategies.md) for the alternatives and [the command reference](cli.md) for all flags.
+The default access decider is `rule`. See [Access plans and Jev](strategies.md) for alternatives and [the command reference](cli.md) for all commands and flags.

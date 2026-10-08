@@ -1,75 +1,110 @@
-# Access strategies and Jev
+# Access plans and Jev
 
-herdfs chooses a materialization strategy for each read-only file open. The choice changes when chunks are fetched and retained; it never changes file bytes or bypasses permissions. Every strategy reads the same committed version through the verified chunk cache, as required by [C8, P1 and P2](../CONTRACT.md).
+herdfs chooses an access plan for each read-only access. The plan changes when chunks are fetched and how long they resist eviction. It never changes file bytes or bypasses permissions. Every plan reads through the same verified chunk cache, as required by [C8, P1, P2 and P3](../CONTRACT.md).
 
-## Strategies
+Linux starts an access when a file is opened. macOS support is in progress.
 
-| Strategy | At open | Eviction |
+## Plan settings
+
+Each plan sets three things independently:
+
+| Setting | Values | Effect |
 |---|---|---|
-| `stream` | Starts no prefetch. Reads fetch only missing chunks that overlap the requested range. | Cached chunks are subject to the cache's least-recently-used limit. |
-| `fetch` | Starts a background prefetch of every chunk. Reads can proceed while it runs. | Cached chunks are subject to the least-recently-used limit. |
-| `pin` | Pins every chunk for that handle and starts a background prefetch of every chunk. | Pinned chunks are not evicted while the handle is open and may exceed `--cache-bytes`. They become eligible after close. |
+| Prefetch | `none`, `first`, `index`, `whole` | Fetch nothing, the first two chunks, the format's index regions, or the whole file when access starts. |
+| Read-ahead | `none`, `small`, `large` | After sequential reads begin, fetch no extra chunks, the next two chunks, or the next eight chunks. |
+| Keep | `no`, `yes` | Use normal cache eviction, or protect this version's cached chunks from eviction until the access ends. |
 
-A pinned handle follows the file when the client learns of a newer version, moving its pins to that version's chunks.
+Prefetch and read-ahead run in the background. Reads do not wait for either to finish. `keep=yes` does not fetch bytes by itself. Kept chunks for an access may take the cache over `--cache-bytes`; they become eligible for eviction when the access ends.
+
+## Named and explicit plans
+
+The three named plans remain as short forms:
+
+| Name | Prefetch | Read-ahead | Keep |
+|---|---|---|---|
+| `stream` | `none` | `none` | `no` |
+| `fetch` | `whole` | `none` | `no` |
+| `pin` | `whole` | `none` | `yes` |
+
+An explicit plan uses `PREFETCH/READ_AHEAD/KEEP` form. For example:
+
+```sh
+herdfs mount --strategy index/small/yes ...
+```
+
+The values are lowercase and follow the tables above.
 
 ## Local deciders
 
-Fixed deciders select `stream`, `fetch` or `pin` for every read-only open.
+A named or explicit plan applies the same settings to every read-only access.
 
-The `rule` decider selects `fetch` below exactly 64 MiB and `stream` at 64 MiB or above. It is the default and Jev's fallback.
+The default `rule` uses `whole/none/no` for files smaller than 64 MiB and `none/none/no` for files of 64 MiB or larger. This is also Jev's fallback.
 
-`chaos:SEED` makes a reproducible seeded random choice among all three strategies on each open. It exists to exercise strategy-independent behavior.
+`chaos:SEED` chooses each setting independently. The seed makes the sequence reproducible. Chaos exists to exercise plan-independent behavior.
+
+## Index discovery
+
+`prefetch=index` computes byte ranges in the client. Jev never supplies ranges.
+
+- Parquet uses the footer metadata when the leading and trailing `PAR1` markers are valid.
+- ZIP uses the range from the central directory to the end of the file.
+- MP4 uses a `moov` box found among the first four top-level boxes, beginning with an `ftyp` box.
+- Unknown or malformed input falls back to the first and last two chunks.
+
+The probe reads bounded headers and tails. The resulting chunks use the ordinary grant, hash verification and cache path.
 
 ## Jev
 
-Jev is TypeSafe's System One model, named `typesafe-ai/jev` in the request. It chooses one of `stream`, `fetch` or `pin` from the context of each read-only open.
+Jev uses the `typesafe-ai/jev` model. It asks three named `choice` questions in one request: `prefetch`, `read_ahead` and `keep`. Each question offers only that setting's valid values.
 
-The request's `state` contains exactly these fields:
+The request describes the access with these fields:
 
 | Field | Value sent |
 |---|---|
-| `program` | The opening process name read from `/proc/PID/comm`. |
-| `opened by this program` | `for the first time`, `once before`, or `several times in the last few minutes`. Repeats are counted for the same file entry and process name within five minutes. |
+| `program` | The opening process name. |
+| `opened by this program` | First access, once before, or several times in the last five minutes. |
 | `file extension` | The final path component's extension, or `none`. |
-| `file size` | Decimal megabytes phrased as `under a megabyte`, `a few megabytes`, `tens of megabytes`, `hundreds of megabytes`, or `thousands of megabytes`. |
-| `already cached` | After truncating the cached percentage: `none of it` at 0, `some of it` from 1 through 49, `most of it` from 50 through 98, and `all of it` from 99 through 100. |
-| `network round trip` | Authority round-trip time phrased as `under a millisecond`, `a few milliseconds`, `tens of milliseconds`, `hundreds of milliseconds`, or `thousands of milliseconds`. |
-| `time to download the whole file` | File size divided by recent measured throughput, phrased as `under a second`, `a few seconds`, `tens of seconds`, `hundreds of seconds`, or `thousands of seconds`. Before a measurement it assumes 10,000,000 bytes per second. |
-
-The typed question is a `choice` named `strategy`: "How should this file be read so that the program finishes soonest?" Its criteria are:
-
-- `stream`: "Download only the parts the program reads, as it reads them. Best when it reads a small part of a large file."
-- `fetch`: "Download the whole file in the background right away. Best when it reads most of the file once."
-- `pin`: "Download the whole file and keep it cached. Best when it reads the file repeatedly or must keep it available."
+| `file size` | A coarse decimal-megabyte magnitude. |
+| `already cached` | `none of it`, `some of it`, `most of it`, or `all of it`. |
+| `network round trip` | A coarse authority round-trip magnitude. |
+| `time to download the whole file` | A coarse estimate from measured throughput, or 10 MB/s before a measurement. |
 
 ### Non-blocking decisions
 
-`open` never waits for the model. Jev remembers answers by the complete phrased context for the life of the mount process:
+Access never waits for Jev.
 
-- A remembered confident answer applies immediately.
-- On a miss, the size rule applies immediately and one background request starts for that context.
-- Confidence of at least `0.3` is accepted. A lower-confidence answer is remembered as unsure, so the rule continues to apply.
-- The request times out after 2 seconds. Transport, HTTP, response-shape and timeout errors leave the rule in place; a later matching open may retry.
-- If the rule began with `stream`, a later confident `fetch` or `pin` answer starts that strategy only if the handle is still open.
+- A remembered confident value applies immediately for its setting.
+- Without one, that setting uses the rule immediately while one request runs for the complete phrased context.
+- Confidence of at least `0.3` is accepted. A missing, malformed or lower-confidence answer falls back to the rule for that setting only.
+- The request times out after 2 seconds. Transport, HTTP, invalid JSON and timeout errors leave all three rule values in place. A later matching access may retry after a request error.
+- A late confident answer affects only an access that is still open. It may add prefetch, read-ahead or retention, but cannot reduce work already selected.
 
-This is the availability boundary in P1 and P2: model latency and failure do not block access.
+This is the availability boundary in P1 and P2. Model latency and failure do not block access.
+
+## Explain the latest access
+
+`herdfs explain` reads the latest access record from a mounted file:
+
+```sh
+herdfs explain /mnt/demo/video.mp4
+```
+
+It prints JSON with the three settings, the source (`fixed`, `chaos`, `rule`, `jev` or `remembered`), Jev's answer when present, and bytes fetched for that access. It fails if the file has no recorded access since the mount started.
 
 ## Enabling Jev
 
-Mount with:
+On Linux, mount with:
 
 ```sh
-./target/release/herdfs mount \
+herdfs mount \
   --authority http://127.0.0.1:7000 \
   --space demo \
-  --token-file /tmp/herdfs-demo/token \
   --cache /tmp/herdfs-demo/cache \
   --cache-bytes 1073741824 \
   --journal /tmp/herdfs-demo/journal \
   --strategy jev \
   --jev-key-file /path/to/ai-gateway-key \
-  --jev-url https://ai-gateway.vercel.sh/v1/evaluate \
   /tmp/herdfs-demo/mnt
 ```
 
-`--jev-key-file` is required with `--strategy jev`; its trimmed contents are sent as a bearer key. `--jev-url` defaults to the URL shown above. The client posts the typed choice request for model `typesafe-ai/jev` to that endpoint.
+macOS support is in progress. `--jev-key-file` is required with `--strategy jev`; its trimmed contents are sent as a bearer key. `--jev-url` defaults to `https://ai-gateway.vercel.sh/v1/evaluate`.
