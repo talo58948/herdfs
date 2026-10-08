@@ -71,6 +71,25 @@ fn wait_ready(lab: &Lab, ready: bool) -> Result<Value> {
     }
 }
 
+fn wait_pinned_over_budget(lab: &Lab, path: &Path) -> Result<Value> {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        assert_eq!(command(lab, "pin", Some(path))?["ok"], true);
+        let status = wait_ready(lab, true)?;
+        if status["cache"]["used"]
+            .as_u64()
+            .is_some_and(|used| used > CACHE_BYTES)
+        {
+            return Ok(status);
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "kept root did not fill beyond its cache budget: {status}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn save(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = File::create(path)?;
     file.write_all(bytes)?;
@@ -107,14 +126,8 @@ fn kept_folder_survives_restart_follows_heads_and_becomes_evictable() -> Result<
         socket_request(&lab, &serde_json::json!({"op":"stats"}))?["ok"],
         true
     );
-    assert_eq!(command(&lab, "pin", Some(&pinned))?["ok"], true);
-    let ready = wait_ready(&lab, true)?;
+    let ready = wait_pinned_over_budget(&lab, &pinned)?;
     assert!(ready["kept"]["bytes"].as_u64().is_some_and(|bytes| bytes > 0));
-    assert!(
-        ready["cache"]["used"]
-            .as_u64()
-            .is_some_and(|used| used > CACHE_BYTES)
-    );
     assert_eq!(command(&lab, "file", Some(&pinned.join("one")))?["kept"], true);
 
     lab.restart_client("b")?;
