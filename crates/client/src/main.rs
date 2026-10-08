@@ -2,6 +2,9 @@
 
 use std::io::{self, IsTerminal};
 
+use std::path::PathBuf;
+
+use anyhow::Context;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -10,7 +13,9 @@ use tracing_subscriber::EnvFilter;
 #[command(version)]
 enum Command {
     /// Mounts a space and serves it until unmounted, SIGINT or SIGTERM.
-    Mount(herdfs_client::MountArgs),
+    Mount(Box<herdfs_client::MountArgs>),
+    /// Prints the latest access plan and fetched bytes for a mounted file.
+    Explain { path: PathBuf },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -21,6 +26,14 @@ fn main() -> anyhow::Result<()> {
         .with_ansi(ansi)
         .with_writer(io::stderr)
         .init();
-    let Command::Mount(args) = Command::parse();
-    herdfs_client::mount(&args)
+    match Command::parse() {
+        Command::Mount(args) => herdfs_client::mount(&args),
+        Command::Explain { path } => {
+            let value = xattr::get(&path, "user.herdfs.plan")?
+                .with_context(|| format!("{} has no completed access to explain", path.display()))?;
+            let json: serde_json::Value = serde_json::from_slice(&value)?;
+            println!("{}", serde_json::to_string_pretty(&json)?);
+            Ok(())
+        }
+    }
 }

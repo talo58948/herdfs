@@ -52,7 +52,7 @@ impl Space {
         };
         let attr = self.added(parent_id, &entry, asked);
         self.inodes.with(entry.id, |state| state.switch((None, true)));
-        let fh = self.register(Handle::new(entry.id, true, &self.inodes));
+        let fh = self.register(Handle::new(entry.id, true, None, &self.inodes));
         Ok((attr, fh))
     }
 

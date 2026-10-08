@@ -14,13 +14,13 @@ Plugins are separate programs that use a mount like any other program (the agent
 |---|---|---|
 | `crates/core` | lib | Protocol types, `SpacePath`, chunk ids and chunking. No I/O. |
 | `crates/authority` | lib + bin | `Authority`: a synchronous state machine over a `rusqlite::Connection`. `server`: axum, JWT validation, object store, URL signing. |
-| `crates/client` | lib + bin `herdfs` | Remote client, chunk cache, journal, access strategies, FUSE. |
+| `crates/client` | lib + bin `herdfs` | Remote client, chunk cache, journal, access plans, FUSE. |
 | `crates/agents` | bin `herdfs-agents` | Agents plugin runner. |
 | `crates/lab` | lib + tests | Test lab: MinIO, toxiproxy, test OIDC issuer, authority, clients. Scenario, fault and adversary suites. |
 
 ## Data flow
 
-**Read.** `open` → `Open` RPC returns the entry and its head version's chunk list. The client picks an access strategy (below). On `read(off, len)`, the client maps the range to chunk indices, serves cached chunks, and asks `Grant` for presigned URLs of missing ones. It downloads them straight from the object store, verifies each chunk's BLAKE3 hash, and caches it. The authority checks read permission at grant time. URLs expire after the grant TTL (60 s).
+**Read.** `open` → `Open` RPC returns the entry and its head version's chunk list. The client picks an access plan (below). On `read(off, len)`, the client maps the range to chunk indices, serves cached chunks, and asks `Grant` for presigned URLs of missing ones. It downloads them straight from the object store, verifies each chunk's BLAKE3 hash, and caches it. The authority checks read permission at grant time. URLs expire after the grant TTL (60 s).
 
 **Write.** A file opened for writing gets a local journal copy. The copy is materialized from the head version unless the open truncates or the file is new. On `close`, the client fsyncs the journal copy and returns. A background committer then chunks the copy, uploads chunks, and sends `Commit`. `fsync` waits for that commit and returns `EIO` if it fails. Until a commit is acknowledged, this client reads its own journal copy (read-your-writes).
 
@@ -54,17 +54,19 @@ Access to history follows S8: each ACL row records the highest committed version
 - Largest single `Grant`: 4,096 chunks.
 - A client that lost a commit's answer and stays offline longer than the longer of 30 days and `--retain-days`, plus the grace, may commit that write again when it returns, over newer saves.
 
-## Access strategies
+## Access plans
 
-Chosen once per open by a `Decider`, never per read:
+Each access independently chooses prefetch (`none`, format index, first two chunks, or whole),
+sequential read-ahead (`none`, two chunks, or eight chunks), and whether accessed chunks stay
+cached until that access ends. Index discovery reads bounded headers/tails and finds Parquet
+footers, ZIP central directories, or an MP4 `moov`; unexpected input falls back to the first and
+last two chunks. All bytes use the same grant, hash verification and cache path (C8, C9).
 
-| Strategy | At open | Eviction |
-|---|---|---|
-| `Stream` | nothing | LRU |
-| `Fetch` | prefetch every chunk in the background | LRU |
-| `Pin` | prefetch every chunk | never evicted while pinned |
-
-All strategies read through the same verified chunk cache, so they return identical bytes (C8). Deciders: fixed, size rule, chaos (seeded random, for tests), and Jev through Vercel AI Gateway. `open` never waits for Jev: it takes Jev's remembered answer for a similar open (the same process and extension, and the same phrases for size, cached share, recent opens, round trip and download time), or the size rule's choice while Jev is asked in the background. Errors, a 2 s timeout and low confidence leave the rule's choice (P2). A confident later answer upgrades a still-open Stream handle to Fetch or Pin.
+Fixed, size-rule and seeded-chaos deciders return a plan immediately. Jev asks the three settings
+as named `choice` questions in one request. A remembered setting applies immediately; otherwise
+that setting uses the rule while Jev runs. Failures, malformed answers, timeouts and low confidence
+fall back per setting. A late confident answer may only add work to a still-open access. `stream`,
+`fetch`, and `pin` remain names for `none/none/no`, `whole/none/no`, and `whole/none/yes`.
 
 ## Identity and permissions
 
@@ -97,7 +99,7 @@ herdfs-agents --mount DIR --host NAME --command 'codex exec --full-auto' [--max-
 Agents sessions live in `/.agents/<host>/<session>/`. The session holds `prompt` (and an optional `cwd` relative to the mount); the runner writes `status` (`running`, `done`, `failed: <reason>`) and `output`. Other hosts see `output` when the session ends, because a file becomes visible to them on close.
 Permission to spawn a session is write access at its session directory, and a grant on the host directory covers every session below it.
 
-Client observability: `getfattr -n user.herdfs.stats MOUNT` returns JSON counters: `bytes_fetched`, `chunks_fetched`, `cache_hits`, `grants`, `commits`, `pending_commits`, `decisions` per strategy, `jev_answers`, `jev_unsure`, `jev_errors`, and `round_trip_ms` to the authority.
+Client observability: `getfattr -n user.herdfs.stats MOUNT` returns JSON counters: `bytes_fetched`, `chunks_fetched`, `cache_hits`, `grants`, `commits`, `pending_commits`, `decisions` per plan setting, `jev_answers`, `jev_unsure`, `jev_errors`, and `round_trip_ms` to the authority. `herdfs explain PATH` reads `user.herdfs.plan` from the file and prints the latest access's settings, source, Jev confidence when present, and fetched bytes.
 
 ## Deliberately out of v0.1
 

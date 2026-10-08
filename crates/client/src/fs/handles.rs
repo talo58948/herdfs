@@ -3,7 +3,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
-use std::{fs::File, io, os::unix::fs::FileExt};
+use std::{fs::File, io};
 
 use fuser::{Errno, INodeNo, OpenFlags};
 use herdfs_core::ChunkId;
@@ -13,6 +13,7 @@ use tempfile::NamedTempFile;
 
 use super::{Inodes, OpenMode, Space};
 use crate::journal::Local;
+use crate::strategy::AccessRecord;
 use crate::{Result, lock, reader::Head};
 
 pub struct Handle {
@@ -26,12 +27,21 @@ pub struct Handle {
     synced: AtomicU64,
     /// Chunks this handle pinned, which release unpins.
     pub pinned: Mutex<Option<Vec<ChunkId>>>,
+    /// The read access this handle belongs to, absent for a write-only access.
+    pub access: Option<Arc<AccessRecord>>,
+    /// End of the preceding read, for per-handle sequential detection.
+    sequential_end: Mutex<Option<u64>>,
     /// Keeps the entry's local changes while the handle is open.
     inodes: Arc<Inodes>,
 }
 
 impl Handle {
-    pub(super) fn new(entry: EntryId, writable: bool, inodes: &Arc<Inodes>) -> Self {
+    pub(super) fn new(
+        entry: EntryId,
+        writable: bool,
+        access: Option<Arc<AccessRecord>>,
+        inodes: &Arc<Inodes>,
+    ) -> Self {
         let settles = inodes.make_local(entry, |local| {
             local.opened();
             local.settles().0
@@ -43,8 +53,18 @@ impl Handle {
             truncated: AtomicBool::new(false),
             synced: AtomicU64::new(settles),
             pinned: Mutex::new(None),
+            access,
+            sequential_end: Mutex::new(None),
             inodes: inodes.clone(),
         }
+    }
+
+    /// True from the second contiguous, nonempty read onward.
+    pub(super) fn sequential(&self, off: u64, len: usize) -> bool {
+        let mut end = lock(&self.sequential_end);
+        let sequential = len != 0 && *end == Some(off);
+        *end = Some(off.saturating_add(len as u64));
+        sequential
     }
 }
 
@@ -59,17 +79,24 @@ impl Space {
         let entry = self.entry_id(ino);
         let mode = OpenMode::for_open(flags);
         let (writable, truncate) = (mode.writes(), mode.truncates());
-        let handle = Handle::new(entry, writable, &self.inodes);
         let mut upgrade = None;
+        let mut file = None;
+        let mut access = None;
         // Every open for writing asks for write access, over pending changes too (C1, C4a).
         if writable {
             self.head(entry, mode).await?;
         } else {
-            let file = match self.changes(entry) {
+            file = match self.changes(entry) {
                 Some(_) => None,
                 None => self.head(entry, mode).await?,
             };
-            upgrade = self.start(file.as_ref(), pid, &handle);
+            let started = self.start(file.as_ref(), pid, entry);
+            access = Some(started.0);
+            upgrade = started.1;
+        }
+        let handle = Handle::new(entry, writable, access, &self.inodes);
+        if !writable {
+            self.begin(file.as_ref(), &handle);
         }
         if truncate {
             self.prepare(entry, true).await?;
@@ -80,23 +107,6 @@ impl Space {
             tokio::spawn(self.upgrade(fh, upgrade));
         }
         Ok(fh)
-    }
-
-    pub async fn read(self: Arc<Self>, fh: u64, off: u64, len: u32) -> Result<Vec<u8>> {
-        let handle = self.handle(fh)?;
-        // Changes pending on this client show through every handle (C1).
-        if let Some(copy) = self.changes(handle.entry) {
-            return Ok(read_copy(&copy, off, len)?);
-        }
-        self.usable(handle.entry, |file| self.read_version(file, off, len))
-            .await
-    }
-
-    async fn read_version(&self, file: Head, off: u64, len: u32) -> Result<Vec<u8>> {
-        match file {
-            Some(file) => self.reader.read(&file, off, len.into()).await,
-            None => Ok(Vec::new()),
-        }
     }
 
     /// Writes into the journal copy, which the first write makes.
@@ -169,7 +179,7 @@ impl Space {
         let handle = handle.filter(|handle| handle.writable);
         let entry = self.entry_id(ino);
         // A short open, which keeps the journal copy while it changes.
-        let _short = Handle::new(entry, true, &self.inodes);
+        let _short = Handle::new(entry, true, None, &self.inodes);
         if handle.is_none() {
             let mode = OpenMode::for_set_len(size);
             self.head(entry, mode).await?;
@@ -214,7 +224,7 @@ impl Space {
     }
 
     /// The entry's journal copy while it holds changes, which every read sees (C1).
-    fn changes(&self, entry: EntryId) -> Option<Arc<File>> {
+    pub(super) fn changes(&self, entry: EntryId) -> Option<Arc<File>> {
         self.inodes.local(entry, |local| local.copy()).flatten()
     }
 
@@ -274,14 +284,7 @@ impl Space {
         fh
     }
 
-    fn handle(&self, fh: u64) -> Result<Arc<Handle>> {
+    pub(super) fn handle(&self, fh: u64) -> Result<Arc<Handle>> {
         Ok(lock(&self.handles).get(&fh).cloned().ok_or(Errno::EBADF)?)
     }
-}
-
-fn read_copy(copy: &File, off: u64, len: u32) -> io::Result<Vec<u8>> {
-    let available = copy.metadata()?.len().saturating_sub(off);
-    let mut bytes = vec![0; u64::from(len).min(available) as usize];
-    copy.read_exact_at(&mut bytes, off)?;
-    Ok(bytes)
 }

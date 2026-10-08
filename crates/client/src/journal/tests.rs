@@ -8,7 +8,7 @@ use crate::cache::Cache;
 use crate::fs::{Kernel, Space};
 use crate::remote::Remote;
 use crate::stats::Stats;
-use crate::strategy::{Decider, Strategy};
+use crate::strategy::{AccessPlan, Decider};
 use herdfs_core::proto::VersionId;
 
 mod commits;
@@ -59,7 +59,7 @@ impl Mount {
             cache,
             journal.clone(),
             stats,
-            Decider::Fixed(Strategy::Stream),
+            Decider::Fixed(AccessPlan::STREAM),
             kernel,
             inodes.clone(),
         )

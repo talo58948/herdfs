@@ -33,7 +33,7 @@ pub struct MountArgs {
     /// Directory for writes not yet committed.
     #[arg(long)]
     journal: PathBuf,
-    /// stream, fetch, pin, rule (fetch below 64 MiB, else stream), chaos:SEED or jev.
+    /// A named plan, explicit PREFETCH/READ_AHEAD/KEEP, rule, chaos:SEED or jev.
     #[arg(long, default_value = "rule")]
     strategy: StrategyArg,
     /// File holding the Vercel AI Gateway key, for `--strategy jev`.

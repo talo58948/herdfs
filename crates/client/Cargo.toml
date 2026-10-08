@@ -26,6 +26,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+xattr.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

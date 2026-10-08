@@ -1,163 +1,259 @@
-//! Access strategies and the deciders that choose one per open (P1).
+//! Access plans and the deciders that choose one per access (P1-P3).
 
+mod arg;
 mod jev;
+mod record;
 
-use std::{str::FromStr, sync::Arc};
+use std::sync::Arc;
 
-use rand::{RngExt, SeedableRng, rngs::SmallRng};
+use rand::{RngExt, rngs::SmallRng};
+use serde::Serialize;
 use tokio::sync::oneshot;
 
+pub use arg::StrategyArg;
 pub use jev::Jev;
+pub(crate) use record::AccessRecord;
 
 use crate::stats::Stats;
 
-/// The rule decider fetches files below this size whole.
+/// The rule keeps today's cutoff: small files are fetched whole, larger files stream.
 const FETCH_BELOW: u64 = 64 << 20;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Strategy {
-    /// Fetch chunks as reads reach them.
-    Stream,
-    /// Prefetch every chunk in the background.
-    Fetch,
-    /// Prefetch every chunk and keep it cached while the file is open.
-    Pin,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Prefetch {
+    None,
+    First,
+    Index,
+    Whole,
 }
 
-impl Strategy {
-    pub const ALL: [Self; 3] = [Self::Stream, Self::Fetch, Self::Pin];
+impl Prefetch {
+    pub const ALL: [Self; 4] = [Self::None, Self::First, Self::Index, Self::Whole];
 
     pub fn name(self) -> &'static str {
         match self {
-            Self::Stream => "stream",
-            Self::Fetch => "fetch",
-            Self::Pin => "pin",
+            Self::None => "none",
+            Self::Index => "index",
+            Self::First => "first",
+            Self::Whole => "whole",
         }
     }
 }
 
-/// What a decider knows about one open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReadAhead {
+    None,
+    Small,
+    Large,
+}
+
+impl ReadAhead {
+    pub const ALL: [Self; 3] = [Self::None, Self::Small, Self::Large];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Small => "small",
+            Self::Large => "large",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Keep {
+    No,
+    Yes,
+}
+
+impl Keep {
+    pub const ALL: [Self; 2] = [Self::No, Self::Yes];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::No => "no",
+            Self::Yes => "yes",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct AccessPlan {
+    pub prefetch: Prefetch,
+    pub read_ahead: ReadAhead,
+    pub keep: Keep,
+}
+
+impl AccessPlan {
+    pub const STREAM: Self = Self::new(Prefetch::None, ReadAhead::None, Keep::No);
+    pub const FETCH: Self = Self::new(Prefetch::Whole, ReadAhead::None, Keep::No);
+    pub const PIN: Self = Self::new(Prefetch::Whole, ReadAhead::None, Keep::Yes);
+
+    pub const fn new(prefetch: Prefetch, read_ahead: ReadAhead, keep: Keep) -> Self {
+        Self {
+            prefetch,
+            read_ahead,
+            keep,
+        }
+    }
+
+    /// Applies a late decision without reducing any setting already in effect (P1).
+    pub fn merged(self, later: Self) -> Self {
+        Self::new(
+            add_prefetch(self.prefetch, later.prefetch),
+            self.read_ahead.max(later.read_ahead),
+            self.keep.max(later.keep),
+        )
+    }
+
+    pub fn name(self) -> String {
+        let (prefetch, read_ahead, keep) = (self.prefetch.name(), self.read_ahead.name(), self.keep.name());
+        format!("{prefetch}/{read_ahead}/{keep}")
+    }
+}
+
+fn add_prefetch(now: Prefetch, later: Prefetch) -> Prefetch {
+    match (now, later) {
+        (Prefetch::None, later) => later,
+        (now, Prefetch::None) => now,
+        (now, later) if now == later => now,
+        (Prefetch::Whole, _) | (_, Prefetch::Whole) => Prefetch::Whole,
+        // First and format-index regions need not overlap, so their representable union is whole.
+        _ => Prefetch::Whole,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanSource {
+    Remembered,
+    Rule,
+    Jev,
+    Fixed,
+    Chaos,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct Confidence {
+    pub prefetch: Option<f64>,
+    pub read_ahead: Option<f64>,
+    pub keep: Option<f64>,
+}
+
+/// What a decider knows about one access.
 #[derive(Clone, Debug)]
 pub struct OpenContext {
     pub size: u64,
     pub extension: Option<String>,
-    /// The opening process's name, from `/proc/<pid>/comm`.
+    /// The opening process's name, when the adapter can report one.
     pub comm: String,
     /// The fraction of the version's bytes already cached.
     pub coverage: f64,
-    /// Recent download throughput in bytes per second, if any download was measured yet.
+    /// Recent download throughput in bytes per second, if measured yet.
     pub throughput: Option<f64>,
     /// Recent round-trip time to the authority, in seconds.
     pub round_trip: f64,
-    /// How many times this process name opened the file in the last few minutes before.
+    /// Recent accesses by this process to the same entry.
     pub opens: u32,
 }
 
-/// A strategy Jev chose after an open that began with Stream.
-pub type Upgrade = oneshot::Receiver<Strategy>;
-/// The strategy for an open, and a later one from Jev if the open misses its answers.
-pub type Decision = (Strategy, Option<Upgrade>);
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Setting<T> {
+    pub value: T,
+    pub confidence: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct JevAnswer {
+    pub prefetch: Option<Setting<Prefetch>>,
+    pub read_ahead: Option<Setting<ReadAhead>>,
+    pub keep: Option<Setting<Keep>>,
+}
+
+impl JevAnswer {
+    pub fn plan(self, fallback: AccessPlan, confident: f64) -> AccessPlan {
+        AccessPlan::new(
+            accepted(self.prefetch, confident).map_or(fallback.prefetch, |answer| answer.value),
+            accepted(self.read_ahead, confident).map_or(fallback.read_ahead, |answer| answer.value),
+            accepted(self.keep, confident).map_or(fallback.keep, |answer| answer.value),
+        )
+    }
+
+    pub fn confidence(self) -> Confidence {
+        Confidence {
+            prefetch: self.prefetch.map(|answer| answer.confidence),
+            read_ahead: self.read_ahead.map(|answer| answer.confidence),
+            keep: self.keep.map(|answer| answer.confidence),
+        }
+    }
+
+    pub fn any_confident(self, confident: f64) -> bool {
+        [
+            self.prefetch.map(|answer| answer.confidence),
+            self.read_ahead.map(|answer| answer.confidence),
+            self.keep.map(|answer| answer.confidence),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|confidence| confidence >= confident)
+    }
+}
+
+fn accepted<T>(answer: Option<Setting<T>>, confident: f64) -> Option<Setting<T>> {
+    answer.filter(|answer| answer.confidence >= confident)
+}
+
+pub type Upgrade = oneshot::Receiver<JevAnswer>;
+
+pub struct Decision {
+    pub plan: AccessPlan,
+    pub source: PlanSource,
+    pub confidence: Option<Confidence>,
+    pub upgrade: Option<Upgrade>,
+}
 
 #[derive(Clone)]
 pub enum Decider {
-    Fixed(Strategy),
-    /// Fetch files under 64 MiB, stream larger ones.
+    Fixed(AccessPlan),
     Rule,
-    /// Seeded random choices, so tests reach every strategy reproducibly (C8).
     Chaos(SmallRng),
-    /// Jev's remembered answers, else the rule's choice while Jev is asked.
     Jev(Arc<Jev>, Arc<Stats>),
 }
 
 impl Decider {
     pub fn decide(&mut self, context: &OpenContext) -> Decision {
-        match self {
-            Self::Fixed(strategy) => (*strategy, None),
-            Self::Rule if context.size < FETCH_BELOW => (Strategy::Fetch, None),
-            Self::Rule => (Strategy::Stream, None),
-            Self::Chaos(rng) => (Strategy::ALL[rng.random_range(0..Strategy::ALL.len())], None),
-            Self::Jev(jev, stats) => jev.decide(context, stats),
+        let (plan, source) = match self {
+            Self::Fixed(plan) => (*plan, PlanSource::Fixed),
+            Self::Rule => (rule(context), PlanSource::Rule),
+            Self::Chaos(rng) => (chaos(rng), PlanSource::Chaos),
+            Self::Jev(jev, stats) => return jev.decide(context, stats),
+        };
+        Decision {
+            plan,
+            source,
+            confidence: None,
+            upgrade: None,
         }
     }
 }
 
-/// A `--strategy` value. Jev needs the key from `--jev-key-file` before it can decide.
-#[derive(Clone)]
-pub enum StrategyArg {
-    Decider(Decider),
-    Jev,
+pub fn rule(context: &OpenContext) -> AccessPlan {
+    if context.size < FETCH_BELOW {
+        AccessPlan::FETCH
+    } else {
+        AccessPlan::STREAM
+    }
 }
 
-impl FromStr for StrategyArg {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, String> {
-        let fixed = Strategy::ALL.into_iter().find(|s| s.name() == value);
-        let decider = match (value, fixed) {
-            ("jev", _) => return Ok(Self::Jev),
-            ("rule", _) => Decider::Rule,
-            (_, Some(strategy)) => Decider::Fixed(strategy),
-            _ => {
-                let unknown =
-                    || format!("unknown strategy {value:?}; use stream, fetch, pin, rule, chaos:SEED or jev");
-                let seed = value.strip_prefix("chaos:").ok_or_else(unknown)?;
-                let seed = seed.parse().map_err(|_| format!("invalid chaos seed {seed:?}"))?;
-                Decider::Chaos(SmallRng::seed_from_u64(seed))
-            }
-        };
-        Ok(Self::Decider(decider))
-    }
+fn chaos(rng: &mut SmallRng) -> AccessPlan {
+    AccessPlan::new(
+        Prefetch::ALL[rng.random_range(0..Prefetch::ALL.len())],
+        ReadAhead::ALL[rng.random_range(0..ReadAhead::ALL.len())],
+        Keep::ALL[rng.random_range(0..Keep::ALL.len())],
+    )
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn context(size: u64) -> OpenContext {
-        OpenContext {
-            size,
-            extension: None,
-            comm: "cat".into(),
-            coverage: 0.0,
-            throughput: None,
-            round_trip: 0.001,
-            opens: 0,
-        }
-    }
-
-    fn decider(value: &str) -> Decider {
-        let Ok(StrategyArg::Decider(decider)) = value.parse() else {
-            panic!("{value} names no local decider");
-        };
-        decider
-    }
-
-    // contract: P1
-    #[test]
-    fn rule_fetches_small_files_and_streams_large_ones() {
-        let mut rule = decider("rule");
-        assert_eq!(rule.decide(&context(FETCH_BELOW - 1)).0, Strategy::Fetch);
-        assert_eq!(rule.decide(&context(FETCH_BELOW)).0, Strategy::Stream);
-        assert_eq!(decider("pin").decide(&context(1)).0, Strategy::Pin);
-    }
-
-    // contract: P1, C8
-    #[test]
-    fn chaos_is_reproducible_and_reaches_every_strategy() {
-        let picks = |seed: &str| {
-            let mut chaos = decider(seed);
-            (0..64).map(|_| chaos.decide(&context(1)).0).collect::<Vec<_>>()
-        };
-        let first = picks("chaos:7");
-        assert_eq!(first, picks("chaos:7"));
-        assert_ne!(first, picks("chaos:8"));
-        assert!(Strategy::ALL.iter().all(|strategy| first.contains(strategy)));
-    }
-
-    #[test]
-    fn names_jev_and_rejects_unknown_strategies() {
-        assert!(matches!("jev".parse(), Ok(StrategyArg::Jev)));
-        assert!("chaos:x".parse::<StrategyArg>().is_err());
-        assert!("jevv".parse::<StrategyArg>().is_err());
-    }
-}
+mod tests;

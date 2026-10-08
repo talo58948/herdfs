@@ -13,10 +13,8 @@ use fuser::{
 use tokio::runtime::Handle as Runtime;
 
 use super::answer::Answer;
-use super::{Space, namespace::AttrChange};
+use super::{Space, namespace::AttrChange, xattr};
 use crate::{Result, unix_ms};
-
-const STATS_XATTR: &str = "user.herdfs.stats";
 
 pub struct Fuse {
     space: Arc<Space>,
@@ -260,16 +258,11 @@ impl Filesystem for Fuse {
     }
 
     fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
-        if ino != INodeNo::ROOT || name != STATS_XATTR {
-            return reply.error(Errno::NO_XATTR);
-        }
-        xattr(&self.space.stats(), size, reply);
+        xattr::get(&self.space, ino, name, size, reply);
     }
 
     fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
-        let names = [STATS_XATTR.as_bytes(), b"\0"].concat();
-        let names = if ino == INodeNo::ROOT { &names[..] } else { &[] };
-        xattr(names, size, reply);
+        xattr::list(&self.space, ino, size, reply);
     }
 
     fn create(
@@ -284,14 +277,5 @@ impl Filesystem for Fuse {
     ) {
         let child = (parent, name.to_owned());
         self.spawn(reply, self.space().create(child, mode & !umask, flags, req.pid()));
-    }
-}
-
-/// Answers an xattr read: its size when asked with size 0, ERANGE when it does not fit.
-fn xattr(value: &[u8], size: u32, reply: ReplyXattr) {
-    match u32::try_from(value.len()) {
-        Ok(len) if size == 0 => reply.size(len),
-        Ok(len) if len <= size => reply.data(value),
-        _ => reply.error(Errno::ERANGE),
     }
 }
