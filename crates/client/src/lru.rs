@@ -24,6 +24,10 @@ impl<K, V> Default for Lru<K, V> {
 }
 
 impl<K: Clone + Eq + Hash, V: Clone> Lru<K, V> {
+    pub fn total(&self) -> u64 {
+        self.total
+    }
+
     pub fn insert(&mut self, key: K, len: u64, value: V) {
         self.clock += 1;
         self.put(key, len, value, self.clock);

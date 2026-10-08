@@ -8,7 +8,7 @@ use std::fs::{self, File, Permissions};
 use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 
 use herdfs_core::proto::{EntryId, Version};
@@ -24,6 +24,36 @@ mod rejected;
 
 pub use commit::Committer;
 pub use local::Local;
+
+#[derive(Default)]
+pub struct CommitGate {
+    paused: AtomicBool,
+    resumed: Notify,
+}
+
+impl CommitGate {
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::Release);
+    }
+
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::Release);
+        self.resumed.notify_waiters();
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
+    }
+
+    pub async fn wait(&self) {
+        while self.is_paused() {
+            let resumed = self.resumed.notified();
+            if self.is_paused() {
+                resumed.await;
+            }
+        }
+    }
+}
 
 const REJECTED: &str = "rejected";
 /// How long a seal waits for a newer one before its commit starts, so a burst of closes commits
@@ -127,6 +157,27 @@ fn write_record(path: &Path, record: &Record) -> io::Result<()> {
     file.write_all(&serde_json::to_vec(record)?)?;
     file.sync_all()?;
     fs::rename(&temp, path)
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::CommitGate;
+    use std::sync::Arc;
+
+    // contract: U1
+    #[tokio::test]
+    async fn paused_commit_gate_waits_until_resume() {
+        let gate = Arc::new(CommitGate::default());
+        gate.pause();
+        let waiting = tokio::spawn({
+            let gate = gate.clone();
+            async move { gate.wait().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        gate.resume();
+        waiting.await.unwrap();
+    }
 }
 
 #[cfg(test)]

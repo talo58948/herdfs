@@ -58,6 +58,8 @@ impl Mount {
             remote,
             cache,
             journal.clone(),
+            Arc::new(crate::journal::CommitGate::default()),
+            None,
             stats,
             Decider::Fixed(AccessPlan::STREAM),
             kernel,

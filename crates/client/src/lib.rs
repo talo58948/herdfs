@@ -1,9 +1,11 @@
 //! The herdfs client: a FUSE mount of one space, backed by the authority.
 
 mod cache;
+mod control;
 mod error;
 mod fs;
 mod journal;
+mod kept;
 mod lru;
 mod mount;
 mod reader;

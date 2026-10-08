@@ -2,6 +2,7 @@
 //! so that no decision about an entry is taken from a path another entry now holds (C7), and
 //! the kernel's references to its inode. What is known of each entry is its `Inode`.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -130,6 +131,34 @@ impl Inodes {
         table.nodes.values().filter(local).count()
     }
 
+    pub(crate) fn pending(&self) -> Vec<(EntryId, Option<SpacePath>, u64)> {
+        let table = lock(&self.0);
+        table
+            .nodes
+            .iter()
+            .filter_map(|(id, node)| {
+                let bytes = node.inode.state().local.as_ref()?.pending_bytes()?;
+                Some((*id, node.bound.as_ref().map(|(path, _)| path.clone()), bytes))
+            })
+            .collect()
+    }
+
+    pub(crate) fn keep(&self, entries: HashSet<EntryId>) {
+        let mut table = lock(&self.0);
+        table.kept = entries;
+        table.evict();
+    }
+
+    pub(crate) fn children(&self, parent: &SpacePath) -> Vec<Entry> {
+        let table = lock(&self.0);
+        table
+            .nodes
+            .values()
+            .filter(|node| node.bound.as_ref().is_some_and(|(path, _)| path.parent().as_ref() == Some(parent)))
+            .filter_map(|node| node.inode.state().cached().map(|(entry, ..)| entry))
+            .collect()
+    }
+
     /// Whether the entry is known, and its path with when it was confirmed, if it has one.
     pub fn bound(&self, id: EntryId) -> Option<Option<(SpacePath, Instant)>> {
         lock(&self.0).nodes.get(&id).map(|node| node.bound.clone())
@@ -159,6 +188,7 @@ impl Inodes {
             table.by_path.remove(&path);
         }
         table.idle.remove(&id);
+        table.kept.remove(&id);
     }
 
     /// Binds the entry this client's rename moved and moves its known subtree with it (C7).

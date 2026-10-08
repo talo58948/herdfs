@@ -27,7 +27,8 @@ use herdfs_core::proto::{Entry, EntryId, Kind};
 
 use crate::{
     cache::Cache,
-    journal::{Journal, Local},
+    journal::{CommitGate, Journal, Local},
+    kept::Kept,
     lru::Lru,
     reader::Reader,
     remote::Remote,
@@ -114,6 +115,8 @@ pub struct Space {
     reader: Arc<Reader>,
     pub(crate) cache: Arc<Cache>,
     pub(crate) journal: Arc<Journal>,
+    pub(crate) commits: Arc<CommitGate>,
+    pub(crate) kept: Option<Arc<Kept>>,
     pub(crate) stats: Arc<Stats>,
     decider: Mutex<Decider>,
     /// Latest access record by entry, retained after its handle closes for `explain`.
@@ -135,6 +138,8 @@ impl Space {
         remote: Arc<Remote>,
         cache: Arc<Cache>,
         journal: Arc<Journal>,
+        commits: Arc<CommitGate>,
+        kept: Option<Arc<Kept>>,
         stats: Arc<Stats>,
         decider: Decider,
         kernel: Arc<Kernel>,
@@ -146,6 +151,8 @@ impl Space {
             reader,
             cache,
             journal,
+            commits,
+            kept,
             stats,
             decider: Mutex::new(decider),
             accesses: Mutex::default(),
@@ -229,5 +236,20 @@ impl Space {
     pub fn stats(&self) -> Vec<u8> {
         self.stats
             .json(self.inodes.count(Local::is_pending), self.remote.round_trip.get())
+    }
+
+    pub(crate) fn explain_path(&self, path: &herdfs_core::SpacePath) -> Option<Vec<u8>> {
+        let entry = self.inodes.at(path)?.0;
+        self.explain(entry.id)
+    }
+
+    pub(crate) fn pending(&self) -> Vec<(String, u64)> {
+        self.inodes
+            .pending()
+            .into_iter()
+            .map(|(entry, path, bytes)| {
+                (path.map_or_else(|| format!("entry-{}", entry.0), |path| path.as_str().to_owned()), bytes)
+            })
+            .collect()
     }
 }

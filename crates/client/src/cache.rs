@@ -25,6 +25,11 @@ struct Index {
 impl Cache {
     /// Opens the cache in `dir`, indexing the chunks an earlier run left there.
     pub fn open(dir: PathBuf, capacity: u64) -> io::Result<Self> {
+        Self::open_pinned(dir, capacity, &[])
+    }
+
+    /// Opens the cache while protecting durable pins before startup eviction runs.
+    pub(crate) fn open_pinned(dir: PathBuf, capacity: u64, pinned: &[ChunkId]) -> io::Result<Self> {
         fs::create_dir_all(&dir)?;
         let mut found = Vec::new();
         for item in fs::read_dir(&dir)? {
@@ -41,6 +46,9 @@ impl Cache {
         let mut index = Index::default();
         for (_, id, len) in found {
             index.chunks.insert(id, len, ());
+        }
+        for id in pinned {
+            *index.pins.entry(*id).or_default() += 1;
         }
         let index = Mutex::new(index);
         let cache = Self { dir, capacity, index };
@@ -91,6 +99,10 @@ impl Cache {
 
     pub fn capacity(&self) -> u64 {
         self.capacity
+    }
+
+    pub(crate) fn used(&self) -> u64 {
+        lock(&self.index).chunks.total()
     }
 
     pub fn contains(&self, id: &ChunkId) -> bool {
@@ -233,5 +245,22 @@ mod tests {
         assert_eq!(cache.coverage(&[ChunkRef { id, len: 100 }]), 1.0);
         drop(cache);
         assert!(!Cache::open(dir.path().into(), 50).unwrap().contains(&id));
+    }
+
+    // contract: P4, C10
+    #[test]
+    fn durable_pins_are_protected_before_startup_eviction() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kept, bytes) = chunk(1);
+        let (other, other_bytes) = chunk(2);
+        let cache = Cache::open(dir.path().into(), 1 << 20).unwrap();
+        cache.put(&kept, &bytes).unwrap();
+        cache.put(&other, &other_bytes).unwrap();
+        drop(cache);
+
+        let cache = Cache::open_pinned(dir.path().into(), 50, &[kept]).unwrap();
+        assert!(cache.contains(&kept));
+        assert!(!cache.contains(&other));
+        assert!(cache.used() > cache.capacity());
     }
 }

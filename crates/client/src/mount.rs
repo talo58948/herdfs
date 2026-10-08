@@ -9,6 +9,9 @@ use {
         cache::Cache,
         fs::{Fuse, Inodes, Kernel, Space},
         journal::{Committer, Journal},
+        kept::Kept,
+        journal::CommitGate,
+        reader::Reader,
         remote::Remote,
         stats::Stats,
         strategy::{Decider, Jev},
@@ -70,6 +73,15 @@ pub fn mount(args: &MountArgs) -> anyhow::Result<()> {
     let mut session = Session::new(fuse, &args.mountpoint, &config)
         .with_context(|| format!("mounting at {}", args.mountpoint.display()))?;
     Fuse::mounted(&space, session.notifier());
+    let journal = crate::control::absolute(&args.journal)?;
+    let state = journal.parent().context("--journal must have a parent directory")?;
+    let _control = crate::control::serve(
+        space.clone(),
+        &args.authority,
+        &args.space,
+        &args.mountpoint,
+        state,
+    )?;
     let mut unmounter = session.unmount_callable();
     runtime.spawn(async move {
         tokio::select! {
@@ -102,7 +114,11 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
     let remote = Remote::new(authority, space, token_file, &args.resolve)?;
     let root = remote.stat(SpacePath::root()).await;
     let root = root.with_context(|| format!("cannot reach space {space:?} at the authority {authority}"))?;
-    let cache = Cache::open(args.cache.clone(), args.cache_bytes)
+    let journal = crate::control::absolute(&args.journal)?;
+    let state = journal.parent().context("--journal must have a parent directory")?;
+    let pins = state.join("pins.json");
+    let loaded = Kept::load(&pins).with_context(|| format!("reading pin state {}", pins.display()))?;
+    let cache = Cache::open_pinned(args.cache.clone(), args.cache_bytes, &loaded.pinned)
         .with_context(|| format!("opening cache {}", args.cache.display()))?;
     let inodes = Arc::new(Inodes::default());
     let (journal, woken) = Journal::open(args.journal.clone(), &inodes)
@@ -120,10 +136,22 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
         }
     };
     let kernel = Arc::new(Kernel::new(root.id));
+    let kept = Arc::new(Kept::new(
+        pins,
+        loaded,
+        remote.clone(),
+        Arc::new(Reader::new(remote.clone(), cache.clone(), stats.clone())),
+        cache.clone(),
+        inodes.clone(),
+        kernel.clone(),
+    ));
+    let commits = Arc::new(CommitGate::default());
     let space = Arc::new(Space::new(
         remote.clone(),
         cache,
         journal,
+        commits,
+        Some(kept.clone()),
         stats,
         decider,
         kernel,
@@ -131,6 +159,7 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
     ));
     let committer = Committer { space: space.clone() };
     tokio::spawn(Arc::new(committer).run(woken));
+    tokio::spawn(kept.run());
     tokio::spawn(remote.probe());
     Ok(space)
 }

@@ -83,12 +83,17 @@ impl Reader {
         let fetch = |missing| self.fetch(file, missing, Some(fetched));
         let missing: Vec<usize> = indices
             .into_iter()
-            .filter(|&index| !self.cache.contains(&file.id(index)))
+            .filter(|&index| self.cache.get(&file.id(index)).is_none())
             .collect();
         for batch in missing.chunks(DOWNLOADS) {
             self.load(file, batch, fetch).await?;
         }
         Ok(())
+    }
+
+    pub(crate) async fn cache_all(&self, file: &OpenVersion) -> Result<()> {
+        let fetched = AtomicU64::new(0);
+        self.prefetch_indices(file, 0..file.version.chunks.len(), &fetched).await
     }
 
     /// Writes all of `file` to `out`, to start a journal copy from it.

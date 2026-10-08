@@ -48,6 +48,7 @@ impl Remote {
         let deadline = body.map_or(RPC_TIMEOUT, upload);
         let response = tokio::time::timeout(deadline, self.exchange(request)).await;
         let response = response.unwrap_or(Err(Error::TimedOut));
+        self.link.record_connection(&response);
         if body.is_none() || !matches!(response, Err(Error::TimedOut | Error::Network(_))) {
             self.link.record(&response);
         }

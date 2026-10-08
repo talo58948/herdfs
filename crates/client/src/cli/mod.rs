@@ -8,7 +8,6 @@ use std::io::{self, IsTerminal};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use herdfs_core::proto::Perm;
 use tracing_subscriber::EnvFilter;
@@ -32,6 +31,18 @@ enum Command {
     Mount(Box<MountArgs>),
     /// Prints the latest access plan and fetched bytes for a mounted file.
     Explain { path: PathBuf },
+    /// Reports a running mount's connection, uploads, cache and kept paths.
+    Status { mountpoint: Option<PathBuf> },
+    /// Keeps a file or directory downloaded.
+    Pin { path: PathBuf },
+    /// Stops keeping a file or directory downloaded.
+    Unpin { path: PathBuf },
+    /// Stops starting new commits.
+    Pause { mountpoint: Option<PathBuf> },
+    /// Starts commits again.
+    Resume { mountpoint: Option<PathBuf> },
+    /// Reports Finder badge state for a path.
+    File { path: PathBuf },
     /// Signs in through an OIDC issuer.
     Login(login::LoginArgs),
     /// Deletes the saved login tokens.
@@ -176,7 +187,13 @@ pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Mount(args) => crate::mount(&args),
-        Command::Explain { path } => explain(&path),
+        Command::Explain { path } => control_path("explain", &path, cli.json),
+        Command::Status { mountpoint } => control_mount("status", mountpoint.as_deref(), cli.json),
+        Command::Pin { path } => control_path("pin", &path, cli.json),
+        Command::Unpin { path } => control_path("unpin", &path, cli.json),
+        Command::Pause { mountpoint } => control_mount("pause", mountpoint.as_deref(), cli.json),
+        Command::Resume { mountpoint } => control_mount("resume", mountpoint.as_deref(), cli.json),
+        Command::File { path } => control_path("file", &path, cli.json),
         Command::Logout(args) => crate::token::remove(&args.path()?).map_err(Into::into),
         Command::Login(args) => runtime()?.block_on(login::login(&args, cli.json)),
         Command::Authority(command) => runtime()?.block_on(commands::run(command, cli.json)),
@@ -187,11 +204,30 @@ fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Runtime::new()?)
 }
 
-fn explain(path: &Path) -> anyhow::Result<()> {
-    let value = xattr::get(path, "user.herdfs.plan")?
-        .with_context(|| format!("{} has not been read since mount", path.display()))?;
-    let json: serde_json::Value = serde_json::from_slice(&value)?;
-    println!("{}", serde_json::to_string_pretty(&json)?);
+fn control_path(op: &str, path: &Path, json: bool) -> anyhow::Result<()> {
+    let registration = crate::control::find_mount(path)?;
+    let path = crate::control::absolute(path)?;
+    let request = serde_json::json!({"op":op,"path":path});
+    control(registration, request, json)
+}
+
+fn control_mount(op: &str, mountpoint: Option<&Path>, json: bool) -> anyhow::Result<()> {
+    let registration = crate::control::only_mount(mountpoint)?;
+    control(registration, serde_json::json!({"op":op}), json)
+}
+
+fn control(
+    registration: crate::control::Registration,
+    request: serde_json::Value,
+    json: bool,
+) -> anyhow::Result<()> {
+    let response = runtime()?.block_on(crate::control::request(&registration, request))?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+    } else {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    }
+    anyhow::ensure!(response["ok"] == true, "{}", response["error"].as_str().unwrap_or("control request failed"));
     Ok(())
 }
 

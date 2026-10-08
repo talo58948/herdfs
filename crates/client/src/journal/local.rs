@@ -57,6 +57,10 @@ impl Local {
         self.pending.is_some()
     }
 
+    pub fn pending_bytes(&self) -> Option<u64> {
+        self.pending.as_ref()?.1.metadata().ok().map(|meta| meta.len())
+    }
+
     /// Nothing holds it any more: no handle, and nothing left to commit.
     pub fn idle(&self) -> bool {
         self.handles == 0 && self.working.is_none() && self.pending.is_none() && !self.committing
