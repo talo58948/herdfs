@@ -33,7 +33,7 @@ pub use crate::authority::Collection;
 pub use crate::chunks::overlapping_chunk_bytes;
 pub use crate::client::Strategy;
 pub use crate::issuer::{AUDIENCE, BadToken, Issuer};
-pub use crate::jev::{FakeJev, JevMode};
+pub use crate::jev::{FakeJev, JevAnswers, JevMode};
 pub use crate::lifecycle::LabConfig;
 pub use crate::process::run;
 pub use crate::store::STORE_CREDENTIALS;
@@ -86,6 +86,11 @@ impl Lab {
     /// Client `name`'s counters, from the `user.herdfs.stats` xattr on its mount root.
     pub fn stats(&self, name: &str) -> Result<Value> {
         self.client(name).stats()
+    }
+
+    /// The latest access plan for `path`, from its `user.herdfs.plan` xattr.
+    pub fn plan(&self, name: &str, path: &Path) -> Result<Value> {
+        self.client(name).plan(path)
     }
 
     /// Waits until client `name` has committed, or set aside, every write closed so far.

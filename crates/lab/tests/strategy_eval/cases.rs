@@ -3,69 +3,139 @@
 
 use std::fs::{self, File};
 use std::io::Write;
-use std::iter;
-use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
-use herdfs_client::Strategy;
+use herdfs_client::{AccessPlan, Keep, Prefetch, ReadAhead};
 use herdfs_lab::{Lab, LabConfig, Profile, Strategy as Mounted};
-use rand::{Rng, RngExt, SeedableRng, rngs::SmallRng};
+use rand::{Rng, SeedableRng, rngs::SmallRng};
+
+use crate::workload::Workload;
 
 pub const MIB: u64 = 1 << 20;
 const SIZES_MIB: [u64; 3] = [4, 64, 512];
 pub const LINKS: [Profile; 2] = [Profile::Lan, Profile::Wan];
+pub const PLANS: [(&str, AccessPlan, Mounted); 24] = [
+    ("stream", AccessPlan::STREAM, Mounted::Stream),
+    (
+        "none-none-yes",
+        AccessPlan::new(Prefetch::None, ReadAhead::None, Keep::Yes),
+        Mounted::Plan("none/none/yes"),
+    ),
+    (
+        "none-small-no",
+        AccessPlan::new(Prefetch::None, ReadAhead::Small, Keep::No),
+        Mounted::Plan("none/small/no"),
+    ),
+    (
+        "none-small-yes",
+        AccessPlan::new(Prefetch::None, ReadAhead::Small, Keep::Yes),
+        Mounted::Plan("none/small/yes"),
+    ),
+    (
+        "read-ahead",
+        AccessPlan::new(Prefetch::None, ReadAhead::Large, Keep::No),
+        Mounted::Plan("none/large/no"),
+    ),
+    (
+        "none-large-yes",
+        AccessPlan::new(Prefetch::None, ReadAhead::Large, Keep::Yes),
+        Mounted::Plan("none/large/yes"),
+    ),
+    (
+        "first-none-no",
+        AccessPlan::new(Prefetch::First, ReadAhead::None, Keep::No),
+        Mounted::Plan("first/none/no"),
+    ),
+    (
+        "first-none-yes",
+        AccessPlan::new(Prefetch::First, ReadAhead::None, Keep::Yes),
+        Mounted::Plan("first/none/yes"),
+    ),
+    (
+        "first-small-no",
+        AccessPlan::new(Prefetch::First, ReadAhead::Small, Keep::No),
+        Mounted::Plan("first/small/no"),
+    ),
+    (
+        "first-small-yes",
+        AccessPlan::new(Prefetch::First, ReadAhead::Small, Keep::Yes),
+        Mounted::Plan("first/small/yes"),
+    ),
+    (
+        "first-large-no",
+        AccessPlan::new(Prefetch::First, ReadAhead::Large, Keep::No),
+        Mounted::Plan("first/large/no"),
+    ),
+    (
+        "first-large-yes",
+        AccessPlan::new(Prefetch::First, ReadAhead::Large, Keep::Yes),
+        Mounted::Plan("first/large/yes"),
+    ),
+    (
+        "index",
+        AccessPlan::new(Prefetch::Index, ReadAhead::None, Keep::No),
+        Mounted::Plan("index/none/no"),
+    ),
+    (
+        "index-none-yes",
+        AccessPlan::new(Prefetch::Index, ReadAhead::None, Keep::Yes),
+        Mounted::Plan("index/none/yes"),
+    ),
+    (
+        "index-small-no",
+        AccessPlan::new(Prefetch::Index, ReadAhead::Small, Keep::No),
+        Mounted::Plan("index/small/no"),
+    ),
+    (
+        "index-small-yes",
+        AccessPlan::new(Prefetch::Index, ReadAhead::Small, Keep::Yes),
+        Mounted::Plan("index/small/yes"),
+    ),
+    (
+        "index-large-no",
+        AccessPlan::new(Prefetch::Index, ReadAhead::Large, Keep::No),
+        Mounted::Plan("index/large/no"),
+    ),
+    (
+        "index-large-yes",
+        AccessPlan::new(Prefetch::Index, ReadAhead::Large, Keep::Yes),
+        Mounted::Plan("index/large/yes"),
+    ),
+    ("fetch", AccessPlan::FETCH, Mounted::Fetch),
+    ("pin", AccessPlan::PIN, Mounted::Pin),
+    (
+        "whole-small-no",
+        AccessPlan::new(Prefetch::Whole, ReadAhead::Small, Keep::No),
+        Mounted::Plan("whole/small/no"),
+    ),
+    (
+        "whole-small-yes",
+        AccessPlan::new(Prefetch::Whole, ReadAhead::Small, Keep::Yes),
+        Mounted::Plan("whole/small/yes"),
+    ),
+    (
+        "whole-large-no",
+        AccessPlan::new(Prefetch::Whole, ReadAhead::Large, Keep::No),
+        Mounted::Plan("whole/large/no"),
+    ),
+    (
+        "whole-large-yes",
+        AccessPlan::new(Prefetch::Whole, ReadAhead::Large, Keep::Yes),
+        Mounted::Plan("whole/large/yes"),
+    ),
+];
 /// Strategies within this factor of the fastest time tie, and the one that fetched fewer bytes wins.
 const TIE: f64 = 1.1;
-
-#[derive(Clone, Copy, Debug)]
-pub enum Workload {
-    Head,
-    Read,
-    ReadThrice,
-    Random,
-}
-
-impl Workload {
-    const ALL: [Self; 4] = [Self::Head, Self::Read, Self::ReadThrice, Self::Random];
-
-    /// The process that opens the file.
-    pub fn comm(self) -> &'static str {
-        match self {
-            Self::Head => "head",
-            Self::Read | Self::ReadThrice => "sha256sum",
-            Self::Random => "dd",
-        }
-    }
-
-    /// A shell script that reads `file`, of `mib` MiB, this way.
-    fn script(self, file: &Path, mib: u64) -> String {
-        let file = file.display();
-        let mut rng = SmallRng::seed_from_u64(mib);
-        let random_read = || {
-            let skip = rng.random_range(0..mib);
-            format!("dd if={file} of=/dev/null bs=1M count=1 skip={skip} status=none")
-        };
-        match self {
-            Self::Head => format!("head -c 65536 {file} >/dev/null"),
-            Self::Read => format!("sha256sum {file} >/dev/null"),
-            Self::ReadThrice => format!("for i in 1 2 3; do sha256sum {file} >/dev/null; done"),
-            Self::Random => iter::repeat_with(random_read)
-                .take(20)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        }
-    }
-}
 
 /// A workload on one file over one link, with each strategy's wall time and bytes fetched.
 pub struct Case {
     pub mib: u64,
     pub workload: Workload,
     pub link: Profile,
-    pub seconds: [f64; 3],
-    pub bytes: [u64; 3],
+    pub seconds: Vec<f64>,
+    pub bytes: Vec<u64>,
     /// Seconds, as a fresh client of the link measures it by its first open.
     pub round_trip: f64,
 }
@@ -76,18 +146,21 @@ impl Case {
     }
 
     /// The fastest strategy, or of those that tie with it, the one that fetched the fewest bytes.
-    pub fn best(&self) -> Strategy {
-        let fastest = self.seconds.into_iter().fold(f64::INFINITY, f64::min);
-        let mut ranked = Strategy::ALL;
-        ranked.sort_by_key(|&strategy| {
-            let index = strategy as usize;
-            (self.seconds[index] > fastest * TIE, self.bytes[index])
-        });
-        ranked[0]
+    pub fn best(&self) -> AccessPlan {
+        let fastest = self.seconds.iter().copied().fold(f64::INFINITY, f64::min);
+        let mut ranked: Vec<usize> = (0..PLANS.len()).collect();
+        ranked.sort_by_key(|&index| (self.seconds[index] > fastest * TIE, self.bytes[index]));
+        PLANS[ranked[0]].1
     }
 
-    pub fn regret(&self, strategy: Strategy) -> f64 {
-        self.seconds[strategy as usize] / self.seconds[self.best() as usize]
+    pub fn regret(&self, plan: AccessPlan) -> f64 {
+        let Some(index) = PLANS.iter().position(|(_, fixed, _)| *fixed == plan) else {
+            panic!("R5 did not measure {}", plan.name());
+        };
+        let Some(best) = PLANS.iter().position(|(_, fixed, _)| *fixed == self.best()) else {
+            panic!("R5's best plan was not measured");
+        };
+        self.seconds[index] / self.seconds[best]
     }
 }
 
@@ -105,14 +178,13 @@ pub fn measure_all() -> Result<Vec<Case>> {
             mib,
             workload,
             link,
-            seconds: [0.0; 3],
-            bytes: [0; 3],
+            seconds: vec![0.0; PLANS.len()],
+            bytes: vec![0; PLANS.len()],
             round_trip,
         };
-        for strategy in Strategy::ALL {
-            let client = client(link, strategy);
-            (case.seconds[strategy as usize], case.bytes[strategy as usize]) =
-                measure(&mut lab, &client, &case)?;
+        for (index, (name, _, _)) in PLANS.iter().enumerate() {
+            let client = client(link, name);
+            (case.seconds[index], case.bytes[index]) = measure(&mut lab, &client, &case)?;
         }
         eprintln!(
             "{}: {:.2?} s, {:?} bytes, {round_trip:.4} s round trip",
@@ -130,22 +202,14 @@ fn start_lab() -> Result<Lab> {
     // On tmpfs: the files and caches of this lab outgrow the CI host's spare disk.
     let config = LabConfig::default().on_tmpfs();
     let mut config = config.client("writer", "alice", &[], Profile::Lan, Mounted::Stream);
-    for (link, strategy) in LINKS
-        .into_iter()
-        .flat_map(|link| Strategy::ALL.map(|strategy| (link, strategy)))
-    {
-        let mounted = match strategy {
-            Strategy::Stream => Mounted::Stream,
-            Strategy::Fetch => Mounted::Fetch,
-            Strategy::Pin => Mounted::Pin,
-        };
-        config = config.client(&client(link, strategy), "alice", &[], link, mounted);
+    for (link, strategy) in LINKS.into_iter().flat_map(|link| PLANS.map(|plan| (link, plan))) {
+        config = config.client(&client(link, strategy.0), "alice", &[], link, strategy.2);
     }
     Lab::start(config)
 }
 
-fn client(link: Profile, strategy: Strategy) -> String {
-    format!("{link:?}-{}", strategy.name()).to_lowercase()
+fn client(link: Profile, plan: &str) -> String {
+    format!("{link:?}-{plan}").to_lowercase()
 }
 
 fn file_name(mib: u64) -> String {
@@ -197,7 +261,7 @@ fn stop_cold(lab: &mut Lab, client: &str) -> Result<()> {
 /// The round trip, in seconds, that a fresh client of `link` has measured when it first opens
 /// the file of `mib` MiB, as its stats report it.
 fn round_trip(lab: &mut Lab, link: Profile, mib: u64) -> Result<f64> {
-    let client = client(link, Strategy::Stream);
+    let client = client(link, "stream");
     lab.restart_client(&client)?;
     File::open(lab.mount_path(&client).join(file_name(mib)))?;
     let millis = lab.stats(&client)?["round_trip_ms"].as_f64();

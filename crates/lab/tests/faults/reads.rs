@@ -94,8 +94,17 @@ fn f5_every_strategy_reads_the_same_bytes_over_a_bad_link() -> Result<()> {
         readers.into_iter().try_for_each(join)
     })?;
     for (name, _) in READERS {
-        let decided = lab.stats(name)?["decisions"][name].as_u64();
-        assert!(decided >= Some(1), "{name} reads with its strategy");
+        let stats = lab.stats(name)?;
+        let (setting, value) = match name {
+            "stream" => ("prefetch", "none"),
+            "fetch" => ("prefetch", "whole"),
+            "pin" => ("keep", "yes"),
+            _ => unreachable!(),
+        };
+        assert!(
+            stats["decisions"][setting][value].as_u64() >= Some(1),
+            "{name} reads with its plan"
+        );
     }
     Ok(())
 }
@@ -143,11 +152,12 @@ fn f7_a_small_cache_evicts_under_load_and_serves_only_the_right_bytes() -> Resul
         .sum::<Result<u64>>()?;
     assert!(cached <= SMALL_CACHE, "the cache holds {cached} bytes");
     let stats = lab.stats("reader")?;
-    for (strategy, _) in READERS {
-        assert!(
-            stats["decisions"][strategy].as_u64() >= Some(1),
-            "no {strategy} open"
-        );
+    for setting in ["prefetch", "read_ahead", "keep"] {
+        let decisions = stats["decisions"][setting]
+            .as_object()
+            .context("setting decisions")?;
+        let total: u64 = decisions.values().filter_map(|count| count.as_u64()).sum();
+        assert!(total >= FILES as u64, "no {setting} decisions");
     }
     Ok(())
 }
