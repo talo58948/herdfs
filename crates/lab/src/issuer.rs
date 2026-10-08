@@ -34,9 +34,10 @@ MC4CAQAwBQYDK2VwBCIEIBP07PlepLfvlKZqgy6JhKsWVMTh/6B+w2gP1/Cem1JL
 -----END PRIVATE KEY-----";
 /// `{"alg":"none","typ":"JWT"}`, base64url.
 const NONE_HEADER: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0";
+const LOGIN_SUB: &str = "login";
 /// Long enough to outlast any test run.
 const TOKEN_TTL: Duration = Duration::from_secs(24 * 3600);
-const LOGIN_TTL: Duration = Duration::from_secs(5);
+const LOGIN_TTL: Duration = Duration::from_secs(35);
 const REFRESH_TTL: Duration = Duration::from_secs(120);
 
 #[derive(Clone)]
@@ -44,8 +45,8 @@ struct AppState {
     url: String,
     key: Arc<EncodingKey>,
     codes: Arc<Mutex<HashMap<String, Code>>>,
-    refresh: Arc<Mutex<HashMap<String, String>>>,
-    refreshes: Arc<AtomicU64>,
+    refresh_tokens: Arc<Mutex<HashMap<String, String>>>,
+    refresh_count: Arc<AtomicU64>,
 }
 
 struct Code {
@@ -83,7 +84,7 @@ pub struct Issuer {
     url: String,
     key: Arc<EncodingKey>,
     rogue: EncodingKey,
-    refreshes: Arc<AtomicU64>,
+    refresh_count: Arc<AtomicU64>,
     /// Serves discovery and the JWKS until the issuer is dropped.
     _runtime: Runtime,
 }
@@ -97,13 +98,13 @@ impl Issuer {
         let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0"))?;
         let url = format!("http://{}", listener.local_addr()?);
         let key = Arc::new(EncodingKey::from_ed_pem(KEY.as_bytes())?);
-        let refreshes = Arc::new(AtomicU64::new(0));
+        let refresh_count = Arc::new(AtomicU64::new(0));
         let state = AppState {
             url: url.clone(),
             key: key.clone(),
             codes: Arc::default(),
-            refresh: Arc::default(),
-            refreshes: refreshes.clone(),
+            refresh_tokens: Arc::default(),
+            refresh_count: refresh_count.clone(),
         };
         let app = Router::new()
             .route("/.well-known/openid-configuration", get(discovery))
@@ -116,7 +117,7 @@ impl Issuer {
             url,
             key,
             rogue: EncodingKey::from_ed_pem(ROGUE_KEY.as_bytes())?,
-            refreshes,
+            refresh_count,
             _runtime: runtime,
         })
     }
@@ -129,8 +130,8 @@ impl Issuer {
         sign(&self.claims(sub, groups), &self.key)
     }
 
-    pub fn refreshes(&self) -> u64 {
-        self.refreshes.load(Ordering::Relaxed)
+    pub fn refresh_count(&self) -> u64 {
+        self.refresh_count.load(Ordering::Relaxed)
     }
 
     pub(crate) fn bad_token(&self, sub: &str, kind: BadToken) -> String {
@@ -211,6 +212,13 @@ async fn authorize(
     if get("response_type")? != "code" || get("code_challenge_method")? != "S256" {
         return Err(StatusCode::BAD_REQUEST);
     }
+    let scope = get("scope")?;
+    if !["openid", "offline_access"]
+        .into_iter()
+        .all(|wanted| scope.split_whitespace().any(|scope| scope == wanted))
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let redirect_uri = get("redirect_uri")?;
     let state_parameter = get("state")?;
     let code = format!("{:032x}", rand::random::<u128>());
@@ -218,7 +226,7 @@ async fn authorize(
         challenge: get("code_challenge")?,
         client_id: get("client_id")?,
         redirect_uri: redirect_uri.clone(),
-        sub: "login".into(),
+        sub: LOGIN_SUB.into(),
     };
     lock(&state.codes).insert(code.clone(), grant);
     let mut redirect = reqwest::Url::parse(&redirect_uri).map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -234,7 +242,7 @@ async fn token(
 ) -> Result<Json<Value>, StatusCode> {
     match form.get("grant_type").map(String::as_str) {
         Some("authorization_code") => authorization_code(&state, &form),
-        Some("refresh_token") => refresh_token(&state, &form),
+        Some("refresh_token") => refresh_token(&state, &form).await,
         _ => Err(StatusCode::BAD_REQUEST),
     }
 }
@@ -251,18 +259,20 @@ fn authorization_code(state: &AppState, form: &HashMap<String, String>) -> Resul
         return Err(StatusCode::BAD_REQUEST);
     }
     let refresh = format!("{:032x}", rand::random::<u128>());
-    lock(&state.refresh).insert(refresh.clone(), grant.sub.clone());
+    lock(&state.refresh_tokens).insert(refresh.clone(), grant.sub.clone());
     Ok(tokens(state, &grant.sub, &refresh, LOGIN_TTL))
 }
 
-fn refresh_token(state: &AppState, form: &HashMap<String, String>) -> Result<Json<Value>, StatusCode> {
+async fn refresh_token(state: &AppState, form: &HashMap<String, String>) -> Result<Json<Value>, StatusCode> {
     let refresh = form.get("refresh_token").ok_or(StatusCode::BAD_REQUEST)?;
-    let sub = lock(&state.refresh)
-        .get(refresh)
-        .cloned()
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let sub = lock(&state.refresh_tokens)
+        .remove(refresh)
         .ok_or(StatusCode::BAD_REQUEST)?;
-    state.refreshes.fetch_add(1, Ordering::Relaxed);
-    Ok(tokens(state, &sub, refresh, REFRESH_TTL))
+    let next = format!("{:032x}", rand::random::<u128>());
+    lock(&state.refresh_tokens).insert(next.clone(), sub.clone());
+    state.refresh_count.fetch_add(1, Ordering::Relaxed);
+    Ok(tokens(state, &sub, &next, REFRESH_TTL))
 }
 
 fn tokens(state: &AppState, sub: &str, refresh: &str, ttl: Duration) -> Json<Value> {

@@ -54,13 +54,12 @@ impl Remote {
         response
     }
 
-    /// Sends with the current token. On 401 it re-reads the token file and tries once more,
-    /// so a refreshed token takes effect without a remount.
+    /// Sends with the current token. On 401 it forces one refresh and tries once more.
     async fn exchange(&self, request: impl Fn(&str) -> RequestBuilder) -> Result<reqwest::Response> {
-        let token = self.token.access(false).await?;
+        let token = self.token.access(&self.http, false).await?;
         let mut response = request(&token).send().await?;
         if response.status() == StatusCode::UNAUTHORIZED {
-            let fresh = self.token.access(true).await?;
+            let fresh = self.token.access(&self.http, true).await?;
             response = request(&fresh).send().await?;
         }
         let status = response.status();

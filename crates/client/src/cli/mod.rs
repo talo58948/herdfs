@@ -6,11 +6,11 @@ mod output;
 
 use std::io::{self, IsTerminal};
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use herdfs_core::proto::{Perm, VersionId};
+use herdfs_core::proto::Perm;
 use tracing_subscriber::EnvFilter;
 
 use crate::MountArgs;
@@ -36,6 +36,12 @@ enum Command {
     Login(login::LoginArgs),
     /// Deletes the saved login tokens.
     Logout(TokenArgs),
+    #[command(flatten)]
+    Authority(AuthorityCommand),
+}
+
+#[derive(Subcommand)]
+enum AuthorityCommand {
     /// Prints the authenticated principal and groups.
     Whoami(ConnectArgs),
     /// Lists spaces reachable by the authenticated principal.
@@ -62,14 +68,22 @@ enum Command {
     Purge(PathArgs),
 }
 
-#[derive(Clone, Args)]
+#[derive(Args)]
 struct TokenArgs {
     /// Login token file.
-    #[arg(long, default_value_os_t = crate::token::default_path())]
-    token_file: PathBuf,
+    #[arg(long)]
+    token_file: Option<PathBuf>,
 }
 
-#[derive(Clone, Args)]
+impl TokenArgs {
+    fn path(&self) -> anyhow::Result<PathBuf> {
+        self.token_file
+            .clone()
+            .map_or_else(crate::token::default_path, Ok)
+    }
+}
+
+#[derive(Args)]
 struct ConnectArgs {
     /// Authority base URL.
     #[arg(long)]
@@ -99,9 +113,7 @@ struct PathArgs {
 #[derive(Args)]
 struct ShowArgs {
     #[command(flatten)]
-    path: PathArgs,
-    #[arg(long)]
-    version: u64,
+    version: VersionArgs,
     /// Writes bytes to FILE instead of standard output.
     #[arg(short, long)]
     output: Option<PathBuf>,
@@ -165,9 +177,9 @@ pub fn run() -> anyhow::Result<()> {
     match cli.command {
         Command::Mount(args) => crate::mount(&args),
         Command::Explain { path } => explain(&path),
-        Command::Logout(args) => crate::token::remove(&args.token_file).map_err(Into::into),
+        Command::Logout(args) => crate::token::remove(&args.path()?).map_err(Into::into),
         Command::Login(args) => runtime()?.block_on(login::login(&args, cli.json)),
-        command => runtime()?.block_on(commands::run(command, cli.json)),
+        Command::Authority(command) => runtime()?.block_on(commands::run(command, cli.json)),
     }
 }
 
@@ -175,16 +187,12 @@ fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Runtime::new()?)
 }
 
-fn explain(path: &PathBuf) -> anyhow::Result<()> {
+fn explain(path: &Path) -> anyhow::Result<()> {
     let value = xattr::get(path, "user.herdfs.plan")?
         .with_context(|| format!("{} has not been read since mount", path.display()))?;
     let json: serde_json::Value = serde_json::from_slice(&value)?;
     println!("{}", serde_json::to_string_pretty(&json)?);
     Ok(())
-}
-
-fn version(id: u64) -> VersionId {
-    VersionId(id)
 }
 
 fn parse_resolve(value: &str) -> Result<(String, IpAddr), String> {

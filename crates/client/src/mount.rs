@@ -30,8 +30,8 @@ pub struct MountArgs {
     #[arg(long)]
     space: String,
     /// Login token file, refreshed shortly before expiry.
-    #[arg(long, default_value_os_t = crate::token::default_path())]
-    token_file: PathBuf,
+    #[arg(long)]
+    token_file: Option<PathBuf>,
     /// Chunk cache directory.
     #[arg(long)]
     cache: PathBuf,
@@ -92,9 +92,14 @@ pub fn mount(_args: &MountArgs) -> anyhow::Result<()> {
 
 #[cfg(target_os = "linux")]
 async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
-    let (authority, space, token_file) = (&args.authority, &args.space, &args.token_file);
-    let remote = Remote::new(authority, space, token_file.clone(), &args.resolve)
+    let (authority, space) = (&args.authority, &args.space);
+    let token_file = args
+        .token_file
+        .clone()
+        .map_or_else(crate::token::default_path, Ok)?;
+    crate::token::read_access_token(&token_file)
         .with_context(|| format!("reading token file {}", token_file.display()))?;
+    let remote = Remote::new(authority, space, token_file, &args.resolve)?;
     let root = remote.stat(SpacePath::root()).await;
     let root = root.with_context(|| format!("cannot reach space {space:?} at the authority {authority}"))?;
     let cache = Cache::open(args.cache.clone(), args.cache_bytes)

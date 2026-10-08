@@ -3,7 +3,7 @@ use std::fs;
 use anyhow::{Result, bail};
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{Request, Response};
-use herdfs_lab::{ADMIN, Lab, LabConfig, Profile, SPACE, Strategy};
+use herdfs_lab::{ADMIN, Lab, LabConfig, Links, Profile, SPACE, Strategy};
 
 use super::support;
 
@@ -67,6 +67,30 @@ fn every_authority_command_uses_the_real_protocol_and_enforcement() -> Result<()
         ],
     )?;
     assert_eq!(fs::read(&shown)?, b"three");
+    fs::write(&shown, b"keep")?;
+    lab.cut("a", Links::Store)?;
+    let failed = support::command(
+        &lab,
+        "a",
+        &late_token,
+        &[
+            "show",
+            SPACE,
+            "notes.txt",
+            "--version",
+            &expected[0].id.0.to_string(),
+            "--output",
+            shown.to_str().unwrap_or_default(),
+        ],
+    )?
+    .output()?;
+    assert!(!failed.status.success());
+    assert_eq!(
+        fs::read(&shown)?,
+        b"keep",
+        "a failed show preserves its destination"
+    );
+    lab.restore("a", Links::Store)?;
 
     call(&lab, &admin_token, &["revoke", SPACE, "notes.txt", "user:late"])?;
     let revoked = support::command(

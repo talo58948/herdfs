@@ -1,10 +1,10 @@
 //! OIDC authorization code login with PKCE and a loopback callback.
 
 use std::io::{self, Write};
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
-use anyhow::{Context, ensure};
+use anyhow::{Context, bail};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use clap::Args;
@@ -13,7 +13,8 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use crate::token::{self, TokenFile};
+use super::TokenArgs;
+use crate::token;
 
 #[derive(Args)]
 pub(super) struct LoginArgs {
@@ -23,9 +24,8 @@ pub(super) struct LoginArgs {
     /// Public OIDC client id.
     #[arg(long)]
     client_id: String,
-    /// Login token file.
-    #[arg(long, default_value_os_t = token::default_path())]
-    token_file: PathBuf,
+    #[command(flatten)]
+    token: TokenArgs,
 }
 
 #[derive(Deserialize)]
@@ -34,14 +34,8 @@ struct Discovery {
     token_endpoint: String,
 }
 
-#[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    refresh_token: String,
-    expires_in: u64,
-}
-
 pub(super) async fn login(args: &LoginArgs, json: bool) -> anyhow::Result<()> {
+    let token_file = args.token.path()?;
     let issuer = args.issuer.trim_end_matches('/');
     let discovery = reqwest::get(format!("{issuer}/.well-known/openid-configuration"))
         .await?
@@ -50,15 +44,15 @@ pub(super) async fn login(args: &LoginArgs, json: bool) -> anyhow::Result<()> {
         .await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let redirect = format!("http://{}/callback", listener.local_addr()?);
-    let verifier = random_urlsafe(32);
+    let verifier = random_urlsafe();
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-    let state = random_urlsafe(24);
+    let state = random_urlsafe();
     let mut authorize = reqwest::Url::parse(&discovery.authorization_endpoint)?;
     authorize.query_pairs_mut().extend_pairs([
         ("response_type", "code"),
         ("client_id", args.client_id.as_str()),
         ("redirect_uri", redirect.as_str()),
-        ("scope", "openid"),
+        ("scope", "openid offline_access"),
         ("state", state.as_str()),
         ("code_challenge", challenge.as_str()),
         ("code_challenge_method", "S256"),
@@ -70,78 +64,93 @@ pub(super) async fn login(args: &LoginArgs, json: bool) -> anyhow::Result<()> {
         io::stdout().flush()?;
     }
     open_browser(authorize.as_str());
-    let code = callback(&listener, &state).await?;
-    let response = reqwest::Client::new()
-        .post(&discovery.token_endpoint)
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("code", code.as_str()),
-            ("redirect_uri", redirect.as_str()),
-            ("client_id", args.client_id.as_str()),
-            ("code_verifier", verifier.as_str()),
-        ])
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<TokenResponse>()
-        .await?;
-    token::write(
-        &args.token_file,
-        &TokenFile {
-            access_token: response.access_token,
-            refresh_token: response.refresh_token,
-            expires_at: token::expiry(response.expires_in),
-            issuer: issuer.to_owned(),
-            client_id: args.client_id.clone(),
-            token_endpoint: discovery.token_endpoint,
-        },
-    )?;
+    let (mut callback, code) = tokio::time::timeout(Duration::from_secs(300), callback(&listener, &state))
+        .await
+        .context("timed out waiting for the OIDC callback")??;
+    let form = [
+        ("grant_type", "authorization_code"),
+        ("code", code.as_str()),
+        ("redirect_uri", redirect.as_str()),
+        ("client_id", args.client_id.as_str()),
+        ("code_verifier", verifier.as_str()),
+    ];
+    let http = reqwest::Client::new();
+    let token = token::exchange(&http, &discovery.token_endpoint, &form, None).await?;
+    token::write(&token_file, &token)?;
+    reply(&mut callback, "200 OK", "herdfs signed in\n").await?;
     if json {
-        super::output::json(&serde_json::json!({"token_file": args.token_file}))?;
+        super::output::json(&serde_json::json!({"token_file": token_file}))?;
     } else {
         println!("signed in");
     }
     Ok(())
 }
 
-async fn callback(listener: &TcpListener, expected_state: &str) -> anyhow::Result<String> {
-    let (mut stream, _) = listener.accept().await?;
-    let mut request = vec![0; 8192];
-    let read = stream.read(&mut request).await?;
-    let request = std::str::from_utf8(&request[..read])?;
-    let target = request
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .context("loopback callback lacked a request target")?;
-    let url = reqwest::Url::parse(&format!("http://127.0.0.1{target}"))?;
-    let parameter = |name| {
-        url.query_pairs()
-            .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
-    };
-    let state = parameter("state").context("OIDC callback lacked state")?;
-    ensure!(state == expected_state, "OIDC state did not match");
-    let code = parameter("code").context("OIDC callback lacked a code")?;
-    stream
-        .write_all(
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 20\r\n\r\nherdfs signed in\n",
-        )
-        .await?;
-    Ok(code)
+async fn callback(
+    listener: &TcpListener,
+    expected_state: &str,
+) -> anyhow::Result<(tokio::net::TcpStream, String)> {
+    loop {
+        let (mut stream, _) = listener.accept().await?;
+        let mut request = vec![0; 8192];
+        let read = stream.read(&mut request).await?;
+        let request = std::str::from_utf8(&request[..read])?;
+        let Some(target) = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+        else {
+            reply(&mut stream, "400 Bad Request", "bad callback request\n").await?;
+            continue;
+        };
+        let url = reqwest::Url::parse(&format!("http://127.0.0.1{target}"))?;
+        if url.path() != "/callback" {
+            reply(&mut stream, "404 Not Found", "not found\n").await?;
+            continue;
+        }
+        let parameter = |name| {
+            url.query_pairs()
+                .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
+        };
+        if parameter("state").as_deref() != Some(expected_state) {
+            reply(&mut stream, "400 Bad Request", "OIDC state did not match\n").await?;
+            continue;
+        }
+        if let Some(error) = parameter("error") {
+            let description = parameter("error_description");
+            reply(&mut stream, "400 Bad Request", "sign in failed\n").await?;
+            bail!(
+                "issuer returned {error}{}",
+                description.map_or(String::new(), |text| format!(": {text}"))
+            );
+        }
+        let Some(code) = parameter("code") else {
+            reply(&mut stream, "400 Bad Request", "OIDC callback lacked a code\n").await?;
+            continue;
+        };
+        return Ok((stream, code));
+    }
 }
 
-fn random_urlsafe(bytes: usize) -> String {
-    let bytes: Vec<u8> = (0..bytes).map(|_| rand::random()).collect();
-    URL_SAFE_NO_PAD.encode(bytes)
+async fn reply(stream: &mut tokio::net::TcpStream, status: &str, body: &str) -> anyhow::Result<()> {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).await?;
+    Ok(())
+}
+
+fn random_urlsafe() -> String {
+    URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>())
 }
 
 fn open_browser(url: &str) {
-    #[cfg(target_os = "macos")]
-    let opener = "open";
-    #[cfg(target_os = "linux")]
-    let opener = "xdg-open";
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let opener = "open";
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
     if let Err(error) = Command::new(opener)
         .arg(url)
         .stdin(Stdio::null())
@@ -159,19 +168,43 @@ mod tests {
     use tokio::net::TcpStream;
 
     #[tokio::test]
-    async fn callback_rejects_the_wrong_state() -> anyhow::Result<()> {
+    async fn callback_ignores_other_requests_and_the_wrong_state() -> anyhow::Result<()> {
         // contract: U1
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let send = async move {
-            let mut stream = TcpStream::connect(address).await?;
-            stream
-                .write_all(b"GET /callback?code=code&state=wrong HTTP/1.1\r\nHost: localhost\r\n\r\n")
-                .await
+            for target in [
+                "/favicon.ico",
+                "/callback?code=bad&state=wrong",
+                "/callback?code=code&state=right",
+            ] {
+                let mut stream = TcpStream::connect(address).await?;
+                stream
+                    .write_all(format!("GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+                    .await?;
+            }
+            anyhow::Ok(())
         };
         let (received, sent) = tokio::join!(callback(&listener, "right"), send);
         sent?;
-        assert!(received.is_err());
+        assert_eq!(received?.1, "code");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn callback_surfaces_the_issuers_error() -> anyhow::Result<()> {
+        // contract: U1
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let mut stream = TcpStream::connect(listener.local_addr()?).await?;
+        let send = stream.write_all(
+            b"GET /callback?error=access_denied&error_description=cancelled&state=right HTTP/1.1\r\n\r\n",
+        );
+        let (received, sent) = tokio::join!(callback(&listener, "right"), send);
+        sent?;
+        let Err(error) = received else {
+            panic!("issuer error callback succeeded")
+        };
+        assert!(error.to_string().contains("access_denied: cancelled"));
         Ok(())
     }
 }

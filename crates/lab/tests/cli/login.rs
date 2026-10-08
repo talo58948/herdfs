@@ -51,7 +51,7 @@ fn browser_login_refreshes_for_a_mount_and_logout_removes_the_token() -> Result<
         .host_str()
         .context("authority host")?
         .to_owned();
-    let refreshes = lab.issuer_refreshes();
+    let refresh_count = lab.issuer_refresh_count();
     let mut mount = herdfs_command()?;
     mount
         .args([
@@ -72,13 +72,25 @@ fn browser_login_refreshes_for_a_mount_and_logout_removes_the_token() -> Result<
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut mount = mount.spawn()?;
-    let mounted_result = wait_mounted(&mut mount, &mountpoint).and_then(|()| {
-        ensure!(
-            lab.issuer_refreshes() > refreshes,
-            "the mount did not refresh its near-expiry access token"
+    let mounted_result = (|| {
+        wait_mounted(&mut mount, &mountpoint)?;
+        assert_eq!(lab.issuer_refresh_count(), refresh_count);
+        thread::sleep(Duration::from_secs(36));
+        let mut commands = Vec::new();
+        for _ in 0..4 {
+            commands.push(support::command(&lab, "a", &token, &["whoami"])?.spawn()?);
+        }
+        fs::read_dir(&mountpoint)?.collect::<std::io::Result<Vec<_>>>()?;
+        for command in &mut commands {
+            ensure!(command.wait()?.success(), "concurrent command failed");
+        }
+        assert_eq!(
+            lab.issuer_refresh_count(),
+            refresh_count + 1,
+            "mount and commands did not share one rotating refresh token"
         );
         Ok(())
-    });
+    })();
     let _ = mount.kill();
     let _ = mount.wait();
     let detached = std::process::Command::new("fusermount3")
@@ -87,7 +99,6 @@ fn browser_login_refreshes_for_a_mount_and_logout_removes_the_token() -> Result<
         .status()?;
     ensure!(detached.success(), "could not detach the test mount");
     mounted_result?;
-
     let me = support::json(&mut support::command(&lab, "a", &token, &["whoami"])?)?;
     assert_eq!(me["principal"], "user:login");
     let status = herdfs_command()?

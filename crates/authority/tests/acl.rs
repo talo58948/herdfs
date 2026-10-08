@@ -159,6 +159,23 @@ fn spaces_lists_only_spaces_reached_by_the_callers_grants() {
         fx.call(&user("dave", &[]), Request::Spaces),
         Ok(Response::Spaces { spaces: vec![] })
     );
+
+    fx.call(
+        &bob(),
+        Request::DeleteSpace {
+            space: "private".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        fx.call(&bob(), Request::Spaces),
+        Ok(Response::Spaces {
+            spaces: vec![SpaceAccess {
+                space: SPACE.into(),
+                root_perm: None,
+            }],
+        })
+    );
 }
 
 #[test]
@@ -170,6 +187,7 @@ fn access_lists_ancestor_rows_only_for_an_admin() {
     fx.set_acl("", "user:bob", Some(Perm::Read));
     fx.set_acl("team", "group:eng", Some(Perm::Write));
     fx.set_acl("team/project", "user:bob", Some(Perm::Admin));
+    fx.set_acl("team/project/deep", "user:secret", Some(Perm::Read));
     fx.set_acl("elsewhere", "user:secret", Some(Perm::Read));
     let request = || Request::Access {
         space: SPACE.into(),

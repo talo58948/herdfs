@@ -1,11 +1,14 @@
 //! The login token file and refreshes shared by mounts and direct commands.
 
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use anyhow::Context;
+use reqwest::Client;
+use rustix::fs::{FlockOperation, flock};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -13,14 +16,13 @@ use crate::{Error, Result};
 
 const REFRESH_MARGIN: Duration = Duration::from_secs(30);
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub(crate) struct TokenFile {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub expires_at: u64,
-    pub issuer: String,
-    pub client_id: String,
-    pub token_endpoint: String,
+    access_token: String,
+    refresh_token: String,
+    expires_at: u64,
+    client_id: String,
+    token_endpoint: String,
 }
 
 #[derive(Deserialize)]
@@ -32,46 +34,53 @@ struct TokenResponse {
 
 pub(crate) struct Source {
     path: PathBuf,
-    refreshing: Mutex<()>,
+    stored: Mutex<Stored>,
 }
 
 impl Source {
     pub(crate) fn new(path: PathBuf) -> Result<Self> {
-        read_access_token(&path)?;
+        let stored = read(&path)?;
         Ok(Self {
             path,
-            refreshing: Mutex::new(()),
+            stored: Mutex::new(stored),
         })
     }
 
-    pub(crate) async fn access(&self, force_refresh: bool) -> Result<String> {
-        let _refreshing = self.refreshing.lock().await;
-        let Stored::Login(mut token) = read(&self.path)? else {
-            return read_access_token(&self.path);
+    pub(crate) async fn access(&self, http: &Client, force_refresh: bool) -> Result<String> {
+        let mut stored = self.stored.lock().await;
+        let cached_access = match &*stored {
+            Stored::Legacy(_) if !force_refresh => return stored.access(),
+            Stored::Legacy(token) => token.clone(),
+            Stored::Login(token) if !force_refresh && !refresh_due(token) => {
+                return Ok(token.access_token.clone());
+            }
+            Stored::Login(token) => token.access_token.clone(),
         };
-        let refresh_at = token.expires_at.saturating_sub(REFRESH_MARGIN.as_secs());
-        if !force_refresh && now() < refresh_at {
-            return Ok(token.access_token);
+        let _lock = lock(self.path.with_extension("lock")).await?;
+        *stored = read(&self.path)?;
+        let Stored::Login(token) = &*stored else {
+            return stored.access();
+        };
+        if (!force_refresh && !refresh_due(token)) || (force_refresh && token.access_token != cached_access) {
+            return Ok(token.access_token.clone());
         }
-        let response = reqwest::Client::new()
-            .post(&token.token_endpoint)
-            .form(&[
-                ("grant_type", "refresh_token"),
-                ("refresh_token", token.refresh_token.as_str()),
-                ("client_id", token.client_id.as_str()),
-            ])
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<TokenResponse>()
-            .await?;
-        token.access_token = response.access_token;
-        token.expires_at = now().saturating_add(response.expires_in);
-        if let Some(refresh_token) = response.refresh_token {
-            token.refresh_token = refresh_token;
-        }
-        write(&self.path, &token)?;
-        Ok(token.access_token)
+        let form = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", token.refresh_token.as_str()),
+            ("client_id", token.client_id.as_str()),
+        ];
+        let refreshed = exchange(http, &token.token_endpoint, &form, Some(&token.refresh_token)).await;
+        let refreshed = match refreshed {
+            Ok(refreshed) => refreshed,
+            Err(_) if !force_refresh && now() < token.expires_at => {
+                return Ok(token.access_token.clone());
+            }
+            Err(error) => return Err(error),
+        };
+        write(&self.path, &refreshed)?;
+        let access = refreshed.access_token.clone();
+        *stored = Stored::Login(refreshed);
+        Ok(access)
     }
 }
 
@@ -80,11 +89,21 @@ enum Stored {
     Legacy(String),
 }
 
+impl Stored {
+    fn access(&self) -> Result<String> {
+        match self {
+            Self::Login(token) => Ok(token.access_token.clone()),
+            Self::Legacy(token) => Ok(token.clone()),
+        }
+    }
+}
+
 fn read(path: &Path) -> Result<Stored> {
     let text = fs::read_to_string(path)?;
     match serde_json::from_str(&text) {
         Ok(token) => Ok(Stored::Login(token)),
-        Err(_) => Ok(Stored::Legacy(text.trim().to_owned())),
+        Err(_) if !text.trim_start().starts_with('{') => Ok(Stored::Legacy(text.trim().to_owned())),
+        Err(error) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error).into()),
     }
 }
 
@@ -106,8 +125,10 @@ pub(crate) fn write(path: &Path, token: &TokenFile) -> Result<()> {
     temporary.write_all(b"\n")?;
     temporary.flush()?;
     temporary.as_file().sync_all()?;
-    fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o600))?;
-    fs::rename(temporary.path(), path)?;
+    temporary
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    temporary.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
 
@@ -119,14 +140,12 @@ pub(crate) fn remove(path: &Path) -> Result<()> {
     }
 }
 
-pub fn default_path() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(
-        || PathBuf::from(".config/herdfs/token"),
-        |home| PathBuf::from(home).join(".config/herdfs/token"),
-    )
+pub(crate) fn default_path() -> anyhow::Result<PathBuf> {
+    let home = std::env::var_os("HOME").context("HOME is unset; use --token-file")?;
+    Ok(PathBuf::from(home).join(".config/herdfs/token"))
 }
 
-pub(crate) fn expiry(expires_in: u64) -> u64 {
+fn expiry(expires_in: u64) -> u64 {
     now().saturating_add(expires_in)
 }
 
@@ -136,3 +155,56 @@ fn now() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+
+fn refresh_due(token: &TokenFile) -> bool {
+    now() >= token.expires_at.saturating_sub(REFRESH_MARGIN.as_secs())
+}
+
+async fn lock(path: PathBuf) -> Result<File> {
+    Ok(tokio::task::spawn_blocking(move || -> std::io::Result<File> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        flock(&file, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;
+        Ok(file)
+    })
+    .await
+    .map_err(std::io::Error::other)??)
+}
+
+pub(crate) async fn exchange(
+    http: &Client,
+    endpoint: &str,
+    form: &[(&str, &str)],
+    previous_refresh: Option<&str>,
+) -> Result<TokenFile> {
+    let response = http
+        .post(endpoint)
+        .form(form)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<TokenResponse>()
+        .await?;
+    let refresh_token = response
+        .refresh_token
+        .or_else(|| previous_refresh.map(str::to_owned))
+        .ok_or_else(|| Error::Protocol("issuer returned no refresh token".into()))?;
+    let client_id = form
+        .iter()
+        .find_map(|(name, value)| (*name == "client_id").then(|| (*value).to_owned()))
+        .ok_or_else(|| Error::Protocol("token exchange omitted client_id".into()))?;
+    Ok(TokenFile {
+        access_token: response.access_token,
+        refresh_token,
+        expires_at: expiry(response.expires_in),
+        client_id,
+        token_endpoint: endpoint.to_owned(),
+    })
+}
+
+#[cfg(test)]
+mod tests;

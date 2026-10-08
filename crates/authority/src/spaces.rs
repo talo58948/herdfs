@@ -1,12 +1,14 @@
 //! Spaces: creating, forking, deleting, and checking that one exists.
 
+use std::collections::BTreeMap;
+
 use herdfs_core::{
     SpacePath,
     proto::{ErrorCode, Perm, Response, SpaceAccess},
 };
 use rusqlite::params;
 
-use crate::{Call, Result, refuse};
+use crate::{Call, Result, acl::perm_from_name, refuse};
 
 const ROOT_MODE: u32 = 0o755;
 
@@ -40,33 +42,24 @@ impl Call<'_> {
         let mut query = self
             .db
             .prepare_cached("SELECT space, path, perm FROM acl WHERE principal = ?1 ORDER BY space, path")?;
-        let mut grants = Vec::new();
+        let mut spaces: BTreeMap<String, Option<Perm>> = BTreeMap::new();
         for principal in principals {
             let rows = query.query_map([principal], |row| {
-                let perm = crate::db::parse(row, 2, |text| match text {
-                    "read" => Some(Perm::Read),
-                    "write" => Some(Perm::Write),
-                    "admin" => Some(Perm::Admin),
-                    _ => None,
-                })?;
+                let perm = crate::db::parse(row, 2, perm_from_name)?;
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, perm))
             })?;
-            grants.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
-        }
-        grants.sort_by(|left, right| left.0.cmp(&right.0));
-        let mut spaces: Vec<SpaceAccess> = Vec::new();
-        for (space, path, perm) in grants {
-            if let Some(found) = spaces.last_mut().filter(|found| found.space == space) {
+            for row in rows {
+                let (space, path, perm) = row?;
+                let root_perm = spaces.entry(space).or_default();
                 if path.is_empty() {
-                    found.root_perm = Some(found.root_perm.map_or(perm, |old| old.max(perm)));
+                    *root_perm = Some(root_perm.map_or(perm, |old| old.max(perm)));
                 }
-                continue;
             }
-            spaces.push(SpaceAccess {
-                space,
-                root_perm: path.is_empty().then_some(perm),
-            });
         }
+        let spaces = spaces
+            .into_iter()
+            .map(|(space, root_perm)| SpaceAccess { space, root_perm })
+            .collect();
         Ok(Response::Spaces { spaces })
     }
 

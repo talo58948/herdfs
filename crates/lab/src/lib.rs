@@ -89,8 +89,8 @@ impl Lab {
     }
 
     /// How many refresh-token grants the test issuer has served.
-    pub fn issuer_refreshes(&self) -> u64 {
-        self.issuer.refreshes()
+    pub fn issuer_refresh_count(&self) -> u64 {
+        self.issuer.refresh_count()
     }
 
     /// Client `name`'s counters, from the `user.herdfs.stats` xattr on its mount root.

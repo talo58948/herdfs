@@ -8,12 +8,18 @@ use rusqlite::params;
 
 use crate::{Call, Fail, Result, db::parse, refuse};
 
-fn perm_name(perm: Perm) -> &'static str {
+pub(crate) fn perm_name(perm: Perm) -> &'static str {
     match perm {
         Perm::Read => "read",
         Perm::Write => "write",
         Perm::Admin => "admin",
     }
+}
+
+pub(crate) fn perm_from_name(name: &str) -> Option<Perm> {
+    [Perm::Read, Perm::Write, Perm::Admin]
+        .into_iter()
+        .find(|perm| perm_name(*perm) == name)
 }
 
 /// One ACL row of the caller.
@@ -81,11 +87,7 @@ impl Call<'_> {
         for principal in self.principals() {
             let rows = query.query_map(params![space, principal], |row| {
                 let granted = parse(row, 0, |text| SpacePath::try_from(text).ok())?;
-                let perm = parse(row, 1, |text| {
-                    [Perm::Read, Perm::Write, Perm::Admin]
-                        .into_iter()
-                        .find(|perm| perm_name(*perm) == text)
-                })?;
+                let perm = parse(row, 1, perm_from_name)?;
                 Ok(Grant {
                     path: granted,
                     perm,
@@ -142,11 +144,7 @@ impl Call<'_> {
         )?;
         let rows = query.query_map([space], |row| {
             let grant_path = parse(row, 0, |text| SpacePath::try_from(text).ok())?;
-            let perm = parse(row, 2, |text| {
-                [Perm::Read, Perm::Write, Perm::Admin]
-                    .into_iter()
-                    .find(|perm| perm_name(*perm) == text)
-            })?;
+            let perm = parse(row, 2, perm_from_name)?;
             Ok(AclRow {
                 path: grant_path,
                 principal: row.get(1)?,
