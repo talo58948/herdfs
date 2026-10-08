@@ -143,8 +143,8 @@ mod tests {
 
     use super::*;
     use crate::cache::Cache;
-    use crate::fs::{Inodes, Kernel, MountState};
-    use crate::journal::{CommitGate, Journal};
+    use crate::fs::{Inodes, Kernel};
+    use crate::journal::Journal;
     use crate::remote::Remote;
     use crate::stats::Stats;
     use crate::strategy::{AccessPlan, Decider};
@@ -156,17 +156,21 @@ mod tests {
         let token = root.join("token");
         fs::write(&token, "test").unwrap();
         let remote = Remote::new("http://127.0.0.1:9", "test", token, &[]).unwrap();
-        let cache = Cache::open(root.join("cache"), 1 << 20).unwrap();
+        let cache = Cache::open(root.join("cache"), 1 << 20, &[]).unwrap();
         let entry = EntryId(7);
         let kernel = Arc::new(Kernel::new(entry));
+        let pins = root.join("pins.json");
+        let kept = Arc::new(crate::kept::Kept::new(
+            pins.clone(),
+            crate::kept::load(&pins).unwrap(),
+        ));
+        let (commits, _) = tokio::sync::watch::channel(false);
         let space = Arc::new(Space::new(
             Arc::new(remote),
             Arc::new(cache),
-            MountState {
-                journal: Arc::new(journal),
-                commits: Arc::new(CommitGate::default()),
-                kept: None,
-            },
+            Arc::new(journal),
+            commits,
+            kept,
             Arc::new(Stats::default()),
             Decider::Fixed(AccessPlan::STREAM),
             kernel,

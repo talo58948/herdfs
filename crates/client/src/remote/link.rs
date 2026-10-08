@@ -16,18 +16,10 @@ const LAST_WINDOW: Duration = Duration::from_secs(30);
 /// it lasts. A refused connection fails fast already and opens no window. Whatever the cache
 /// holds is still served (C12); a call or probe after the window ends finds out whether the
 /// authority answers again. Holds when the window ends, and how long it was.
+#[derive(Default)]
 pub struct Link {
     window: Mutex<Option<(Instant, Duration)>>,
-    connected: AtomicBool,
-}
-
-impl Default for Link {
-    fn default() -> Self {
-        Self {
-            window: Mutex::default(),
-            connected: AtomicBool::new(true),
-        }
-    }
+    disconnected: AtomicBool,
 }
 
 impl Link {
@@ -58,12 +50,12 @@ impl Link {
     }
 
     pub fn record_connection<T>(&self, result: &Result<T>) {
-        let connected = result.is_ok() || matches!(result, Err(Error::Api(_)));
-        self.connected.store(connected, Ordering::Relaxed);
+        let disconnected = !(result.is_ok() || matches!(result, Err(Error::Api(_))));
+        self.disconnected.store(disconnected, Ordering::Relaxed);
     }
 
     pub fn connected(&self) -> bool {
-        self.connected.load(Ordering::Relaxed)
+        !self.disconnected.load(Ordering::Relaxed)
     }
 }
 

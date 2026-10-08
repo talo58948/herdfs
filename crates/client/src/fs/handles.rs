@@ -155,15 +155,19 @@ impl Space {
     }
 
     /// Waits for the commit of the entry's pending write, if any. EIO if that attempt fails.
-    pub(super) async fn committed(&self, entry: EntryId) -> Result<()> {
+    pub(crate) async fn committed(&self, entry: EntryId) -> Result<()> {
         let pending = self.inodes.local(entry, |local| local.pending()).flatten();
         let Some((sealed, mut attempts)) = pending else {
             return Ok(());
         };
-        if self.commits.is_paused() {
+        let mut paused = self.commits.subscribe();
+        if *paused.borrow() {
             return Ok(());
         }
-        let attempt = attempts.wait_for(|(covered, _)| *covered >= sealed).await;
+        let attempt = tokio::select! {
+            attempt = attempts.wait_for(|(covered, _)| *covered >= sealed) => attempt,
+            _ = paused.wait_for(|paused| *paused) => return Ok(()),
+        };
         let committed = attempt.is_ok_and(|attempt| attempt.1);
         if committed { Ok(()) } else { Err(libc::EIO.into()) }
     }

@@ -79,7 +79,7 @@ fn save(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn socket_request(lab: &Lab, request: &Value) -> Result<Value> {
-    let mut stream = UnixStream::connect(lab.client_dir("b").join("control.sock"))?;
+    let mut stream = UnixStream::connect(lab.client_dir("b").join("journal.state/control.sock"))?;
     writeln!(stream, "{}", serde_json::to_string(&request)?)?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line)?;
@@ -99,7 +99,7 @@ fn kept_folder_survives_restart_follows_heads_and_becomes_evictable() -> Result<
     lab.wait_committed("a")?;
 
     let pinned = lab.mount_path("b").join("kept");
-    let mode = fs::metadata(lab.client_dir("b").join("control.sock"))?
+    let mode = fs::metadata(lab.client_dir("b").join("journal.state/control.sock"))?
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o600);
@@ -123,12 +123,17 @@ fn kept_folder_survives_restart_follows_heads_and_becomes_evictable() -> Result<
     for (name, bytes) in &files {
         assert_eq!(fs::read(pinned.join(name))?, *bytes);
     }
+    assert_eq!(wait_ready(&lab, true)?["kept"]["pins"][0]["ready"], true);
     assert_eq!(command(&lab, "explain", Some(&pinned.join("one")))?["ok"], true);
-    lab.restore("b", Links::Both)?;
 
     let replacement = vec![3; 2 << 20];
     save(&folder.join("one"), &replacement)?;
     lab.wait_committed("a")?;
+    command(&lab, "pin", Some(&pinned))?;
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(wait_ready(&lab, true)?["kept"]["pins"][0]["ready"], true);
+    lab.restore("b", Links::Both)?;
+    command(&lab, "pin", Some(&pinned))?;
     wait_ready(&lab, false).context("new remote head never entered downloading state")?;
     assert_eq!(
         command(&lab, "file", Some(&pinned.join("one")))?["downloading"],

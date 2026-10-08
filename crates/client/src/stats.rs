@@ -35,9 +35,8 @@ impl Stats {
         bump(&self.keep[plan.keep as usize], 1);
     }
 
-    /// The counters as JSON. Pending commits are counted by the journal, the round trip (seconds)
-    /// by the remote.
-    pub fn json(&self, pending_commits: usize, round_trip: Option<f64>) -> Vec<u8> {
+    /// The counters as JSON. Pending commits are counted by the journal.
+    pub fn json(&self, pending_commits: usize, round_trip_ms: Option<u64>) -> Vec<u8> {
         json!({
             "bytes_fetched": self.bytes_fetched.load(Relaxed),
             "chunks_fetched": self.chunks_fetched.load(Relaxed),
@@ -45,7 +44,7 @@ impl Stats {
             "grants": self.grants.load(Relaxed),
             "commits": self.commits.load(Relaxed),
             "pending_commits": pending_commits,
-            "round_trip_ms": round_trip.map(|seconds| seconds * 1e3),
+            "round_trip_ms": round_trip_ms,
             "jev_answers": self.jev_answers.load(Relaxed),
             "jev_unsure": self.jev_unsure.load(Relaxed),
             "jev_errors": self.jev_errors.load(Relaxed),

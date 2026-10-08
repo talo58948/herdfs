@@ -6,7 +6,7 @@ use herdfs_core::proto::Version;
 use herdfs_core::{ChunkId, SpacePath};
 use serde::{Deserialize, Serialize};
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub(super) struct Saved {
     pub roots: BTreeSet<SpacePath>,
     pub files: BTreeMap<SpacePath, SavedFile>,
@@ -25,13 +25,7 @@ pub(crate) struct Loaded {
     pub pinned: Vec<ChunkId>,
 }
 
-#[derive(Clone, Default)]
-pub(super) struct Progress {
-    pub downloading: bool,
-    pub error: Option<String>,
-}
-
-pub(super) fn load(path: &Path) -> std::io::Result<Loaded> {
+pub(crate) fn load(path: &Path) -> std::io::Result<Loaded> {
     let saved = match fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Saved::default(),
@@ -55,5 +49,5 @@ pub(super) fn persist(path: &Path, saved: &Saved) -> std::io::Result<()> {
     serde_json::to_writer(&mut temp, saved)?;
     temp.as_file().sync_all()?;
     temp.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    fs::File::open(parent)?.sync_all()
 }

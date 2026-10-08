@@ -3,10 +3,8 @@
 mod registry;
 mod server;
 
-pub(crate) use registry::{Registration, find_mount, only_mount};
+pub(crate) use registry::{Registration, canonical_path, find_mount, only_mount};
 pub(crate) use server::{Guard, serve};
-
-use std::path::Path;
 
 use anyhow::Context;
 use serde_json::Value;
@@ -26,12 +24,4 @@ pub(crate) async fn request(registration: &Registration, request: Value) -> anyh
         .await?
         .context("mount closed its control socket")?;
     Ok(serde_json::from_str(&line)?)
-}
-
-pub(crate) fn absolute(path: &Path) -> anyhow::Result<std::path::PathBuf> {
-    if path.is_absolute() {
-        Ok(path.to_owned())
-    } else {
-        Ok(std::env::current_dir()?.join(path))
-    }
 }

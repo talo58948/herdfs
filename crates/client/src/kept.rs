@@ -1,7 +1,7 @@
 //! Durable keep-downloaded roots and the latest cached versions below them (P4).
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -9,135 +9,92 @@ use herdfs_core::SpacePath;
 use herdfs_core::proto::Version;
 use tokio::sync::Notify;
 
-use crate::cache::Cache;
-use crate::fs::{Inodes, Kernel};
+use crate::fs::Space;
 use crate::lock;
-use crate::reader::Reader;
-use crate::remote::Remote;
 
-const REFRESH: Duration = Duration::from_secs(1);
+const REFRESH: Duration = Duration::from_secs(60);
 
 mod scan;
 mod state;
-use state::{Loaded, Progress, Saved, SavedFile};
+pub(crate) use state::load;
+use state::{Loaded, Saved, SavedFile};
 
 pub(crate) struct Kept {
     path: PathBuf,
     saved: Mutex<Saved>,
-    progress: Mutex<BTreeMap<SpacePath, Progress>>,
+    errors: Mutex<BTreeMap<SpacePath, String>>,
+    write: Mutex<()>,
     wake: Notify,
-    remote: Arc<Remote>,
-    reader: Arc<Reader>,
-    cache: Arc<Cache>,
-    inodes: Arc<Inodes>,
-    kernel: Arc<Kernel>,
 }
 
 impl Kept {
-    pub fn load(path: &Path) -> std::io::Result<Loaded> {
-        state::load(path)
-    }
-
-    pub fn new(
-        path: PathBuf,
-        loaded: Loaded,
-        remote: Arc<Remote>,
-        reader: Arc<Reader>,
-        cache: Arc<Cache>,
-        inodes: Arc<Inodes>,
-        kernel: Arc<Kernel>,
-    ) -> Self {
-        let progress = loaded
-            .saved
-            .roots
-            .iter()
-            .cloned()
-            .map(|root| {
-                (
-                    root,
-                    Progress {
-                        downloading: true,
-                        error: None,
-                    },
-                )
-            })
-            .collect();
+    pub fn new(path: PathBuf, loaded: Loaded) -> Self {
         Self {
             path,
             saved: Mutex::new(loaded.saved),
-            progress: Mutex::new(progress),
+            errors: Mutex::default(),
+            write: Mutex::default(),
             wake: Notify::new(),
-            remote,
-            reader,
-            cache,
-            inodes,
-            kernel,
         }
     }
 
-    pub async fn run(self: Arc<Self>) {
+    pub async fn run(self: Arc<Self>, space: Arc<Space>) {
         loop {
-            self.refresh().await;
+            self.refresh(&space).await;
             let _ = tokio::time::timeout(REFRESH, self.wake.notified()).await;
         }
     }
 
     pub fn pin(&self, path: SpacePath) -> std::io::Result<()> {
-        lock(&self.saved).roots.insert(path.clone());
-        lock(&self.progress).insert(
-            path,
-            Progress {
-                downloading: true,
-                error: None,
-            },
-        );
-        self.persist()?;
+        self.update(|saved| saved.roots.insert(path.clone()).then_some(()))?;
+        lock(&self.errors).remove(&path);
         self.wake.notify_one();
         Ok(())
     }
 
-    pub fn unpin(&self, path: &SpacePath) -> std::io::Result<()> {
-        let removed = {
-            let mut saved = lock(&self.saved);
-            saved.roots.remove(path);
-            let roots = saved.roots.clone();
-            let removed: Vec<_> = saved
-                .files
-                .keys()
-                .filter(|file| !roots.iter().any(|root| file.is_within(root)))
-                .cloned()
-                .collect();
-            removed
-                .iter()
-                .filter_map(|file| saved.files.remove(file))
-                .collect::<Vec<_>>()
-        };
-        lock(&self.progress).remove(path);
-        for file in removed {
-            self.unpin_file(&file);
-        }
-        self.persist()?;
+    pub fn unpin(&self, space: &Space, path: &SpacePath) -> std::io::Result<()> {
+        let removed = self
+            .update(|saved| {
+                if !saved.roots.remove(path) {
+                    return None;
+                }
+                let roots = saved.roots.clone();
+                let paths: Vec<_> = saved
+                    .files
+                    .keys()
+                    .filter(|file| !roots.iter().any(|root| file.is_within(root)))
+                    .cloned()
+                    .collect();
+                Some(
+                    paths
+                        .into_iter()
+                        .filter_map(|file| saved.files.remove(&file))
+                        .collect::<Vec<_>>(),
+                )
+            })?
+            .unwrap_or_default();
+        lock(&self.errors).remove(path);
+        removed.iter().for_each(|file| unpin_file(space, file));
+        self.wake.notify_one();
         Ok(())
     }
 
-    pub fn status(&self) -> (u64, Vec<(String, bool)>) {
+    pub fn status(&self, space: &Space) -> (u64, Vec<(String, bool)>) {
         let saved = lock(&self.saved);
-        let progress = lock(&self.progress);
+        let errors = lock(&self.errors);
         let mut ids = HashSet::new();
         let bytes = saved
             .files
             .values()
             .flat_map(|file| &file.current.chunks)
-            .filter(|chunk| ids.insert(chunk.id) && self.cache.contains(&chunk.id))
+            .filter(|chunk| ids.insert(chunk.id) && space.cache.contains(&chunk.id))
             .map(|chunk| u64::from(chunk.len))
             .sum();
         let pins = saved
             .roots
             .iter()
             .map(|root| {
-                let ready = progress
-                    .get(root)
-                    .is_some_and(|state| !state.downloading && state.error.is_none())
+                let ready = !errors.contains_key(root)
                     && saved
                         .files
                         .iter()
@@ -152,113 +109,130 @@ impl Kept {
     pub fn file(&self, path: &SpacePath) -> (bool, bool, Option<String>) {
         let saved = lock(&self.saved);
         let roots: Vec<_> = saved.roots.iter().filter(|root| path.is_within(root)).collect();
-        let progress = lock(&self.progress);
-        let downloading = roots
-            .iter()
-            .any(|root| progress.get(*root).is_some_and(|state| state.downloading));
-        let error = roots.iter().find_map(|root| progress.get(*root)?.error.clone());
+        let downloading = saved.files.get(path).is_some_and(|file| !file.ready);
+        let errors = lock(&self.errors);
+        let error = roots.iter().find_map(|root| errors.get(*root).cloned());
         (!roots.is_empty(), downloading, error)
     }
 
-    fn prepare(&self, path: &SpacePath, version: &Version) -> std::io::Result<bool> {
-        let mut saved = lock(&self.saved);
-        if saved
-            .files
-            .get(path)
-            .is_some_and(|file| file.current.id == version.id)
-        {
-            let cached = version
-                .chunks
-                .iter()
-                .all(|chunk| self.cache.get(&chunk.id).is_some());
-            if cached {
-                return Ok(false);
-            }
-            if let Some(file) = saved.files.get_mut(path) {
-                file.ready = false;
-            }
-            drop(saved);
-            self.persist()?;
-            return Ok(true);
+    fn prepare(&self, space: &Space, path: &SpacePath, version: &Version) -> std::io::Result<Option<bool>> {
+        let cached = version.chunks.iter().all(|chunk| space.cache.contains(&chunk.id));
+        let _write = lock(&self.write);
+        let mut saved = lock(&self.saved).clone();
+        if !saved.roots.iter().any(|root| path.is_within(root)) {
+            return Ok(None);
         }
-        self.cache
-            .pin(&version.chunks.iter().map(|chunk| chunk.id).collect::<Vec<_>>());
-        let retired = saved.files.remove(path).map_or_else(Vec::new, |file| {
-            std::iter::once(file.current).chain(file.retired).collect()
-        });
-        saved.files.insert(
-            path.clone(),
-            SavedFile {
+        let Some(file) = saved.files.get_mut(path) else {
+            let file = SavedFile {
+                current: version.clone(),
+                retired: Vec::new(),
+                ready: false,
+            };
+            saved.files.insert(path.clone(), file);
+            state::persist(&self.path, &saved)?;
+            space.cache.pin(&chunk_ids(version));
+            *lock(&self.saved) = saved;
+            return Ok(Some(true));
+        };
+        if file.current.id != version.id {
+            let retired = std::iter::once(file.current.clone())
+                .chain(std::mem::take(&mut file.retired))
+                .collect();
+            *file = SavedFile {
                 current: version.clone(),
                 retired,
                 ready: false,
-            },
-        );
-        drop(saved);
-        self.persist()?;
-        Ok(true)
-    }
-
-    fn finish(&self, path: &SpacePath) -> std::io::Result<()> {
-        let retired = {
-            let mut saved = lock(&self.saved);
-            let Some(file) = saved.files.get_mut(path) else {
-                return Ok(());
             };
-            file.ready = true;
-            std::mem::take(&mut file.retired)
-        };
-        retired.iter().for_each(|version| self.unpin_version(version));
-        self.persist()
+            state::persist(&self.path, &saved)?;
+            space.cache.pin(&chunk_ids(version));
+            *lock(&self.saved) = saved;
+            return Ok(Some(true));
+        }
+        if cached {
+            return Ok(Some(false));
+        }
+        if file.ready {
+            file.ready = false;
+            state::persist(&self.path, &saved)?;
+            *lock(&self.saved) = saved;
+        }
+        Ok(Some(true))
     }
 
-    fn drop_unseen(&self, seen: &BTreeSet<SpacePath>) {
-        let removed = {
-            let mut saved = lock(&self.saved);
+    fn finish(&self, space: &Space, path: &SpacePath) -> std::io::Result<()> {
+        let _write = lock(&self.write);
+        let mut saved = lock(&self.saved).clone();
+        let Some(file) = saved.files.get_mut(path) else {
+            return Ok(());
+        };
+        if file.ready && file.retired.is_empty() {
+            return Ok(());
+        }
+        file.ready = true;
+        let retired = std::mem::take(&mut file.retired);
+        state::persist(&self.path, &saved)?;
+        *lock(&self.saved) = saved;
+        retired.iter().for_each(|version| unpin_version(space, version));
+        Ok(())
+    }
+
+    fn drop_unseen(&self, space: &Space, root: &SpacePath, seen: &BTreeSet<SpacePath>) {
+        let removed = self.update(|saved| {
             let paths: Vec<_> = saved
                 .files
                 .keys()
-                .filter(|path| !seen.contains(*path))
+                .filter(|path| path.is_within(root) && !seen.contains(*path))
                 .cloned()
                 .collect();
-            paths
-                .into_iter()
-                .filter_map(|path| saved.files.remove(&path))
-                .collect::<Vec<_>>()
-        };
-        removed.iter().for_each(|file| self.unpin_file(file));
-        let _ = self.persist();
-    }
-
-    fn unpin_file(&self, file: &SavedFile) {
-        self.unpin_version(&file.current);
-        file.retired
-            .iter()
-            .for_each(|version| self.unpin_version(version));
-    }
-
-    fn unpin_version(&self, version: &Version) {
-        self.cache
-            .unpin(&version.chunks.iter().map(|chunk| chunk.id).collect::<Vec<_>>());
-    }
-
-    fn set_progress(&self, root: &SpacePath, downloading: bool, error: Option<String>) {
-        if let Some(state) = lock(&self.progress).get_mut(root) {
-            *state = Progress { downloading, error };
+            (!paths.is_empty()).then(|| {
+                paths
+                    .into_iter()
+                    .filter_map(|path| saved.files.remove(&path))
+                    .collect::<Vec<_>>()
+            })
+        });
+        match removed {
+            Ok(Some(removed)) => removed.iter().for_each(|file| unpin_file(space, file)),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, %root, "could not persist removed kept files"),
         }
     }
 
-    fn set_path_progress(&self, path: &SpacePath, downloading: bool) {
-        let mut progress = lock(&self.progress);
-        for (root, state) in &mut *progress {
-            if path.is_within(root) {
-                state.downloading = downloading;
-                state.error = None;
+    fn set_error(&self, root: &SpacePath, error: Option<String>) {
+        let mut errors = lock(&self.errors);
+        match error {
+            Some(error) => {
+                errors.insert(root.clone(), error);
+            }
+            None => {
+                errors.remove(root);
             }
         }
     }
 
-    fn persist(&self) -> std::io::Result<()> {
-        state::persist(&self.path, &lock(&self.saved))
+    fn update<T>(&self, change: impl FnOnce(&mut Saved) -> Option<T>) -> std::io::Result<Option<T>> {
+        let _write = lock(&self.write);
+        let mut saved = lock(&self.saved).clone();
+        let Some(changed) = change(&mut saved) else {
+            return Ok(None);
+        };
+        state::persist(&self.path, &saved)?;
+        *lock(&self.saved) = saved;
+        Ok(Some(changed))
     }
+}
+
+fn chunk_ids(version: &Version) -> Vec<herdfs_core::ChunkId> {
+    version.chunks.iter().map(|chunk| chunk.id).collect()
+}
+
+fn unpin_file(space: &Space, file: &SavedFile) {
+    unpin_version(space, &file.current);
+    file.retired
+        .iter()
+        .for_each(|version| unpin_version(space, version));
+}
+
+fn unpin_version(space: &Space, version: &Version) {
+    space.cache.unpin(&chunk_ids(version));
 }

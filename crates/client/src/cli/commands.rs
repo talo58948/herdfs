@@ -91,7 +91,7 @@ async fn show(args: &super::ShowArgs, json: bool) -> anyhow::Result<()> {
         .find(|version| version.id == wanted)
         .with_context(|| format!("version {} is not visible", wanted.0))?;
     let cache_dir = tempfile::tempdir()?;
-    let cache = Arc::new(Cache::open(cache_dir.path().into(), version.size.max(1))?);
+    let cache = Arc::new(Cache::open(cache_dir.path().into(), version.size.max(1), &[])?);
     let reader = Reader::new(remote, cache, Arc::new(Stats::default()));
     let opened = OpenVersion::new(version.clone());
     match &args.output {

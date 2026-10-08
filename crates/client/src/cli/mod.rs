@@ -14,6 +14,10 @@ use tracing_subscriber::EnvFilter;
 
 use crate::MountArgs;
 
+#[derive(Debug, thiserror::Error)]
+#[error("control request failed")]
+pub struct PrintedError;
+
 /// herdfs: a shared filesystem client.
 #[derive(Parser)]
 #[command(version)]
@@ -206,7 +210,7 @@ fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
 
 fn control_path(op: &str, path: &Path, json: bool) -> anyhow::Result<()> {
     let registration = crate::control::find_mount(path)?;
-    let path = crate::control::absolute(path)?;
+    let path = crate::control::canonical_path(path)?;
     let request = serde_json::json!({"op":op,"path":path});
     control(&registration, request, json)
 }
@@ -224,8 +228,11 @@ fn control(
     let response = runtime()?.block_on(crate::control::request(registration, request))?;
     if json {
         println!("{}", serde_json::to_string(&response)?);
-    } else {
+    } else if response["ok"] == true {
         println!("{}", serde_json::to_string_pretty(&response)?);
+    }
+    if json && response["ok"] != true {
+        return Err(PrintedError.into());
     }
     anyhow::ensure!(
         response["ok"] == true,

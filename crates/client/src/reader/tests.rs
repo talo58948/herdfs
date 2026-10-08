@@ -13,7 +13,7 @@ fn setup(dir: &std::path::Path) -> (Reader, OpenVersion, Vec<Vec<u8>>) {
     let token = dir.join("token");
     std::fs::write(&token, "t").unwrap();
     let remote = Remote::new("http://127.0.0.1:9", "test", token, &[]).unwrap();
-    let cache = Cache::open(dir.join("cache"), 1 << 20).unwrap();
+    let cache = Cache::open(dir.join("cache"), 1 << 20, &[]).unwrap();
     let reader = Reader::new(Arc::new(remote), Arc::new(cache), Arc::default());
     let chunks: Vec<Vec<u8>> = (0..5u8).map(|i| vec![i; 100 + usize::from(i)]).collect();
     let refs = chunks.iter().map(|bytes| ChunkRef {

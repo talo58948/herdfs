@@ -4,10 +4,9 @@ use std::{net::IpAddr, path::PathBuf, sync::Arc};
 
 use crate::{
     cache::Cache,
-    fs::{Inodes, Kernel, MountState, Space},
-    journal::{CommitGate, Committer, Journal},
+    fs::{Inodes, Kernel, Space},
+    journal::{Committer, Journal},
     kept::Kept,
-    reader::Reader,
     remote::Remote,
     stats::Stats,
     strategy::{Decider, Jev, StrategyArg},
@@ -16,6 +15,7 @@ use anyhow::Context;
 use herdfs_core::SpacePath;
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
+use tokio::sync::watch;
 #[cfg(target_os = "linux")]
 use {
     crate::fs::Fuse,
@@ -68,6 +68,12 @@ pub struct MountArgs {
     mountpoint: PathBuf,
 }
 
+struct Connected {
+    space: Arc<Space>,
+    journal: PathBuf,
+    state: PathBuf,
+}
+
 /// Mounts the space and serves it until it is unmounted or the process gets SIGINT or SIGTERM.
 pub fn mount(args: &MountArgs) -> anyhow::Result<()> {
     if args.nfs {
@@ -83,13 +89,13 @@ pub fn mount(args: &MountArgs) -> anyhow::Result<()> {
 fn mount_fuse(args: &MountArgs) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let _context = runtime.enter();
-    let space = runtime.block_on(connect(args))?;
+    let Connected { space, state, .. } = runtime.block_on(connect(args))?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
     let mut config = Config::default();
     config.mount_options = vec![MountOption::FSName("herdfs".into())];
     let fuse = Fuse::new(space.clone(), runtime.handle().clone());
-    let _control = serve_control(args, space.clone())?;
+    let _control = serve_control(args, space.clone(), &state)?;
     let mut session = Session::new(fuse, &args.mountpoint, &config)
         .with_context(|| format!("mounting at {}", args.mountpoint.display()))?;
     Fuse::mounted(&space, session.notifier());
@@ -113,15 +119,15 @@ fn mount_fuse(_args: &MountArgs) -> anyhow::Result<()> {
     anyhow::bail!("FUSE mounting is supported only on Linux; use --nfs")
 }
 
-fn serve_control(args: &MountArgs, space: Arc<Space>) -> anyhow::Result<crate::control::Guard> {
-    let journal = crate::control::absolute(&args.journal)?;
-    let state = journal
-        .parent()
-        .context("--journal must have a parent directory")?;
+fn serve_control(
+    args: &MountArgs,
+    space: Arc<Space>,
+    state: &std::path::Path,
+) -> anyhow::Result<crate::control::Guard> {
     crate::control::serve(space, &args.authority, &args.space, &args.mountpoint, state)
 }
 
-async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
+async fn connect(args: &MountArgs) -> anyhow::Result<Connected> {
     let (authority, space) = (&args.authority, &args.space);
     let token_file = args
         .token_file
@@ -132,18 +138,22 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
     let remote = Remote::new(authority, space, token_file, &args.resolve)?;
     let root = remote.stat(SpacePath::root()).await;
     let root = root.with_context(|| format!("cannot reach space {space:?} at the authority {authority}"))?;
-    let journal = crate::control::absolute(&args.journal)?;
-    let state = journal
+    let journal = std::path::absolute(&args.journal)?;
+    let parent = journal
         .parent()
         .context("--journal must have a parent directory")?;
+    let name = journal.file_name().context("--journal must name a directory")?;
+    let mut state_name = name.to_os_string();
+    state_name.push(".state");
+    let state = parent.join(state_name);
     let pins = state.join("pins.json");
-    let loaded = Kept::load(&pins).with_context(|| format!("reading pin state {}", pins.display()))?;
-    let cache = Cache::open_pinned(args.cache.clone(), args.cache_bytes, &loaded.pinned)
+    let loaded = crate::kept::load(&pins).with_context(|| format!("reading pin state {}", pins.display()))?;
+    let cache = Cache::open(args.cache.clone(), args.cache_bytes, &loaded.pinned)
         .with_context(|| format!("opening cache {}", args.cache.display()))?;
     let inodes = Arc::new(Inodes::default());
-    let (journal, woken) = Journal::open(args.journal.clone(), &inodes)
+    let (opened_journal, woken) = Journal::open(journal.clone(), &inodes)
         .with_context(|| format!("opening journal {}", args.journal.display()))?;
-    let (remote, cache, journal) = (Arc::new(remote), Arc::new(cache), Arc::new(journal));
+    let (remote, cache, opened_journal) = (Arc::new(remote), Arc::new(cache), Arc::new(opened_journal));
     let stats = Arc::new(Stats::default());
     let decider = match &args.strategy {
         StrategyArg::Decider(decider) => decider.clone(),
@@ -156,24 +166,14 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
         }
     };
     let kernel = Arc::new(Kernel::new(root.id));
-    let kept = Arc::new(Kept::new(
-        pins,
-        loaded,
-        remote.clone(),
-        Arc::new(Reader::new(remote.clone(), cache.clone(), stats.clone())),
-        cache.clone(),
-        inodes.clone(),
-        kernel.clone(),
-    ));
-    let commits = Arc::new(CommitGate::default());
+    let kept = Arc::new(Kept::new(pins, loaded));
+    let (commits, _) = watch::channel(false);
     let space = Space::new(
         remote.clone(),
         cache,
-        MountState {
-            journal,
-            commits,
-            kept: Some(kept.clone()),
-        },
+        opened_journal,
+        commits,
+        kept.clone(),
         stats,
         decider,
         kernel,
@@ -186,9 +186,13 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
     });
     let committer = Committer { space: space.clone() };
     tokio::spawn(Arc::new(committer).run(woken));
-    tokio::spawn(kept.run());
+    tokio::spawn(kept.run(space.clone()));
     tokio::spawn(remote.probe());
-    Ok(space)
+    Ok(Connected {
+        space,
+        journal,
+        state,
+    })
 }
 
 #[cfg(unix)]
@@ -196,8 +200,12 @@ fn mount_nfs(args: &MountArgs) -> anyhow::Result<()> {
     // Space's journal paths use block_in_place, so NFS always owns a multi-thread runtime.
     let runtime = tokio::runtime::Runtime::new()?;
     let _context = runtime.enter();
-    let space = runtime.block_on(connect(args))?;
-    let identity = Arc::new(Identity::open(&args.journal)?);
+    let Connected {
+        space,
+        journal,
+        state,
+    } = runtime.block_on(connect(args))?;
+    let identity = Arc::new(Identity::open(&journal)?);
     let address = format!("127.0.0.1:{}", identity.port());
     let nfs = Nfs::new(space.clone(), identity.clone());
     let listener = runtime
@@ -224,7 +232,7 @@ fn mount_nfs(args: &MountArgs) -> anyhow::Result<()> {
         #[cfg(target_os = "linux")]
         println!("{}", linux_mount_command(&args.mountpoint, port));
     }
-    let _control = serve_control(args, space)?;
+    let _control = serve_control(args, space, &state)?;
     tracing::info!(mountpoint = %args.mountpoint.display(), space = args.space, port, mounted, "serving NFS");
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;

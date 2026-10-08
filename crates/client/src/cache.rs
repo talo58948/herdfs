@@ -23,13 +23,8 @@ struct Index {
 }
 
 impl Cache {
-    /// Opens the cache in `dir`, indexing the chunks an earlier run left there.
-    pub fn open(dir: PathBuf, capacity: u64) -> io::Result<Self> {
-        Self::open_pinned(dir, capacity, &[])
-    }
-
-    /// Opens the cache while protecting durable pins before startup eviction runs.
-    pub(crate) fn open_pinned(dir: PathBuf, capacity: u64, pinned: &[ChunkId]) -> io::Result<Self> {
+    /// Opens the cache, protecting durable pins before startup eviction runs.
+    pub fn open(dir: PathBuf, capacity: u64, pinned: &[ChunkId]) -> io::Result<Self> {
         fs::create_dir_all(&dir)?;
         let mut found = Vec::new();
         for item in fs::read_dir(&dir)? {
@@ -47,11 +42,9 @@ impl Cache {
         for (_, id, len) in found {
             index.chunks.insert(id, len, ());
         }
-        for id in pinned {
-            *index.pins.entry(*id).or_default() += 1;
-        }
         let index = Mutex::new(index);
         let cache = Self { dir, capacity, index };
+        cache.pin(pinned);
         cache.evict();
         Ok(cache)
     }
@@ -158,6 +151,10 @@ impl Cache {
 mod tests {
     use super::*;
 
+    fn open(dir: PathBuf, capacity: u64) -> io::Result<Cache> {
+        Cache::open(dir, capacity, &[])
+    }
+
     fn chunk(fill: u8) -> (ChunkId, Vec<u8>) {
         let bytes = vec![fill; 100];
         (ChunkId::of(&bytes), bytes)
@@ -167,7 +164,7 @@ mod tests {
     #[test]
     fn a_tampered_chunk_is_a_miss_and_is_deleted() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path().into(), 1 << 20).unwrap();
+        let cache = open(dir.path().into(), 1 << 20).unwrap();
         let (id, bytes) = chunk(1);
         cache.put(&id, &bytes).unwrap();
         assert_eq!(cache.get(&id), Some(bytes));
@@ -182,7 +179,7 @@ mod tests {
     #[test]
     fn a_failed_persist_removes_its_temp_file() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path().into(), 1 << 20).unwrap();
+        let cache = open(dir.path().into(), 1 << 20).unwrap();
         let (id, bytes) = chunk(1);
         fs::create_dir(dir.path().join(id.to_string())).unwrap();
 
@@ -198,7 +195,7 @@ mod tests {
     #[test]
     fn eviction_drops_the_least_recently_used_first() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path().into(), 300).unwrap();
+        let cache = open(dir.path().into(), 300).unwrap();
         let [a, b, c, d] = [1, 2, 3, 4].map(chunk);
         for (id, bytes) in [&a, &b, &c] {
             cache.put(id, bytes).unwrap();
@@ -213,7 +210,7 @@ mod tests {
     #[test]
     fn pinned_chunks_survive_eviction_until_unpinned() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path().into(), 150).unwrap();
+        let cache = open(dir.path().into(), 150).unwrap();
         let (pinned, bytes) = chunk(1);
         cache.pin(&[pinned]);
         cache.put(&pinned, &bytes).unwrap();
@@ -233,18 +230,18 @@ mod tests {
     fn the_index_is_rebuilt_from_disk_at_startup() {
         let dir = tempfile::tempdir().unwrap();
         let (id, bytes) = chunk(1);
-        Cache::open(dir.path().into(), 1 << 20)
+        open(dir.path().into(), 1 << 20)
             .unwrap()
             .put(&id, &bytes)
             .unwrap();
         fs::write(dir.path().join("leftover.0.tmp"), b"x").unwrap();
 
-        let cache = Cache::open(dir.path().into(), 1 << 20).unwrap();
+        let cache = open(dir.path().into(), 1 << 20).unwrap();
         assert!(cache.contains(&id));
         assert!(!dir.path().join("leftover.0.tmp").exists());
         assert_eq!(cache.coverage(&[ChunkRef { id, len: 100 }]), 1.0);
         drop(cache);
-        assert!(!Cache::open(dir.path().into(), 50).unwrap().contains(&id));
+        assert!(!open(dir.path().into(), 50).unwrap().contains(&id));
     }
 
     // contract: P4, C10
@@ -253,12 +250,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (kept, bytes) = chunk(1);
         let (other, other_bytes) = chunk(2);
-        let cache = Cache::open(dir.path().into(), 1 << 20).unwrap();
+        let cache = open(dir.path().into(), 1 << 20).unwrap();
         cache.put(&kept, &bytes).unwrap();
         cache.put(&other, &other_bytes).unwrap();
         drop(cache);
 
-        let cache = Cache::open_pinned(dir.path().into(), 50, &[kept]).unwrap();
+        let cache = Cache::open(dir.path().into(), 50, &[kept]).unwrap();
         assert!(cache.contains(&kept));
         assert!(!cache.contains(&other));
         assert!(cache.used() > cache.capacity());

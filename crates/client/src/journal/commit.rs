@@ -53,7 +53,7 @@ impl Committer {
     async fn commit(self: Arc<Self>, entry: EntryId) {
         let mut delay = FIRST_RETRY;
         while let Some(job) = self.next(entry).await {
-            self.space.commits.wait().await;
+            let _ = self.space.commits.subscribe().wait_for(|paused| !*paused).await;
             let attempt = |record| self.attempt(&job.sealed, record);
             let outcome = match commit_dropping_lost_base(&job.record, attempt).await {
                 Ok(version) => {

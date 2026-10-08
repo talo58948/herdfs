@@ -27,10 +27,11 @@ pub use inodes::Inodes;
 pub use kernel::Kernel;
 pub(crate) use nfs::{Identity, Nfs};
 use herdfs_core::proto::{Entry, EntryId, Kind};
+use tokio::sync::watch;
 
 use crate::{
     cache::Cache,
-    journal::{CommitGate, Journal, Local},
+    journal::{Journal, Local},
     kept::Kept,
     lru::Lru,
     reader::Reader,
@@ -93,12 +94,6 @@ pub(crate) enum Invalidation {
     },
 }
 
-pub(crate) struct MountState {
-    pub journal: Arc<Journal>,
-    pub commits: Arc<CommitGate>,
-    pub kept: Option<Arc<Kept>>,
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum OpenMode {
     Read,
@@ -122,11 +117,11 @@ impl OpenMode {
 
 pub struct Space {
     pub(crate) remote: Arc<Remote>,
-    reader: Arc<Reader>,
+    pub(crate) reader: Arc<Reader>,
     pub(crate) cache: Arc<Cache>,
     pub(crate) journal: Arc<Journal>,
-    pub(crate) commits: Arc<CommitGate>,
-    pub(crate) kept: Option<Arc<Kept>>,
+    pub(crate) commits: watch::Sender<bool>,
+    pub(crate) kept: Arc<Kept>,
     pub(crate) stats: Arc<Stats>,
     decider: Mutex<Decider>,
     /// Latest access record by entry, retained after its handle closes for `explain`.
@@ -148,7 +143,9 @@ impl Space {
     pub fn new(
         remote: Arc<Remote>,
         cache: Arc<Cache>,
-        mount: MountState,
+        journal: Arc<Journal>,
+        commits: watch::Sender<bool>,
+        kept: Arc<Kept>,
         stats: Arc<Stats>,
         decider: Decider,
         kernel: Arc<Kernel>,
@@ -159,9 +156,9 @@ impl Space {
             remote,
             reader,
             cache,
-            journal: mount.journal,
-            commits: mount.commits,
-            kept: mount.kept,
+            journal,
+            commits,
+            kept,
             stats,
             decider: Mutex::new(decider),
             accesses: Mutex::default(),
@@ -254,8 +251,12 @@ impl Space {
 
     /// The counters behind `user.herdfs.stats`.
     pub fn stats(&self) -> Vec<u8> {
-        self.stats
-            .json(self.inodes.count(Local::is_pending), self.remote.round_trip.get())
+        let round_trip = self
+            .remote
+            .round_trip
+            .get()
+            .map(|seconds| (seconds * 1e3).round() as u64);
+        self.stats.json(self.inodes.count(Local::is_pending), round_trip)
     }
 
     pub(crate) fn explain_path(&self, path: &herdfs_core::SpacePath) -> Option<Vec<u8>> {

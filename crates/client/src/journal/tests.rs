@@ -47,21 +47,25 @@ impl Mount {
         let token = other.path().join("token");
         fs::write(&token, "t").unwrap();
         let remote = Remote::new("http://127.0.0.1:9", "test", token, &[]).unwrap();
-        let cache = Cache::open(other.path().join("cache"), 1 << 20).unwrap();
+        let cache = Cache::open(other.path().join("cache"), 1 << 20, &[]).unwrap();
         let (remote, cache, stats, kernel) = (
             Arc::new(remote),
             Arc::new(cache),
             Arc::new(Stats::default()),
             Arc::new(Kernel::new(EntryId(1))),
         );
+        let pins = other.path().join("pins.json");
+        let kept = Arc::new(crate::kept::Kept::new(
+            pins.clone(),
+            crate::kept::load(&pins).unwrap(),
+        ));
+        let (commits, _) = tokio::sync::watch::channel(false);
         let space = Space::new(
             remote,
             cache,
-            crate::fs::MountState {
-                journal: journal.clone(),
-                commits: Arc::new(crate::journal::CommitGate::default()),
-                kept: None,
-            },
+            journal.clone(),
+            commits,
+            kept,
             stats,
             Decider::Fixed(AccessPlan::STREAM),
             kernel,
@@ -147,6 +151,26 @@ fn read(mount: &Mount) -> Vec<u8> {
     let mut bytes = vec![0; copy.metadata().unwrap().len() as usize];
     copy.read_exact_at(&mut bytes, 0).unwrap();
     bytes
+}
+
+// contract: C4a, U1
+#[tokio::test]
+async fn pausing_releases_a_close_already_waiting_for_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mount, _woken) = sealed(dir.path(), b"waiting");
+    let space = mount.committer.space.clone();
+    let waiting = tokio::spawn({
+        let space = space.clone();
+        async move { space.committed(ENTRY).await }
+    });
+    tokio::task::yield_now().await;
+    assert!(!waiting.is_finished());
+    space.commits.send_replace(true);
+    tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
 }
 
 // contract: C4a

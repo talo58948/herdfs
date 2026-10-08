@@ -1,5 +1,4 @@
 use std::fs;
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -72,8 +71,12 @@ pub(crate) fn serve(
 
 async fn run(listener: UnixListener, space: Arc<Space>, mount: Registration) {
     loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            return;
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(error) => {
+                tracing::warn!(%error, "control socket accept failed");
+                continue;
+            }
         };
         let space = space.clone();
         let mount = mount.clone();
@@ -87,7 +90,7 @@ async fn run(listener: UnixListener, space: Arc<Space>, mount: Registration) {
 
 async fn connection(stream: UnixStream, space: Arc<Space>, mount: Registration) -> anyhow::Result<()> {
     ensure!(
-        same_user(peer_uid(&stream)?, rustix::process::geteuid().as_raw()),
+        stream.peer_cred()?.uid() == rustix::process::geteuid().as_raw(),
         "control peer is not the mounting user"
     );
     let (read, mut write) = stream.into_split();
@@ -108,7 +111,7 @@ async fn connection(stream: UnixStream, space: Arc<Space>, mount: Registration) 
 async fn answer(space: &Space, mount: &Registration, request: Request) -> anyhow::Result<Value> {
     match request {
         Request::Status => {
-            let (kept_bytes, pins) = kept(space)?.status();
+            let (kept_bytes, pins) = space.kept.status(space);
             let pending: Vec<_> = space
                 .pending()
                 .into_iter()
@@ -117,8 +120,8 @@ async fn answer(space: &Space, mount: &Registration, request: Request) -> anyhow
             Ok(json!({
                 "ok": true, "space": mount.space, "mountpoint": mount.mountpoint,
                 "connected": space.remote.link.connected(),
-                "round_trip_ms": space.remote.round_trip.get().map(|seconds| seconds * 1e3),
-                "paused": space.commits.is_paused(), "pending": pending,
+                "round_trip_ms": space.remote.round_trip.get().map(|seconds| (seconds * 1e3).round() as u64),
+                "paused": *space.commits.borrow(), "pending": pending,
                 "cache": {"used": space.cache.used(), "budget": space.cache.capacity()},
                 "kept": {"bytes": kept_bytes, "pins": pins.into_iter().map(|(path, ready)| json!({"path":path,"ready":ready})).collect::<Vec<_>>()}
             }))
@@ -132,42 +135,44 @@ async fn answer(space: &Space, mount: &Registration, request: Request) -> anyhow
             with_ok(serde_json::from_slice(&value)?)
         }
         Request::Pin { path } => {
-            kept(space)?.pin(relative(mount, &path)?)?;
+            space.kept.pin(relative(mount, &path)?)?;
             Ok(json!({"ok":true}))
         }
         Request::Unpin { path } => {
-            kept(space)?.unpin(&relative(mount, &path)?)?;
+            space.kept.unpin(space, &relative(mount, &path)?)?;
             Ok(json!({"ok":true}))
         }
         Request::Pause => {
-            space.commits.pause();
+            space.commits.send_replace(true);
             Ok(json!({"ok":true}))
         }
         Request::Resume => {
-            space.commits.resume();
+            space.commits.send_replace(false);
             Ok(json!({"ok":true}))
         }
         Request::File { path } => {
             let path = relative(mount, &path)?;
-            let (kept, downloading, error) = kept(space)?.file(&path);
-            let pending = space
-                .pending()
-                .iter()
-                .any(|(pending, _)| pending == path.as_str());
+            let (kept, downloading, error) = space.kept.file(&path);
+            let pending = space.inodes.at(&path).is_some_and(|(entry, _, _)| {
+                space
+                    .inodes
+                    .local(entry.id, |local| local.is_pending())
+                    .unwrap_or(false)
+            });
             Ok(json!({"ok":true,"kept":kept,"downloading":downloading,"pending":pending,"error":error}))
         }
     }
 }
 
-fn kept(space: &Space) -> anyhow::Result<&crate::kept::Kept> {
-    space
-        .kept
-        .as_deref()
-        .context("keep-downloaded state is unavailable")
-}
-
 fn relative(mount: &Registration, path: &Path) -> anyhow::Result<SpacePath> {
-    let path = super::absolute(path)?;
+    ensure!(path.is_absolute(), "path is not absolute");
+    ensure!(
+        path.components().all(|component| matches!(
+            component,
+            std::path::Component::RootDir | std::path::Component::Normal(_)
+        )),
+        "path contains a non-normal component"
+    );
     let relative = path
         .strip_prefix(&mount.mountpoint)
         .with_context(|| format!("{} is outside {}", path.display(), mount.mountpoint.display()))?;
@@ -195,45 +200,6 @@ fn failure(error: &anyhow::Error) -> Value {
     json!({"ok":false,"error":error.to_string()})
 }
 
-fn same_user(peer: u32, owner: u32) -> bool {
-    peer == owner
-}
-
-#[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
-fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
-    let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
-    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    // SAFETY: both pointers name writable values of the lengths supplied to getsockopt.
-    let result = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&mut credentials as *mut libc::ucred).cast(),
-            &mut length,
-        )
-    };
-    if result == 0 {
-        Ok(credentials.uid)
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
-    let (mut uid, mut gid) = (0, 0);
-    // SAFETY: uid and gid are writable for getpeereid's output values.
-    let result = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
-    if result == 0 {
-        Ok(uid)
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,7 +208,38 @@ mod tests {
     #[tokio::test]
     async fn peer_credentials_name_the_local_user() {
         let (one, _two) = UnixStream::pair().unwrap();
-        assert_eq!(peer_uid(&one).unwrap(), rustix::process::geteuid().as_raw());
-        assert!(!same_user(1, 2));
+        assert_eq!(
+            one.peer_cred().unwrap().uid(),
+            rustix::process::geteuid().as_raw()
+        );
+    }
+
+    // contract: U2
+    #[test]
+    fn control_paths_are_absolute_and_normal() {
+        let mount = Registration {
+            id: "test".into(),
+            space: "space".into(),
+            authority: "http://authority".into(),
+            mountpoint: "/mount".into(),
+            socket: "/socket".into(),
+            pid: 1,
+        };
+        assert_eq!(
+            relative(&mount, Path::new("/mount/file")).unwrap().as_str(),
+            "file"
+        );
+        assert!(
+            relative(&mount, Path::new("mount/file"))
+                .unwrap_err()
+                .to_string()
+                .contains("not absolute")
+        );
+        assert!(
+            relative(&mount, Path::new("/mount/../outside"))
+                .unwrap_err()
+                .to_string()
+                .contains("non-normal")
+        );
     }
 }
