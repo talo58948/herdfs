@@ -5,11 +5,10 @@
 use std::time::Instant;
 use std::{fs::File, future::Future, sync::Arc};
 
-use fuser::{Errno, INodeNo};
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{Entry, EntryId};
 
-use super::{OpenMode, Space, TTL};
+use super::{InodeNo, OpenMode, Space, TTL};
 use crate::{Error, Result, reader::Head};
 
 type Held = (Entry, Instant, bool);
@@ -18,7 +17,7 @@ impl Space {
     /// The child in `parent`, when it was asked for, and its journal copy while it holds changes.
     pub(super) async fn child(
         &self,
-        parent: INodeNo,
+        parent: InodeNo,
         name: String,
     ) -> Result<(Entry, Instant, Option<Arc<File>>)> {
         let asked = Instant::now();
@@ -35,7 +34,7 @@ impl Space {
     }
 
     /// A fresh child held under a fresh parent, without asking the authority.
-    pub(super) async fn fresh_child(&self, parent: INodeNo, name: &str) -> Result<Option<Entry>> {
+    pub(super) async fn fresh_child(&self, parent: InodeNo, name: &str) -> Result<Option<Entry>> {
         let (held, reuse) = self.held_child(parent, name)?;
         let Some((entry, ..)) = held.filter(|(_, at, current)| reuse && *current && at.elapsed() < TTL)
         else {
@@ -49,7 +48,7 @@ impl Space {
     /// what this client knows for TTL after that, so opens see commits (C2), else the authority's
     /// answer; either way one snapshot of its inode (C1). Offline, the last entry seen, however
     /// old, keeps cached reads and writes working (C12).
-    pub(super) async fn entry(&self, ino: INodeNo) -> Result<(Entry, Instant, Option<Arc<File>>)> {
+    pub(super) async fn entry(&self, ino: InodeNo) -> Result<(Entry, Instant, Option<Arc<File>>)> {
         let asked = Instant::now();
         let id = self.entry_id(ino);
         let held = self.inodes.with(id, |state| state.cached()).flatten();
@@ -89,7 +88,7 @@ impl Space {
         Ok((entry, at, local))
     }
 
-    fn held_child(&self, parent: INodeNo, name: &str) -> Result<(Option<Held>, bool)> {
+    fn held_child(&self, parent: InodeNo, name: &str) -> Result<(Option<Held>, bool)> {
         let bound = self.bound(parent)?;
         let path = bound.as_ref().and_then(|(path, _)| path.join(name).ok());
         let held = path.as_ref().and_then(|path| self.inodes.at(path));
@@ -99,14 +98,14 @@ impl Space {
 
     /// ESTALE for an entry the authority no longer finds where it was looked for. Its path is
     /// unbound, so the lookup the kernel then makes asks the authority (C7).
-    pub(super) fn gone(&self, ino: INodeNo, err: Error) -> Error {
+    pub(super) fn gone(&self, ino: InodeNo, err: Error) -> Error {
         if !err.is_not_found() {
             return err;
         }
         if let Ok(Some(path)) = self.path(ino) {
             self.inodes.unbind(&path);
         }
-        Errno::ESTALE.into()
+        libc::ESTALE.into()
     }
 
     /// Takes an entry the authority returned, and switches an inode that open files read to a
@@ -156,7 +155,7 @@ impl Space {
             self.kernel.invalidate_attrs(entry);
         }
         if mode.writes() && !writable {
-            return Err(Errno::EACCES.into());
+            return Err(libc::EACCES.into());
         }
         let head = self.inodes.with(entry, |state| state.followed()).flatten();
         Ok(head)
@@ -174,36 +173,30 @@ impl Space {
         match with(self.current(entry).await?).await {
             Err(err) if err.is_not_found() => {
                 let final_error = |err: Error| {
-                    if err.errno() == Errno::ESTALE {
-                        Errno::EIO.into()
+                    if err.errno() == libc::ESTALE {
+                        libc::EIO.into()
                     } else {
                         err
                     }
                 };
                 let head = self.head(entry, OpenMode::Read).await.map_err(final_error)?;
                 let used = with(head).await;
-                used.map_err(|err| {
-                    if err.is_not_found() {
-                        Errno::EIO.into()
-                    } else {
-                        err
-                    }
-                })
+                used.map_err(|err| if err.is_not_found() { libc::EIO.into() } else { err })
             }
             used => used,
         }
     }
 
     /// Whether the inode is known, and its path with when that was confirmed, if it has one.
-    fn bound(&self, ino: INodeNo) -> Result<Option<(SpacePath, Instant)>> {
-        if ino == INodeNo::ROOT {
+    fn bound(&self, ino: InodeNo) -> Result<Option<(SpacePath, Instant)>> {
+        if ino == InodeNo::ROOT {
             return Ok(Some((SpacePath::root(), Instant::now())));
         }
-        Ok(self.inodes.bound(self.entry_id(ino)).ok_or(Errno::ENOENT)?)
+        Ok(self.inodes.bound(self.entry_id(ino)).ok_or(libc::ENOENT)?)
     }
 
     /// The inode's path as known, without asking: `None` once another entry took it.
-    pub(super) fn path(&self, ino: INodeNo) -> Result<Option<SpacePath>> {
+    pub(super) fn path(&self, ino: InodeNo) -> Result<Option<SpacePath>> {
         Ok(self.bound(ino)?.map(|(path, _)| path))
     }
 }

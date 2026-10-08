@@ -7,11 +7,12 @@ use std::{
     path::PathBuf,
 };
 
-use fuser::{Errno, FileAttr, INodeNo, OpenFlags, ReplyDirectory};
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{EntryId, ErrorCode};
 
-use super::{MAX_NAME, PERMISSIONS, Space, TTL, handles::Handle};
+use super::{
+    Attributes, DirectoryEntry, InodeNo, MAX_NAME, OpenMode, PERMISSIONS, Space, TTL, handles::Handle,
+};
 use crate::{Error, Result, journal::Local, lock};
 
 pub struct AttrChange {
@@ -28,12 +29,12 @@ impl Space {
     /// first and O_EXCL was not asked for, opens that file instead, as O_CREAT does (C5).
     pub async fn create(
         self: Arc<Self>,
-        (parent, name): (INodeNo, OsString),
+        (parent, name): (InodeNo, OsString),
         mode: u32,
-        flags: i32,
+        exclusive: bool,
+        open_mode: OpenMode,
         pid: u32,
-    ) -> Result<(FileAttr, u64)> {
-        let exclusive = flags & libc::O_EXCL != 0;
+    ) -> Result<(Attributes, u64)> {
         let parent_id = self.entry_id(parent);
         let name = child_name(&name)?;
         let asked = Instant::now();
@@ -45,7 +46,7 @@ impl Space {
             Err(Error::Api(error)) if error.code == ErrorCode::Exists && !exclusive => {
                 let (entry, asked, local) = self.child(parent, name).await?;
                 let attr = self.looked_up(&entry, asked, local.as_deref());
-                let open = self.clone().open(self.ino(entry.id), OpenFlags(flags), pid);
+                let open = self.clone().open(self.ino(entry.id), open_mode, pid);
                 return Ok((attr, open.await?));
             }
             created => created?,
@@ -56,23 +57,23 @@ impl Space {
         Ok((attr, fh))
     }
 
-    pub async fn lookup(self: Arc<Self>, parent: INodeNo, name: OsString) -> Result<(FileAttr, Duration)> {
+    pub async fn lookup(self: Arc<Self>, parent: InodeNo, name: OsString) -> Result<(Attributes, Duration)> {
         let (entry, asked, local) = self.child(parent, child_name(&name)?).await?;
         let attr = self.looked_up(&entry, asked, local.as_deref());
         Ok((attr, TTL.saturating_sub(asked.elapsed())))
     }
 
     /// The held inode's attributes, wherever another client has moved it (C7).
-    pub async fn getattr(self: Arc<Self>, ino: INodeNo) -> Result<(FileAttr, Duration)> {
+    pub async fn getattr(self: Arc<Self>, ino: InodeNo) -> Result<(Attributes, Duration)> {
         let (entry, asked, local) = self.entry(ino).await?;
         let attr = self.attr(&entry, local.as_deref());
         Ok((attr, TTL.saturating_sub(asked.elapsed())))
     }
 
-    pub async fn setattr(self: Arc<Self>, ino: INodeNo, change: AttrChange) -> Result<FileAttr> {
+    pub async fn setattr(self: Arc<Self>, ino: InodeNo, change: AttrChange) -> Result<Attributes> {
         let foreign = |id: Option<u32>, own: u32| id.is_some_and(|id| id != own);
         if foreign(change.uid, self.owner.0) || foreign(change.gid, self.owner.1) {
-            return Err(Errno::EPERM.into());
+            return Err(libc::EPERM.into());
         }
         // Answered from the entry held, which offline lets a truncation go on (C12), and found
         // before anything is journaled, so a failure changes nothing.
@@ -108,12 +109,12 @@ impl Space {
         Ok(self.attr(&entry, local.as_deref()))
     }
 
-    pub async fn readlink(self: Arc<Self>, ino: INodeNo) -> Result<Vec<u8>> {
+    pub async fn readlink(self: Arc<Self>, ino: InodeNo) -> Result<Vec<u8>> {
         let (entry, ..) = self.entry(ino).await?;
-        Ok(entry.target.ok_or(Errno::EINVAL)?.into_bytes())
+        Ok(entry.target.ok_or(libc::EINVAL)?.into_bytes())
     }
 
-    pub async fn mkdir(self: Arc<Self>, parent: INodeNo, name: OsString, mode: u32) -> Result<FileAttr> {
+    pub async fn mkdir(self: Arc<Self>, parent: InodeNo, name: OsString, mode: u32) -> Result<Attributes> {
         let parent_id = self.entry_id(parent);
         let asked = Instant::now();
         let entry = self
@@ -125,11 +126,11 @@ impl Space {
 
     pub async fn symlink(
         self: Arc<Self>,
-        parent: INodeNo,
+        parent: InodeNo,
         name: OsString,
         target: PathBuf,
-    ) -> Result<FileAttr> {
-        let target = target.into_os_string().into_string().map_err(|_| Errno::EINVAL)?;
+    ) -> Result<Attributes> {
+        let target = target.into_os_string().into_string().map_err(|_| libc::EINVAL)?;
         let parent_id = self.entry_id(parent);
         let asked = Instant::now();
         let entry = self.remote.symlink(parent_id, child_name(&name)?, target).await?;
@@ -137,7 +138,7 @@ impl Space {
     }
 
     /// Unlinks a file or symlink, or removes an empty directory.
-    pub async fn remove(self: Arc<Self>, parent: INodeNo, name: OsString) -> Result<()> {
+    pub async fn remove(self: Arc<Self>, parent: InodeNo, name: OsString) -> Result<()> {
         let parent_id = self.entry_id(parent);
         let removed = self.remote.remove(parent_id, child_name(&name)?).await?;
         let path = &removed.path;
@@ -154,8 +155,8 @@ impl Space {
     /// Renames at the authority, atomically there (C7), then moves every known path below.
     pub async fn rename(
         self: Arc<Self>,
-        from: (INodeNo, OsString),
-        to: (INodeNo, OsString),
+        from: (InodeNo, OsString),
+        to: (InodeNo, OsString),
     ) -> Result<Option<EntryId>> {
         let parents = (self.entry_id(from.0), self.entry_id(to.0));
         let (from_name, to_name) = (child_name(&from.1)?, child_name(&to.1)?);
@@ -164,7 +165,7 @@ impl Space {
         let current = self.remote.lookup(parents.0, from_name.clone()).await?;
         self.follow_child(parents.0, &current, asked).await;
         let source = match held {
-            Some(held) if held.id != current.id => return Err(Errno::ESTALE.into()),
+            Some(held) if held.id != current.id => return Err(libc::ESTALE.into()),
             _ => current,
         };
         self.settle(&source.path).await?;
@@ -195,7 +196,7 @@ impl Space {
     }
 
     /// Lists the directory once, for the readdir calls on this handle to page through.
-    pub async fn opendir(self: Arc<Self>, ino: INodeNo) -> Result<u64> {
+    pub async fn opendir(self: Arc<Self>, ino: InodeNo) -> Result<u64> {
         let asked = Instant::now();
         let entries = self.remote.list(self.entry_id(ino)).await?;
         let listed = |entry| {
@@ -209,18 +210,21 @@ impl Space {
         Ok(handle)
     }
 
-    pub fn readdir(&self, handle: u64, offset: u64, mut reply: ReplyDirectory) {
+    pub fn readdir(&self, handle: u64, offset: u64) -> Result<Vec<DirectoryEntry>> {
         let listings = lock(&self.listings);
-        let Some(listing) = listings.get(&handle) else {
-            return reply.error(Errno::EBADF);
-        };
+        let listing = listings.get(&handle).ok_or(libc::EBADF)?;
         let offset = usize::try_from(offset).unwrap_or(usize::MAX);
-        for (next, (ino, kind, name)) in listing.iter().enumerate().skip(offset) {
-            if reply.add(*ino, next as u64 + 1, *kind, name) {
-                break;
-            }
-        }
-        reply.ok();
+        Ok(listing
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .map(|(next, (ino, kind, name))| DirectoryEntry {
+                ino: *ino,
+                kind: *kind,
+                name: name.clone(),
+                next: next as u64 + 1,
+            })
+            .collect())
     }
 
     pub fn releasedir(&self, handle: u64) {
@@ -230,12 +234,12 @@ impl Space {
 
 fn child_name(name: &OsStr) -> Result<String> {
     if name.len() > MAX_NAME {
-        return Err(Errno::ENAMETOOLONG.into());
+        return Err(libc::ENAMETOOLONG.into());
     }
-    let name = name.to_str().ok_or(Errno::EINVAL)?;
-    let path = SpacePath::try_from(name).map_err(|_| Errno::EINVAL)?;
+    let name = name.to_str().ok_or(libc::EINVAL)?;
+    let path = SpacePath::try_from(name).map_err(|_| libc::EINVAL)?;
     if path.parent() != Some(SpacePath::root()) {
-        return Err(Errno::EINVAL.into());
+        return Err(libc::EINVAL.into());
     }
     Ok(name.to_owned())
 }

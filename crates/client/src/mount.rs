@@ -1,16 +1,24 @@
 //! `herdfs mount`: connects to the authority, resumes pending commits and serves FUSE.
 
-use std::{net::IpAddr, path::PathBuf, sync::Arc};
+use std::{net::IpAddr, path::PathBuf};
 
-use anyhow::Context;
-use fuser::{Config, MountOption, Session};
-use herdfs_core::SpacePath;
-use tokio::signal::unix::{SignalKind, signal};
-
-use crate::fs::{Fuse, Inodes, Kernel, Space};
-use crate::journal::{Committer, Journal};
-use crate::strategy::{Decider, Jev, StrategyArg};
-use crate::{cache::Cache, remote::Remote, stats::Stats};
+use crate::strategy::StrategyArg;
+#[cfg(target_os = "linux")]
+use {
+    crate::{
+        cache::Cache,
+        fs::{Fuse, Inodes, Kernel, Space},
+        journal::{Committer, Journal},
+        remote::Remote,
+        stats::Stats,
+        strategy::{Decider, Jev},
+    },
+    anyhow::Context,
+    fuser::{Config, MountOption, Session},
+    herdfs_core::SpacePath,
+    std::sync::Arc,
+    tokio::signal::unix::{SignalKind, signal},
+};
 
 /// Flags of `herdfs mount`.
 #[derive(clap::Args)]
@@ -49,6 +57,7 @@ pub struct MountArgs {
 }
 
 /// Mounts the space and serves it until it is unmounted or the process gets SIGINT or SIGTERM.
+#[cfg(target_os = "linux")]
 pub fn mount(args: &MountArgs) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let _context = runtime.enter();
@@ -60,7 +69,7 @@ pub fn mount(args: &MountArgs) -> anyhow::Result<()> {
     let fuse = Fuse::new(space.clone(), runtime.handle().clone());
     let mut session = Session::new(fuse, &args.mountpoint, &config)
         .with_context(|| format!("mounting at {}", args.mountpoint.display()))?;
-    space.mounted(session.notifier());
+    Fuse::mounted(&space, session.notifier());
     let mut unmounter = session.unmount_callable();
     runtime.spawn(async move {
         tokio::select! {
@@ -76,6 +85,12 @@ pub fn mount(args: &MountArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn mount(_args: &MountArgs) -> anyhow::Result<()> {
+    anyhow::bail!("mounting is not yet supported on this platform")
+}
+
+#[cfg(target_os = "linux")]
 async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
     let (authority, space, token_file) = (&args.authority, &args.space, &args.token_file);
     let remote = Remote::new(authority, space, token_file.clone(), &args.resolve)
@@ -100,8 +115,15 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
         }
     };
     let kernel = Arc::new(Kernel::new(root.id));
-    let space = Space::new(remote.clone(), cache, journal, stats, decider, kernel, inodes)?;
-    let space = Arc::new(space);
+    let space = Arc::new(Space::new(
+        remote.clone(),
+        cache,
+        journal,
+        stats,
+        decider,
+        kernel,
+        inodes,
+    ));
     let committer = Committer { space: space.clone() };
     tokio::spawn(Arc::new(committer).run(woken));
     tokio::spawn(remote.probe());
