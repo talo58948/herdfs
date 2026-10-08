@@ -77,7 +77,7 @@ fn wait_finished(sessions: &[PathBuf]) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(15);
     while sessions.iter().any(|dir| {
         fs::read_to_string(dir.join("status"))
-            .map(|status| status.trim() == "running")
+            .map(|status| matches!(status.trim(), "queued" | "running"))
             .unwrap_or(true)
     }) {
         ensure!(Instant::now() < deadline, "sessions did not finish");

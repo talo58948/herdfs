@@ -94,7 +94,7 @@ impl Runner {
         Ok(())
     }
 
-    /// Starts each session whose prompt is unchanged since the previous poll, while slots are free.
+    /// Queues complete prompts, then starts queued sessions while slots are free.
     async fn poll(&mut self) {
         let dirs = match session_dirs(&self.host_dir).await {
             Ok(dirs) => dirs,
@@ -105,12 +105,25 @@ impl Runner {
         };
         let mut pending = HashMap::new();
         for dir in dirs {
-            let Some(stamp) = session::new_prompt(&dir).await else {
-                continue;
+            let (stamp, queued) = match session::pending_prompt(&self.agent.mount, &dir).await {
+                Ok(Some(pending)) => pending,
+                Ok(None) => continue,
+                Err(err) => {
+                    log_error(&dir, &err);
+                    continue;
+                }
             };
-            if self.seen.get(&dir) == Some(&stamp)
-                && let Ok(slot) = Arc::clone(&self.slots).try_acquire_owned()
-            {
+            if !queued {
+                if self.seen.get(&dir) != Some(&stamp) {
+                    pending.insert(dir, stamp);
+                    continue;
+                }
+                if let Err(err) = session::queue(&self.agent.mount, &dir).await {
+                    log_error(&dir, &err);
+                    continue;
+                }
+            }
+            if let Ok(slot) = Arc::clone(&self.slots).try_acquire_owned() {
                 self.start(dir, slot).await;
                 continue;
             }
