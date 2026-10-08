@@ -4,7 +4,7 @@ use std::{net::IpAddr, path::PathBuf, sync::Arc};
 
 use crate::{
     cache::Cache,
-    fs::{Inodes, Kernel, Space},
+    fs::{Inodes, Space},
     journal::{Committer, Journal},
     kept::Kept,
     remote::Remote,
@@ -13,7 +13,6 @@ use crate::{
 };
 use anyhow::Context;
 use herdfs_core::SpacePath;
-use tokio::sync::watch;
 #[cfg(target_os = "linux")]
 use {
     crate::fs::Fuse,
@@ -146,7 +145,7 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Connected> {
     let cache = Cache::open(args.cache.clone(), args.cache_bytes, &loaded.pinned)
         .with_context(|| format!("opening cache {}", args.cache.display()))?;
     let inodes = Arc::new(Inodes::default());
-    let (opened_journal, woken) = Journal::open(journal.clone(), &inodes)
+    let (opened_journal, woken) = Journal::open(journal.clone(), inodes)
         .with_context(|| format!("opening journal {}", args.journal.display()))?;
     let (remote, cache, opened_journal) = (Arc::new(remote), Arc::new(cache), Arc::new(opened_journal));
     let stats = Arc::new(Stats::default());
@@ -160,19 +159,15 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Connected> {
             Decider::Jev(Arc::new(jev), stats.clone())
         }
     };
-    let kernel = Arc::new(Kernel::new(root.id));
     let kept = Arc::new(Kept::new(pins, loaded));
-    let (commits, _) = watch::channel(false);
     let space = Space::new(
         remote.clone(),
         cache,
         opened_journal,
-        commits,
         kept.clone(),
         stats,
         decider,
-        kernel,
-        inodes,
+        root.id,
     );
     let space = Arc::new(if args.nfs {
         space.without_metadata_cache()

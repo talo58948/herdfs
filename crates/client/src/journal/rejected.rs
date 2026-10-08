@@ -56,6 +56,7 @@ impl Journal {
 #[cfg(test)]
 mod tests {
     use std::fs::File;
+    use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
 
     use tokio::sync::{Notify, mpsc};
@@ -71,6 +72,7 @@ mod tests {
         let (wake, woken) = mpsc::unbounded_channel();
         let journal = Journal {
             dir: dir.path().into(),
+            inodes: Arc::new(crate::fs::Inodes::default()),
             wake,
             urged: Notify::new(),
         };

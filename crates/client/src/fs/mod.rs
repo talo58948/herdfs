@@ -144,14 +144,14 @@ impl Space {
         remote: Arc<Remote>,
         cache: Arc<Cache>,
         journal: Arc<Journal>,
-        commits: watch::Sender<bool>,
         kept: Arc<Kept>,
         stats: Arc<Stats>,
         decider: Decider,
-        kernel: Arc<Kernel>,
-        inodes: Arc<Inodes>,
+        root: EntryId,
     ) -> Self {
         let reader = Arc::new(Reader::new(remote.clone(), cache.clone(), stats.clone()));
+        let (commits, _) = watch::channel(false);
+        let inodes = journal.inodes.clone();
         Self {
             remote,
             reader,
@@ -162,7 +162,7 @@ impl Space {
             stats,
             decider: Mutex::new(decider),
             accesses: Mutex::default(),
-            kernel,
+            kernel: Arc::new(Kernel::new(root)),
             owner: (
                 rustix::process::geteuid().as_raw(),
                 rustix::process::getegid().as_raw(),

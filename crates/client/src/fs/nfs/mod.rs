@@ -143,7 +143,7 @@ mod tests {
 
     use super::*;
     use crate::cache::Cache;
-    use crate::fs::{Inodes, Kernel};
+    use crate::fs::Inodes;
     use crate::journal::Journal;
     use crate::remote::Remote;
     use crate::stats::Stats;
@@ -152,29 +152,25 @@ mod tests {
     fn adapter(root: &std::path::Path) -> (Nfs, Arc<Identity>) {
         let journal_dir = root.join("journal");
         let inodes = Arc::new(Inodes::default());
-        let (journal, _) = Journal::open(journal_dir.clone(), &inodes).unwrap();
+        let (journal, _) = Journal::open(journal_dir.clone(), inodes).unwrap();
         let token = root.join("token");
         fs::write(&token, "test").unwrap();
         let remote = Remote::new("http://127.0.0.1:9", "test", token, &[]).unwrap();
         let cache = Cache::open(root.join("cache"), 1 << 20, &[]).unwrap();
         let entry = EntryId(7);
-        let kernel = Arc::new(Kernel::new(entry));
         let pins = root.join("pins.json");
         let kept = Arc::new(crate::kept::Kept::new(
             pins.clone(),
             crate::kept::load(&pins).unwrap(),
         ));
-        let (commits, _) = tokio::sync::watch::channel(false);
         let space = Arc::new(Space::new(
             Arc::new(remote),
             Arc::new(cache),
             Arc::new(journal),
-            commits,
             kept,
             Arc::new(Stats::default()),
             Decider::Fixed(AccessPlan::STREAM),
-            kernel,
-            inodes,
+            entry,
         ));
         let identity = Arc::new(Identity::open(&journal_dir).unwrap());
         (Nfs::new(space, identity.clone()), identity)

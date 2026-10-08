@@ -1,6 +1,8 @@
 //! How `herdfs mount` starts, which the lab relies on. No contract line: these check the
 //! flags in docs/architecture.md.
 
+#![allow(clippy::unwrap_used)]
+
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::process::{Command, Output};

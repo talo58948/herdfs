@@ -5,7 +5,7 @@ use herdfs_core::{ChunkId, ChunkRef};
 use super::commit::Outcome;
 use super::*;
 use crate::cache::Cache;
-use crate::fs::{Kernel, Space};
+use crate::fs::Space;
 use crate::remote::Remote;
 use crate::stats::Stats;
 use crate::strategy::{AccessPlan, Decider};
@@ -42,34 +42,26 @@ struct Mount {
 impl Mount {
     fn open(dir: &Path) -> (Self, mpsc::UnboundedReceiver<EntryId>) {
         let inodes = Arc::new(Inodes::default());
-        let (journal, woken) = Journal::open(dir.into(), &inodes).unwrap();
+        let (journal, woken) = Journal::open(dir.into(), inodes.clone()).unwrap();
         let (journal, other) = (Arc::new(journal), tempfile::tempdir().unwrap());
         let token = other.path().join("token");
         fs::write(&token, "t").unwrap();
         let remote = Remote::new("http://127.0.0.1:9", "test", token, &[]).unwrap();
         let cache = Cache::open(other.path().join("cache"), 1 << 20, &[]).unwrap();
-        let (remote, cache, stats, kernel) = (
-            Arc::new(remote),
-            Arc::new(cache),
-            Arc::new(Stats::default()),
-            Arc::new(Kernel::new(EntryId(1))),
-        );
+        let (remote, cache, stats) = (Arc::new(remote), Arc::new(cache), Arc::new(Stats::default()));
         let pins = other.path().join("pins.json");
         let kept = Arc::new(crate::kept::Kept::new(
             pins.clone(),
             crate::kept::load(&pins).unwrap(),
         ));
-        let (commits, _) = tokio::sync::watch::channel(false);
         let space = Space::new(
             remote,
             cache,
             journal.clone(),
-            commits,
             kept,
             stats,
             Decider::Fixed(AccessPlan::STREAM),
-            kernel,
-            inodes.clone(),
+            EntryId(1),
         );
         let committer = Committer {
             space: Arc::new(space),

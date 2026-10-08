@@ -49,6 +49,7 @@ pub struct Record {
 
 pub struct Journal {
     dir: PathBuf,
+    pub(crate) inodes: Arc<Inodes>,
     wake: mpsc::UnboundedSender<EntryId>,
     /// Wakes committers waiting out a quiet period when an fsync wants its commit now.
     pub urged: Notify,
@@ -57,11 +58,12 @@ pub struct Journal {
 impl Journal {
     /// Opens the journal in `dir` and queues the sealed write each record names, in the entry's
     /// inode (C4a). Other copies were never closed, so nothing was promised for them.
-    pub fn open(dir: PathBuf, inodes: &Inodes) -> io::Result<(Self, mpsc::UnboundedReceiver<EntryId>)> {
+    pub fn open(dir: PathBuf, inodes: Arc<Inodes>) -> io::Result<(Self, mpsc::UnboundedReceiver<EntryId>)> {
         fs::create_dir_all(dir.join(REJECTED))?;
         let (wake, woken) = mpsc::unbounded_channel();
         let journal = Self {
             dir,
+            inodes,
             wake,
             urged: Notify::new(),
         };
@@ -70,7 +72,7 @@ impl Journal {
         let is_record = |path: &&PathBuf| path.extension() == Some(OsStr::new("json"));
         let mut kept = HashSet::new();
         for record in paths.iter().filter(is_record) {
-            kept.extend(journal.recover(record, inodes)?);
+            kept.extend(journal.recover(record, &journal.inodes)?);
         }
         let stray = |path: &&PathBuf| path.is_file() && !kept.contains(*path);
         paths.iter().filter(stray).try_for_each(fs::remove_file)?;
