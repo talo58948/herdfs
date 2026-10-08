@@ -116,7 +116,7 @@ impl Server {
         };
         let issuer = self.verifier.issuer().to_owned();
         let discovery = json!({
-            "issuer": issuer.clone(),
+            "issuer": issuer,
             "jwks_uri": format!("{issuer}/.well-known/jwks.json"),
             "id_token_signing_alg_values_supported": ["EdDSA"]
         });
