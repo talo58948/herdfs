@@ -1,20 +1,18 @@
 import AppKit
 import SwiftUI
 
+@MainActor
 enum ActionWindows {
     private static var windows: [NSWindowController] = []
 
-    @MainActor
     static func history(_ context: LocatedPath) {
         present(HistoryView(context: context), title: "Version History", size: NSSize(width: 600, height: 360))
     }
 
-    @MainActor
     static func share(_ context: LocatedPath) {
         present(ShareView(context: context), title: "Share", size: NSSize(width: 560, height: 360))
     }
 
-    @MainActor
     private static func present<Content: View>(_ content: Content, title: String, size: NSSize) {
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: size),

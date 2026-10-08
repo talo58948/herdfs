@@ -80,11 +80,10 @@ private final class LineRequest<Value: Decodable & Sendable>: @unchecked Sendabl
     func start() {
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + timeout)
-        timer.setEventHandler { [weak self] in self?.finish(.failure(ControlClientError.timedOut)) }
+        timer.setEventHandler { self.finish(.failure(ControlClientError.timedOut)) }
         timer.resume()
         self.timer = timer
-        connection.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
+        connection.stateUpdateHandler = { state in
             if case .ready = state {
                 self.send()
             } else if let error = ControlClient.failure(for: state) {
