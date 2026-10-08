@@ -34,6 +34,9 @@ xattr.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework.workspace = true
+
 [dev-dependencies]
 axum.workspace = true
 

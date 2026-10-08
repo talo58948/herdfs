@@ -7,7 +7,7 @@ settings:
     ARCHS: arm64
     CODE_SIGNING_ALLOWED: NO
     MACOSX_DEPLOYMENT_TARGET: "26.0"
-    SWIFT_VERSION: "5.0"
+    SWIFT_VERSION: "6.0"
 targets:
   HerdFS:
     type: application
@@ -25,17 +25,30 @@ targets:
     dependencies:
       - target: HerdFSFinder
         embed: true
+    postBuildScripts:
+      - name: Copy bundled CLI
+        script: |
+          cp "${SRCROOT}/../../target/aarch64-apple-darwin/release/herdfs" \
+            "${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/herdfs"
+          chmod 755 "${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/herdfs"
+        inputFiles:
+          - $(SRCROOT)/../../target/aarch64-apple-darwin/release/herdfs
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(EXECUTABLE_FOLDER_PATH)/herdfs
   HerdFSFinder:
     type: app-extension
     platform: macOS
     sources:
-      - Sources/Shared
+      - path: Sources/Shared
+        excludes:
+          - CLI.swift
       - Sources/Finder
     info:
       path: Sources/Finder/Info.plist
     settings:
       base:
-        ENABLE_APP_SANDBOX: NO
+        CODE_SIGN_ENTITLEMENTS: Sources/Finder/Finder.entitlements
+        ENABLE_APP_SANDBOX: YES
         PRODUCT_BUNDLE_IDENTIFIER: dev.herdfs.HerdFS.Finder
         PRODUCT_NAME: HerdFSFinder
         SKIP_INSTALL: YES

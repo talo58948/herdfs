@@ -2,7 +2,18 @@ name: macOS app
 
 on:
   push:
-    branches: [v01-macapp, v0.1, main]
+    branches: [v01-macapp]
+    paths:
+      - apps/macos/**
+      - crates/**
+      - Cargo.*
+      - .github/workflows/macos.yml
+  pull_request:
+    paths:
+      - apps/macos/**
+      - crates/**
+      - Cargo.*
+      - .github/workflows/macos.yml
   workflow_dispatch:
 
 permissions:
@@ -47,11 +58,12 @@ jobs:
             -derivedDataPath apps/macos/DerivedData \
             CODE_SIGNING_ALLOWED=NO
           app=apps/macos/DerivedData/Build/Products/Release/HerdFS.app
-          cp target/aarch64-apple-darwin/release/herdfs "$app/Contents/MacOS/herdfs"
-          chmod 755 "$app/Contents/MacOS/herdfs"
-          codesign --force --sign - "$app/Contents/PlugIns/HerdFSFinder.appex"
           codesign --force --sign - "$app/Contents/MacOS/herdfs"
+          codesign --force --sign - \
+            --entitlements apps/macos/Sources/Finder/Finder.entitlements \
+            "$app/Contents/PlugIns/HerdFSFinder.appex"
           codesign --force --sign - "$app"
+          codesign --verify --deep --strict "$app"
           ditto -c -k --keepParent "$app" HerdFS.app.zip
       - uses: actions/upload-artifact@v4
         with:

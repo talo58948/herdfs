@@ -1,6 +1,18 @@
 import Foundation
 import Network
 
+enum ControlClientError: LocalizedError {
+    case closed
+    case timedOut
+
+    var errorDescription: String? {
+        switch self {
+        case .closed: "Control socket closed"
+        case .timedOut: "Control socket timed out"
+        }
+    }
+}
+
 enum ControlClient {
     static func status(_ mount: MountRecord) async throws -> MountStatus {
         try await request(["op": "status"], from: mount.socket, as: MountStatus.self)
@@ -16,40 +28,67 @@ enum ControlClient {
         _ = try await request(payload, from: mount.socket, as: ControlOK.self)
     }
 
-    private static func request<Value: Decodable>(
+    static func request<Value: Decodable & Sendable>(
         _ payload: [String: String],
         from socket: String,
-        as type: Value.Type
+        as type: Value.Type,
+        timeout: TimeInterval = 2
     ) async throws -> Value {
         var data = try JSONSerialization.data(withJSONObject: payload)
         data.append(0x0A)
         return try await withCheckedThrowingContinuation { continuation in
-            LineRequest(data: data, socket: socket, continuation: continuation).start()
+            LineRequest(
+                data: data,
+                socket: socket,
+                timeout: timeout,
+                continuation: continuation
+            ).start()
+        }
+    }
+
+    static func failure(for state: NWConnection.State) -> Error? {
+        switch state {
+        case .waiting(let error), .failed(let error): error
+        case .cancelled: ControlClientError.closed
+        default: nil
         }
     }
 }
 
-private final class LineRequest<Value: Decodable> {
+private final class LineRequest<Value: Decodable & Sendable>: @unchecked Sendable {
     private let connection: NWConnection
     private let data: Data
+    private let timeout: TimeInterval
     private let continuation: CheckedContinuation<Value, Error>
     private let queue = DispatchQueue(label: "dev.herdfs.HerdFS.control")
     private var received = Data()
+    private var timer: DispatchSourceTimer?
     private var finished = false
 
-    init(data: Data, socket: String, continuation: CheckedContinuation<Value, Error>) {
+    init(
+        data: Data,
+        socket: String,
+        timeout: TimeInterval,
+        continuation: CheckedContinuation<Value, Error>
+    ) {
         self.data = data
+        self.timeout = timeout
         self.continuation = continuation
         connection = NWConnection(to: .unix(path: socket), using: .tcp)
     }
 
     func start() {
-        connection.stateUpdateHandler = { state in
-            switch state {
-            case .ready: self.send()
-            case .failed(let error): self.finish(.failure(error))
-            case .cancelled: self.finish(.failure(CLIError.failed("control socket closed")))
-            default: break
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + timeout)
+        timer.setEventHandler { [weak self] in self?.finish(.failure(ControlClientError.timedOut)) }
+        timer.resume()
+        self.timer = timer
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            if case .ready = state {
+                self.send()
+            } else if let error = ControlClient.failure(for: state) {
+                self.finish(.failure(error))
             }
         }
         connection.start(queue: queue)
@@ -71,7 +110,7 @@ private final class LineRequest<Value: Decodable> {
             } else if let error {
                 self.finish(.failure(error))
             } else if complete {
-                self.finish(.failure(CLIError.failed("control socket returned no line")))
+                self.finish(.failure(ControlClientError.closed))
             } else {
                 self.read()
             }
@@ -92,6 +131,8 @@ private final class LineRequest<Value: Decodable> {
     private func finish(_ result: Result<Value, Error>) {
         guard !finished else { return }
         finished = true
+        timer?.cancel()
+        timer = nil
         connection.stateUpdateHandler = nil
         connection.cancel()
         continuation.resume(with: result)

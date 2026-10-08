@@ -9,7 +9,7 @@ struct MenuView: View {
                 Text("HerdFS").font(.headline)
                 Spacer()
                 ProgressView().controlSize(.small).opacity(model.busy ? 1 : 0)
-                Button { Task { await model.refresh() } } label: {
+                Button { Task { await model.refreshSpaces() } } label: {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.borderless)
@@ -32,6 +32,16 @@ struct MenuView: View {
                 get: { model.openAtLogin },
                 set: model.setOpenAtLogin
             ))
+            if model.loginRequiresApproval {
+                Button("Approve Open at Login…", action: model.showLoginItemSettings)
+            }
+            if !model.finderEnabled {
+                HStack {
+                    Text("Finder extension is disabled").foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Enable…", action: model.showFinderSettings)
+                }
+            }
             HStack {
                 Button("Sign in…", action: model.signIn).disabled(model.busy)
                 Spacer()
@@ -56,9 +66,12 @@ struct MenuView: View {
                 TextField("herdfs", text: $model.clientID)
             }
             GridRow {
-                Color.clear.frame(width: 1, height: 1)
-                Button("Save settings", action: model.saveConfiguration)
-                    .controlSize(.small)
+                HStack {
+                    Spacer()
+                    Button("Save settings", action: model.saveConfiguration)
+                        .controlSize(.small)
+                }
+                .gridCellColumns(2)
             }
         }
         .textFieldStyle(.roundedBorder)

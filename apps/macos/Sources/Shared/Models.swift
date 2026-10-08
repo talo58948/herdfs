@@ -1,6 +1,6 @@
 import Foundation
 
-struct MountRecord: Codable, Equatable, Identifiable {
+struct MountRecord: Decodable, Equatable, Identifiable, Sendable {
     let id: String
     let space: String
     let authority: String
@@ -9,98 +9,82 @@ struct MountRecord: Codable, Equatable, Identifiable {
     let pid: Int32
 }
 
-struct PendingUpload: Codable, Equatable {
+struct PendingUpload: Decodable, Equatable, Sendable {
     let path: String
     let bytes: UInt64
 }
 
-struct CacheUse: Codable, Equatable {
+struct CacheUse: Decodable, Equatable, Sendable {
     let used: UInt64
     let budget: UInt64
 }
 
-struct KeptPath: Codable, Equatable {
-    let path: String
-    let ready: Bool
-}
-
-struct KeptUse: Codable, Equatable {
+struct KeptUse: Decodable, Equatable, Sendable {
     let bytes: UInt64
-    let pins: [KeptPath]
 }
 
-struct MountStatus: Codable, Equatable {
-    let ok: Bool
-    let space: String
-    let mountpoint: String
+struct MountStatus: Decodable, Equatable, Sendable {
     let connected: Bool
-    let roundTripMs: UInt64
     let paused: Bool
     let pending: [PendingUpload]
     let cache: CacheUse
     let kept: KeptUse
-
-    enum CodingKeys: String, CodingKey {
-        case ok, space, mountpoint, connected, paused, pending, cache, kept
-        case roundTripMs = "round_trip_ms"
-    }
 }
 
-struct FileState: Codable, Equatable {
-    let ok: Bool
+struct FileState: Decodable, Equatable, Sendable {
     let kept: Bool
     let downloading: Bool
     let pending: Bool
     let error: String?
 }
 
-struct ControlError: Codable, LocalizedError, Equatable {
+struct ControlError: Decodable, LocalizedError, Equatable, Sendable {
     let ok: Bool
     let error: String
 
     var errorDescription: String? { error }
 }
 
-struct ControlOK: Codable, Equatable {
-    let ok: Bool
-}
+struct ControlOK: Decodable, Equatable, Sendable {}
 
-struct SpaceAccess: Codable, Equatable, Identifiable {
+struct SpaceAccess: Decodable, Equatable, Identifiable, Sendable {
     var id: String { space }
     let space: String
-    let rootPerm: String?
-
-    enum CodingKeys: String, CodingKey {
-        case space
-        case rootPerm = "root_perm"
-    }
 }
 
-struct Version: Codable, Equatable, Identifiable {
+struct Version: Decodable, Equatable, Identifiable, Sendable {
     let id: UInt64
-    let entry: UInt64
     let size: UInt64
     let author: String
     let createdMs: Int64
 
     enum CodingKeys: String, CodingKey {
-        case id, entry, size, author
+        case id, size, author
         case createdMs = "created_ms"
     }
 }
 
-struct AccessGrant: Codable, Equatable, Identifiable {
+struct AccessGrant: Decodable, Equatable, Identifiable, Sendable {
     var id: String { "\(path)\u{0}\(principal)" }
     let path: String
     let principal: String
     let perm: String
 }
 
-enum Badge: String, Equatable {
-    case kept = "kept"
-    case downloading = "downloading"
-    case pending = "pending"
-    case error = "error"
+enum Badge: Equatable, Sendable {
+    case kept
+    case downloading
+    case pending
+    case error
+
+    var identifier: String {
+        switch self {
+        case .kept: "kept"
+        case .downloading: "downloading"
+        case .pending: "pending"
+        case .error: "error"
+        }
+    }
 
     static func choose(_ state: FileState) -> Badge? {
         if state.error != nil { return .error }

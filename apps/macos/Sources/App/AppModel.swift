@@ -1,11 +1,11 @@
 import AppKit
 import Darwin
+import FinderSync
 import Foundation
-import Security
 import ServiceManagement
 import UserNotifications
 
-struct SpaceState: Identifiable {
+struct SpaceState: Identifiable, Equatable, Sendable {
     let access: SpaceAccess
     let mount: MountRecord?
     let status: MountStatus?
@@ -20,8 +20,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var spaces: [SpaceState] = []
     @Published private(set) var busy = false
     @Published var error: String?
+    @Published private(set) var finderEnabled = FIFinderSyncController.isExtensionEnabled
     @Published private(set) var openAtLogin = SMAppService.mainApp.status == .enabled
+    @Published private(set) var loginRequiresApproval = SMAppService.mainApp.status == .requiresApproval
 
+    private static let cacheBytes = "10737418240"
     private let registry = MountRegistry()
     private var started = false
 
@@ -29,13 +32,24 @@ final class AppModel: ObservableObject {
         guard !started else { return }
         started = true
         Task {
-            await refresh()
-            await mountMissingAtLaunch()
+            await refreshSpaces()
+            mountMissingAtLaunch()
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                await refresh()
+                try? await Task.sleep(for: .seconds(60))
+                await refreshSpaces()
             }
         }
+        Task {
+            while !Task.isCancelled {
+                await refreshMounts()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+    }
+
+    func menuOpened() {
+        updateServiceStates()
+        Task { await refreshSpaces() }
     }
 
     func saveConfiguration() {
@@ -45,7 +59,7 @@ final class AppModel: ObservableObject {
         Configuration.authority = authority
         Configuration.issuer = issuer
         Configuration.clientID = clientID
-        Task { await refresh() }
+        Task { await refreshSpaces() }
     }
 
     func signIn() {
@@ -56,9 +70,11 @@ final class AppModel: ObservableObject {
         busy = true
         Task {
             do {
-                _ = try await CLI.run(["login", "--issuer", issuer, "--client-id", clientID])
-                try TokenKeychain.storeRefreshTokenCopy()
-                await refresh()
+                let command = try CLIArguments("login", options: [
+                    "--issuer", issuer, "--client-id", clientID,
+                ])
+                _ = try await CLI.run(command)
+                await refreshSpaces()
             } catch {
                 fail(error.localizedDescription)
             }
@@ -66,46 +82,49 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func refresh() async {
-        guard !authority.isEmpty else { return }
+    func refreshSpaces() async {
+        let savedAuthority = Configuration.authority
+        guard !savedAuthority.isEmpty else { return }
         do {
-            let access = try await CLI.json([SpaceAccess].self, ["spaces", "--authority", authority])
-            let mounts = registry.records()
-            var next: [SpaceState] = []
-            for space in access {
-                let mount = mounts.first { $0.space == space.space && $0.authority == authority }
-                let status: MountStatus?
-                if let mount {
-                    status = try? await ControlClient.status(mount)
-                } else {
-                    status = nil
-                }
-                next.append(SpaceState(access: space, mount: mount, status: status))
+            let command = try CLIArguments("spaces", options: ["--authority", savedAuthority])
+            let access = try await CLI.json([SpaceAccess].self, command)
+            let current = Dictionary(uniqueKeysWithValues: spaces.map { ($0.id, $0) })
+            let next = access.map { item in
+                let previous = current[item.id]
+                return SpaceState(access: item, mount: previous?.mount, status: previous?.status)
             }
-            spaces = next
+            if next != spaces { spaces = next }
             error = nil
+            await refreshMounts()
         } catch {
             fail(error.localizedDescription)
         }
     }
 
     func mount(_ space: SpaceState) {
-        let home = FileManager.default.homeDirectoryForCurrentUser
+        let home = realHomeDirectory()
         let mountpoint = home.appending(path: "HerdFS/\(space.id)")
         let state = home.appending(path: ".config/herdfs/state/\(space.id)")
+        let log = state.appending(path: "mount.log")
         do {
             try FileManager.default.createDirectory(at: mountpoint, withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
-            try CLI.spawn([
-                "mount", "--nfs", "--authority", authority, "--space", space.id,
-                "--cache", state.appending(path: "cache").path,
-                "--cache-bytes", "10737418240",
-                "--journal", state.appending(path: "journal").path,
-                mountpoint.path,
-            ])
+            let command = try CLIArguments(
+                "mount",
+                options: [
+                    "--nfs", "--authority", Configuration.authority, "--space", space.id,
+                    "--cache", state.appending(path: "cache").path,
+                    "--cache-bytes", Self.cacheBytes,
+                    "--journal", state.appending(path: "journal").path,
+                ],
+                positionals: [mountpoint.path],
+                spaceID: space.id
+            )
+            try CLI.spawn(command, stderr: log)
             Task {
-                try? await Task.sleep(nanoseconds: 700_000_000)
-                await refresh()
+                try? await Task.sleep(for: .seconds(1))
+                await refreshMounts()
+                surfaceMountFailure(spaceID: space.id, log: log)
             }
         } catch {
             fail(error.localizedDescription)
@@ -113,13 +132,15 @@ final class AppModel: ObservableObject {
     }
 
     func unmount(_ space: SpaceState) {
-        guard let pid = space.mount?.pid, kill(pid, SIGTERM) == 0 else {
-            fail("Could not stop the mount")
+        let executable = CLI.executableURL.standardizedFileURL.path
+        guard let mount = space.mount, processPath(mount.pid) == executable,
+              kill(mount.pid, SIGTERM) == 0 else {
+            fail("Could not verify and stop the mount process")
             return
         }
         Task {
-            try? await Task.sleep(nanoseconds: 700_000_000)
-            await refresh()
+            try? await Task.sleep(for: .seconds(1))
+            await refreshMounts()
         }
     }
 
@@ -128,7 +149,7 @@ final class AppModel: ObservableObject {
         Task {
             do {
                 try await ControlClient.command(paused ? "pause" : "resume", mount: mount)
-                await refresh()
+                await refreshMounts()
             } catch {
                 fail(error.localizedDescription)
             }
@@ -142,52 +163,96 @@ final class AppModel: ObservableObject {
             } else {
                 try SMAppService.mainApp.unregister()
             }
-            openAtLogin = SMAppService.mainApp.status == .enabled
+            updateServiceStates()
         } catch {
             fail(error.localizedDescription)
         }
     }
 
-    func open(_ link: URL) {
-        guard link.scheme == "herdfs", let space = link.host,
-              let mount = registry.records().first(where: { $0.space == space }) else { return }
-        let file = link.pathComponents.dropFirst().reduce(URL(fileURLWithPath: mount.mountpoint)) {
-            $0.appending(path: $1)
-        }
-        NSWorkspace.shared.activateFileViewerSelecting([file])
+    func showFinderSettings() {
+        FIFinderSyncController.showExtensionManagementInterface()
     }
 
-    private func mountMissingAtLaunch() async {
+    func showLoginItemSettings() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
+
+    func open(_ link: URL) {
+        let records = registry.records()
+        guard let link = AppLink.resolve(
+            link,
+            authority: Configuration.authority,
+            registry: registry,
+            records: records
+        ) else { return }
+        switch link.action {
+        case .history: ActionWindows.history(link.path)
+        case .share: ActionWindows.share(link.path)
+        case .copylink:
+            guard let value = link.canonicalURL?.absoluteString else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(value, forType: .string)
+        case nil:
+            NSWorkspace.shared.activateFileViewerSelecting([
+                URL(fileURLWithPath: link.path.mount.mountpoint).appending(path: link.path.relativePath),
+            ])
+        }
+    }
+
+    private func refreshMounts() async {
+        let authority = Configuration.authority
+        let records = registry.records().filter { $0.authority == authority }
+        await withTaskGroup(of: (String, MountRecord, MountStatus?).self) { group in
+            for record in records where spaces.contains(where: { $0.id == record.space }) {
+                group.addTask {
+                    (record.space, record, try? await ControlClient.status(record))
+                }
+            }
+            var mounted: [String: (MountRecord, MountStatus)] = [:]
+            for await (space, record, status) in group {
+                if let status { mounted[space] = (record, status) }
+            }
+            let next = spaces.map { space in
+                guard let (mount, status) = mounted[space.id] else {
+                    return SpaceState(access: space.access, mount: nil, status: nil)
+                }
+                return SpaceState(access: space.access, mount: mount, status: status)
+            }
+            if next != spaces { spaces = next }
+        }
+    }
+
+    private func mountMissingAtLaunch() {
         for space in spaces where space.mount == nil { mount(space) }
+    }
+
+    private func surfaceMountFailure(spaceID: String, log: URL) {
+        let found = registry.records().contains {
+            $0.space == spaceID && $0.authority == Configuration.authority
+        }
+        guard !found, let data = try? Data(contentsOf: log), !data.isEmpty else { return }
+        let message = String(decoding: data.suffix(2_000), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !message.isEmpty { fail(message) }
+    }
+
+    private func processPath(_ pid: Int32) -> String? {
+        var buffer = [CChar](repeating: 0, count: Int(PROC_PIDPATHINFO_MAXSIZE))
+        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+        return URL(fileURLWithPath: String(cString: buffer)).standardizedFileURL.path
+    }
+
+    private func updateServiceStates() {
+        finderEnabled = FIFinderSyncController.isExtensionEnabled
+        let status = SMAppService.mainApp.status
+        openAtLogin = status == .enabled
+        loginRequiresApproval = status == .requiresApproval
     }
 
     private func fail(_ message: String) {
         guard error != message else { return }
         error = message
         ErrorNotification.send(message)
-    }
-}
-
-private enum TokenKeychain {
-    static func storeRefreshTokenCopy() throws {
-        let token = FileManager.default.homeDirectoryForCurrentUser
-            .appending(path: ".config/herdfs/token")
-        let object = try JSONSerialization.jsonObject(with: Data(contentsOf: token)) as? [String: Any]
-        guard let refresh = object?["refresh_token"] as? String else {
-            throw CLIError.failed("login token had no refresh token")
-        }
-        let base: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "dev.herdfs.HerdFS",
-            kSecAttrAccount as String: "refresh-token",
-        ]
-        SecItemDelete(base as CFDictionary)
-        var item = base
-        item[kSecValueData as String] = Data(refresh.utf8)
-        let status = SecItemAdd(item as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw CLIError.failed("Keychain returned \(status)")
-        }
     }
 }
 

@@ -1,6 +1,6 @@
 import Foundation
 
-struct LocatedPath: Equatable {
+struct LocatedPath: Equatable, Sendable {
     let mount: MountRecord
     let relativePath: String
 }
@@ -8,7 +8,7 @@ struct LocatedPath: Equatable {
 struct MountRegistry {
     let directory: URL
 
-    init(directory: URL = FileManager.default.homeDirectoryForCurrentUser
+    init(directory: URL = realHomeDirectory()
         .appending(path: ".config/herdfs/mounts")) {
         self.directory = directory
     }

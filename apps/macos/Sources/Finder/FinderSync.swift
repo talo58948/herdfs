@@ -4,37 +4,26 @@ import FinderSync
 @MainActor
 final class FinderSync: FIFinderSync {
     private let registry = MountRegistry()
-    private let badges = BadgeCache()
+    private var records: [MountRecord] = []
+    private var directories: Set<URL> = []
+    private var requested: Set<URL> = []
+    private var commandErrors: Set<URL> = []
     private var registryTimer: DispatchSourceTimer?
 
     override init() {
         super.init()
         registerBadges()
-        refreshDirectories()
+        refresh()
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + 2, repeating: 2)
-        timer.setEventHandler { [weak self] in self?.refreshDirectories() }
+        timer.setEventHandler { [weak self] in self?.refresh() }
         timer.resume()
         registryTimer = timer
     }
 
     override func requestBadgeIdentifier(for url: URL) {
-        guard let located = registry.locate(url) else {
-            FIFinderSyncController.default().setBadgeIdentifier("", for: url)
-            return
-        }
-        if let cached = badges.lookup(url) {
-            FIFinderSyncController.default().setBadgeIdentifier(cached.badge?.rawValue ?? "", for: url)
-            return
-        }
-        Task {
-            let state = try? await ControlClient.file(url, mount: located.mount)
-            let badge = state.flatMap(Badge.choose)
-            badges.store(badge, for: url)
-            await MainActor.run {
-                FIFinderSyncController.default().setBadgeIdentifier(badge?.rawValue ?? "", for: url)
-            }
-        }
+        requested.insert(url)
+        updateBadge(for: url)
     }
 
     override func menu(for menuKind: FIMenuKind) -> NSMenu? {
@@ -51,54 +40,63 @@ final class FinderSync: FIFinderSync {
 
     @objc private func keepDownloaded() { control("pin") }
     @objc private func unpin() { control("unpin") }
-
-    @objc private func copyLink() {
-        guard let context = selectedContext() else { return }
-        var link = URLComponents()
-        link.scheme = "herdfs"
-        link.host = context.mount.space
-        link.path = "/" + context.relativePath
-        guard let value = link.url?.absoluteString else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(value, forType: .string)
-    }
-
-    @objc private func versionHistory() {
-        guard let context = selectedContext() else { return }
-        ActionWindows.history(context)
-    }
-
-    @objc private func share() {
-        guard let context = selectedContext() else { return }
-        ActionWindows.share(context)
-    }
+    @objc private func copyLink() { open(action: "copylink") }
+    @objc private func versionHistory() { open(action: "history") }
+    @objc private func share() { open(action: "share") }
 
     private func control(_ op: String) {
         let urls = FIFinderSyncController.default().selectedItemURLs() ?? []
         for url in urls {
-            guard let mount = registry.locate(url)?.mount else { continue }
+            guard let mount = registry.locate(url, in: records)?.mount else { continue }
             Task {
-                try? await ControlClient.command(op, path: url, mount: mount)
-                badges.remove(url)
-                await MainActor.run {
-                    FIFinderSyncController.default().setBadgeIdentifier("", for: url)
-                    self.requestBadgeIdentifier(for: url)
+                do {
+                    try await ControlClient.command(op, path: url, mount: mount)
+                    commandErrors.remove(url)
+                    updateBadge(for: url)
+                } catch {
+                    commandErrors.insert(url)
+                    setBadge(.error, for: url)
                 }
             }
         }
     }
 
-    private func selectedContext() -> ActionContext? {
+    private func open(action: String) {
         let controller = FIFinderSyncController.default()
         guard let url = controller.selectedItemURLs()?.first ?? controller.targetedURL(),
-              let located = registry.locate(url) else { return nil }
-        return ActionContext(mount: located.mount, relativePath: located.relativePath)
+              let located = registry.locate(url, in: records) else { return }
+        var link = URLComponents()
+        link.scheme = "herdfs"
+        link.host = located.mount.space
+        link.path = "/" + located.relativePath
+        link.queryItems = [URLQueryItem(name: "action", value: action)]
+        if let url = link.url { NSWorkspace.shared.open(url) }
     }
 
-    private func refreshDirectories() {
-        FIFinderSyncController.default().directoryURLs = Set(
-            registry.records().map { URL(fileURLWithPath: $0.mountpoint) }
-        )
+    private func refresh() {
+        let next = registry.records()
+        records = next
+        let nextDirectories = Set(records.map { URL(fileURLWithPath: $0.mountpoint) })
+        if nextDirectories != directories {
+            directories = nextDirectories
+            FIFinderSyncController.default().directoryURLs = directories
+        }
+        requested.forEach(updateBadge)
+    }
+
+    private func updateBadge(for url: URL) {
+        guard !commandErrors.contains(url), let mount = registry.locate(url, in: records)?.mount else {
+            setBadge(commandErrors.contains(url) ? .error : nil, for: url)
+            return
+        }
+        Task {
+            let state = try? await ControlClient.file(url, mount: mount)
+            setBadge(state.flatMap(Badge.choose), for: url)
+        }
+    }
+
+    private func setBadge(_ badge: Badge?, for url: URL) {
+        FIFinderSyncController.default().setBadgeIdentifier(badge?.identifier ?? "", for: url)
     }
 
     private func registerBadges() {
@@ -110,7 +108,7 @@ final class FinderSync: FIFinderSync {
         ]
         for (badge, symbol, label) in definitions {
             guard let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label) else { continue }
-            FIFinderSyncController.default().setBadgeImage(image, label: label, forBadgeIdentifier: badge.rawValue)
+            FIFinderSyncController.default().setBadgeImage(image, label: label, forBadgeIdentifier: badge.identifier)
         }
     }
 
@@ -118,36 +116,5 @@ final class FinderSync: FIFinderSync {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
         return item
-    }
-}
-
-private struct CachedBadge {
-    let badge: Badge?
-}
-
-private final class BadgeCache {
-    private let lock = NSLock()
-    private var values: [URL: (Date, Badge?)] = [:]
-
-    func lookup(_ url: URL) -> CachedBadge? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let (time, badge) = values[url], Date().timeIntervalSince(time) < 1 else {
-            values.removeValue(forKey: url)
-            return nil
-        }
-        return CachedBadge(badge: badge)
-    }
-
-    func store(_ badge: Badge?, for url: URL) {
-        lock.lock()
-        values[url] = (Date(), badge)
-        lock.unlock()
-    }
-
-    func remove(_ url: URL) {
-        lock.lock()
-        values.removeValue(forKey: url)
-        lock.unlock()
     }
 }

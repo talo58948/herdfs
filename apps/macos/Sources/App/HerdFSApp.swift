@@ -1,15 +1,28 @@
+import AppKit
 import SwiftUI
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    let model = AppModel()
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        model.start()
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        urls.forEach(model.open)
+    }
+}
 
 @main
 struct HerdFSApp: App {
-    @StateObject private var model = AppModel()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
         MenuBarExtra("HerdFS", systemImage: "externaldrive.connected.to.line.below") {
-            MenuView(model: model)
+            MenuView(model: delegate.model)
                 .frame(width: 380)
-                .task { model.start() }
-                .onOpenURL { model.open($0) }
+                .onAppear(perform: delegate.model.menuOpened)
         }
         .menuBarExtraStyle(.window)
     }
