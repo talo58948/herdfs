@@ -14,7 +14,7 @@ mod versions;
 use std::path::Path;
 
 pub use collect::{Collected, Policy};
-pub use local::LocalIssuer;
+pub use local::{Issued, LocalIssuer};
 use herdfs_core::{
     ChunkId, ChunkRef,
     proto::{self, ErrorCode, Kind, Perm, Request, Response},
@@ -54,7 +54,7 @@ impl Authority {
             "database schema version {version} is newer than supported version {}",
             db::SCHEMA_VERSION
         );
-        if version < db::SCHEMA_VERSION {
+        if version < db::MIGRATES_FROM {
             db.execute_batch(db::DROP_ALL)?;
         }
         db.execute_batch(db::SCHEMA)?;

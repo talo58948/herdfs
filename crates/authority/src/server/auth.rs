@@ -9,6 +9,7 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use crate::Principal;
+use super::unauthenticated;
 
 /// The issuer's keys are fetched again this often, so a key it withdraws
 /// stops working and a new one starts within this time.
@@ -64,6 +65,10 @@ impl Verifier {
             keys: Mutex::default(),
             refreshing: Mutex::new(()),
         }
+    }
+
+    pub(super) fn issuer(&self) -> &str {
+        &self.issuer
     }
 
     /// The caller named by the request's bearer token.
@@ -159,10 +164,6 @@ impl Verifier {
             .await?
             .error_for_status()
     }
-}
-
-fn unauthenticated(reason: impl Into<String>) -> proto::Error {
-    proto::Error::new(ErrorCode::Unauthenticated, reason)
 }
 
 #[cfg(test)]

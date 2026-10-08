@@ -9,9 +9,10 @@ use rusqlite::{OptionalExtension, Row, params, types::Type};
 
 use crate::{Call, Result, refuse};
 
-/// Bumped when the schema changes. v0 keeps no data worth migrating, so an
-/// older database is recreated.
+/// Bumped when the schema changes. Databases older than the last supported
+/// migration are recreated.
 pub(crate) const SCHEMA_VERSION: i64 = 10;
+pub(crate) const MIGRATES_FROM: i64 = 9;
 
 pub(crate) const DROP_ALL: &str = "
 DROP TABLE IF EXISTS local_tokens;

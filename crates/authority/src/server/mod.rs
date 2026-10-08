@@ -2,7 +2,6 @@
 //! presigned download URLs, and the store sweep after each collection.
 
 mod auth;
-mod failure;
 mod sweep;
 
 pub use sweep::Swept;
@@ -20,6 +19,7 @@ use axum::{
         rejection::{BytesRejection, JsonRejection},
     },
     http::{HeaderMap, StatusCode},
+    response::IntoResponse,
     routing::{get, post, put},
 };
 use herdfs_core::{
@@ -28,10 +28,10 @@ use herdfs_core::{
     proto::{self, Request, Response},
 };
 use rusty_s3::{Bucket, Credentials, S3Action};
+use serde_json::json;
 use tokio::sync::RwLock;
 
-use crate::{Authority, LocalIssuer, Outcome, Principal};
-use failure::{Failure, invalid, unauthenticated, unavailable};
+use crate::{Authority, LocalIssuer, Outcome, Principal, local::KEY_ID};
 
 /// Commit bodies list every chunk: 32 MiB holds about 350,000, a 350 GiB file.
 const RPC_BODY_LIMIT: usize = 32 << 20;
@@ -45,7 +45,7 @@ pub struct Server {
     credentials: Credentials,
     http: reqwest::Client,
     verifier: auth::Verifier,
-    local_issuer: Option<LocalIssuer>,
+    local_key: Option<String>,
     /// How long a presigned chunk URL stays valid.
     grant_ttl: Duration,
     /// Held shared by each upload and alone by the sweep while it deletes, so
@@ -72,7 +72,7 @@ impl Server {
             credentials,
             http: reqwest::Client::new(),
             verifier: auth::Verifier::new(issuer, audience),
-            local_issuer: None,
+            local_key: None,
             grant_ttl,
             uploading: RwLock::new(()),
         }
@@ -84,11 +84,12 @@ impl Server {
         bucket: Bucket,
         public_bucket: Bucket,
         credentials: Credentials,
-        local_issuer: LocalIssuer,
+        local_issuer: &LocalIssuer,
         grant_ttl: Duration,
     ) -> Self {
         let issuer = local_issuer.issuer().to_owned();
         let audience = local_issuer.audience().to_owned();
+        let public_key = local_issuer.public_key();
         let mut server = Self::new(
             authority,
             bucket,
@@ -98,7 +99,7 @@ impl Server {
             audience,
             grant_ttl,
         );
-        server.local_issuer = Some(local_issuer);
+        server.local_key = Some(public_key);
         server
     }
 
@@ -110,13 +111,30 @@ impl Server {
                 put(upload).layer(DefaultBodyLimit::max(MAX_CHUNK)),
             )
             .route("/v1/health", get(|| async { "ok" }));
-        let router = if self.local_issuer.is_some() {
-            router
-                .route("/.well-known/openid-configuration", get(discovery))
-                .route("/.well-known/jwks.json", get(jwks))
-        } else {
-            router
+        let Some(public_key) = self.local_key.clone() else {
+            return router.with_state(Arc::clone(self));
         };
+        let issuer = self.verifier.issuer().to_owned();
+        let discovery = json!({
+            "issuer": issuer.clone(),
+            "jwks_uri": format!("{issuer}/.well-known/jwks.json"),
+            "id_token_signing_alg_values_supported": ["EdDSA"]
+        });
+        let jwks = json!({"keys": [{
+            "kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "use": "sig",
+            "kid": KEY_ID, "x": public_key
+        }]});
+        let discovery = get(move || {
+            let discovery = discovery.clone();
+            async move { Json(discovery) }
+        });
+        let jwks = get(move || {
+            let jwks = jwks.clone();
+            async move { Json(jwks) }
+        });
+        let router = router
+            .route("/.well-known/openid-configuration", discovery)
+            .route("/.well-known/jwks.json", jwks);
         router.with_state(Arc::clone(self))
     }
 
@@ -136,15 +154,19 @@ impl Server {
 
     async fn principal(self: &Arc<Self>, headers: &HeaderMap) -> Result<Principal, proto::Error> {
         let authenticated = self.verifier.authenticate(headers).await?;
-        if self.local_issuer.is_none() {
+        if self.local_key.is_none() {
             return Ok(authenticated.principal);
         }
         let id = authenticated
             .token_id
             .ok_or_else(|| unauthenticated("local token has no id"))?;
         let user = authenticated.subject;
-        self.run(move |authority, now_ms| authority.check_local_token(&id, &user, now_ms))
+        let active = self
+            .run(move |authority, now_ms| authority.check_local_token(&id, &user, now_ms))
             .await?;
+        if !active {
+            return Err(unauthenticated("local token is expired or revoked"));
+        }
         Ok(authenticated.principal)
     }
 
@@ -169,20 +191,6 @@ impl Server {
             .map_err(unavailable)?;
         Ok(())
     }
-}
-
-async fn discovery(State(server): State<Arc<Server>>) -> Result<Json<serde_json::Value>, StatusCode> {
-    let Some(issuer) = &server.local_issuer else {
-        return Err(StatusCode::NOT_FOUND);
-    };
-    Ok(Json(issuer.discovery()))
-}
-
-async fn jwks(State(server): State<Arc<Server>>) -> Result<Json<serde_json::Value>, StatusCode> {
-    let Some(issuer) = &server.local_issuer else {
-        return Err(StatusCode::NOT_FOUND);
-    };
-    Ok(Json(issuer.jwks()))
 }
 
 async fn rpc(
@@ -243,4 +251,44 @@ fn chunk_key(id: ChunkId) -> String {
 fn now_ms() -> i64 {
     let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     i64::try_from(since_epoch.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// A protocol error as an HTTP response.
+struct Failure(proto::Error);
+
+impl From<proto::Error> for Failure {
+    fn from(error: proto::Error) -> Self {
+        Self(error)
+    }
+}
+
+impl IntoResponse for Failure {
+    fn into_response(self) -> axum::response::Response {
+        let status = match self.0.code {
+            proto::ErrorCode::NotFound => StatusCode::NOT_FOUND,
+            proto::ErrorCode::Exists
+            | proto::ErrorCode::NotEmpty
+            | proto::ErrorCode::NotDir
+            | proto::ErrorCode::IsDir
+            | proto::ErrorCode::Conflict => StatusCode::CONFLICT,
+            proto::ErrorCode::Denied => StatusCode::FORBIDDEN,
+            proto::ErrorCode::Unauthenticated => StatusCode::UNAUTHORIZED,
+            proto::ErrorCode::Invalid => StatusCode::BAD_REQUEST,
+            proto::ErrorCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        };
+        (status, Json(self.0)).into_response()
+    }
+}
+
+fn invalid(message: impl Into<String>) -> proto::Error {
+    proto::Error::new(proto::ErrorCode::Invalid, message)
+}
+
+fn unauthenticated(message: impl Into<String>) -> proto::Error {
+    proto::Error::new(proto::ErrorCode::Unauthenticated, message)
+}
+
+fn unavailable(error: impl std::fmt::Display) -> proto::Error {
+    tracing::warn!(%error, "unavailable");
+    proto::Error::new(proto::ErrorCode::Unavailable, "service unavailable")
 }

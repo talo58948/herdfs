@@ -12,15 +12,15 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::SigningKey;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
-use herdfs_core::proto::{self, ErrorCode};
+use herdfs_core::proto;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 
 use crate::{Authority, Fail};
 
 const AUDIENCE: &str = "herdfs";
-const KEY_ID: &str = "local";
+pub(crate) const KEY_ID: &str = "local";
+// RFC 8410 PKCS#8 header for a 32-byte Ed25519 seed.
 const PKCS8_PREFIX: &[u8] = &[
     0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
 ];
@@ -29,6 +29,12 @@ const PKCS8_PREFIX: &[u8] = &[
 pub struct LocalIssuer {
     stored: Stored,
     key: SigningKey,
+}
+
+/// A newly registered local token and the id used to revoke it.
+pub struct Issued {
+    pub id: String,
+    pub token: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -61,8 +67,9 @@ impl LocalIssuer {
         };
         anyhow::ensure!(
             stored.issuer == issuer,
-            "local issuer is {}, but --listen implies {issuer}",
-            stored.issuer
+            "local issuer is {}, but --listen implies {issuer}; changing --listen requires deleting the key file {} and reissuing every token",
+            stored.issuer,
+            path.display()
         );
         Self::from_stored(stored)
     }
@@ -79,44 +86,22 @@ impl LocalIssuer {
         Self::from_stored(serde_json::from_slice(&bytes)?)
     }
 
-    /// Issues one revocable token for `user` that lasts for `ttl`.
-    pub fn issue(
-        &self,
-        authority: &Authority,
-        user: &str,
-        ttl: Duration,
-    ) -> anyhow::Result<(String, String)> {
-        anyhow::ensure!(!user.is_empty(), "--user must not be empty");
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        let exp = now
-            .checked_add(ttl.as_secs())
-            .context("token expiry is too large")?;
-        let id = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 16]>());
-        authority.db.execute(
-            "INSERT INTO local_tokens (id, user, expires_ms) VALUES (?1, ?2, ?3)",
-            params![id, user, i64::try_from(exp.saturating_mul(1000))?],
-        )?;
+    fn token(&self, user: &str, id: &str, now: u64, exp: u64) -> anyhow::Result<String> {
         let claims = Claims {
             iss: &self.stored.issuer,
             aud: AUDIENCE,
             sub: user,
             iat: now,
             exp,
-            jti: &id,
+            jti: id,
         };
         let mut header = Header::new(Algorithm::EdDSA);
         header.kid = Some(KEY_ID.into());
-        let token = jsonwebtoken::encode(&header, &claims, &self.encoding_key())?;
-        Ok((id, token))
+        Ok(jsonwebtoken::encode(&header, &claims, &self.encoding_key())?)
     }
 
-    /// Revokes an issued token immediately.
-    pub fn revoke(&self, authority: &Authority, id: &str) -> anyhow::Result<()> {
-        let changed = authority
-            .db
-            .execute("UPDATE local_tokens SET revoked = 1 WHERE id = ?1", [id])?;
-        anyhow::ensure!(changed == 1, "unknown token id {id:?}");
-        Ok(())
+    pub(crate) fn public_key(&self) -> String {
+        URL_SAFE_NO_PAD.encode(self.key.verifying_key().as_bytes())
     }
 
     pub(crate) fn issuer(&self) -> &str {
@@ -125,22 +110,6 @@ impl LocalIssuer {
 
     pub(crate) fn audience(&self) -> &'static str {
         AUDIENCE
-    }
-
-    pub(crate) fn discovery(&self) -> Value {
-        json!({
-            "issuer": self.stored.issuer,
-            "jwks_uri": format!("{}/.well-known/jwks.json", self.stored.issuer),
-            "id_token_signing_alg_values_supported": ["EdDSA"]
-        })
-    }
-
-    pub(crate) fn jwks(&self) -> Value {
-        let public = URL_SAFE_NO_PAD.encode(self.key.verifying_key().as_bytes());
-        json!({"keys": [{
-            "kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "use": "sig",
-            "kid": KEY_ID, "x": public
-        }]})
     }
 
     fn from_stored(stored: Stored) -> anyhow::Result<Self> {
@@ -162,23 +131,55 @@ impl LocalIssuer {
 }
 
 impl Authority {
-    pub(crate) fn check_local_token(&self, id: &str, user: &str, now_ms: i64) -> Result<(), proto::Error> {
-        let active: bool = self
+    /// Issues and registers one revocable token for `user` that lasts for `ttl`.
+    pub fn issue_local_token(
+        &mut self,
+        issuer: &LocalIssuer,
+        user: &str,
+        ttl: Duration,
+    ) -> anyhow::Result<Issued> {
+        anyhow::ensure!(!user.is_empty(), "--user must not be empty");
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let exp = now
+            .checked_add(ttl.as_secs())
+            .context("token expiry is too large")?;
+        let id = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 16]>());
+        let token = issuer.token(user, &id, now, exp)?;
+        let now_ms = i64::try_from(now.saturating_mul(1000))?;
+        let exp_ms = i64::try_from(exp.saturating_mul(1000))?;
+        let tx = self.db.transaction()?;
+        tx.execute("DELETE FROM local_tokens WHERE expires_ms <= ?1", [now_ms])?;
+        tx.execute(
+            "INSERT INTO local_tokens (id, user, expires_ms) VALUES (?1, ?2, ?3)",
+            params![id, user, exp_ms],
+        )?;
+        tx.commit()?;
+        Ok(Issued { id, token })
+    }
+
+    /// Revokes an issued token immediately.
+    pub fn revoke_local_token(&self, id: &str) -> anyhow::Result<()> {
+        let changed = self
             .db
+            .execute("UPDATE local_tokens SET revoked = 1 WHERE id = ?1", [id])?;
+        anyhow::ensure!(changed == 1, "unknown token id {id:?}");
+        Ok(())
+    }
+
+    pub(crate) fn check_local_token(
+        &self,
+        id: &str,
+        user: &str,
+        now_ms: i64,
+    ) -> Result<bool, proto::Error> {
+        self.db
             .query_row(
                 "SELECT EXISTS (SELECT 1 FROM local_tokens
                  WHERE id = ?1 AND user = ?2 AND revoked = 0 AND expires_ms > ?3)",
                 params![id, user, now_ms],
                 |row| row.get(0),
             )
-            .map_err(Fail::from)?;
-        if active {
-            return Ok(());
-        }
-        Err(proto::Error::new(
-            ErrorCode::Unauthenticated,
-            "local token is expired or revoked",
-        ))
+            .map_err(Fail::from)
     }
 }
 
@@ -187,11 +188,28 @@ fn create(path: &Path, issuer: String) -> anyhow::Result<Stored> {
         issuer,
         secret: URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>()),
     };
-    let mut file = private_file(path)?;
-    serde_json::to_writer(&mut file, &stored)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    Ok(stored)
+    let mut temporary = path.as_os_str().to_os_string();
+    temporary.push(format!(".tmp-{:016x}", rand::random::<u64>()));
+    let temporary = PathBuf::from(temporary);
+    let result = (|| {
+        let mut file = private_file(&temporary)?;
+        serde_json::to_writer(&mut file, &stored)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)
+            .with_context(|| format!("renaming {} to {}", temporary.display(), path.display()))?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        File::open(parent)?.sync_all()?;
+        Ok(stored)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
 }
 
 fn private_file(path: &Path) -> anyhow::Result<File> {

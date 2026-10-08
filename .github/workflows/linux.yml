@@ -28,11 +28,11 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: ~/go
-          key: linux-go-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
-      - uses: Swatinem/rust-cache@v2
+          key: linux-go-${{ runner.arch }}-minio-RELEASE.2025-10-15T17-29-55Z
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: linux
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
         with:
           tool: nextest
 
@@ -51,10 +51,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes fuse3 libfuse3-dev nfs-common
           go install github.com/minio/minio@RELEASE.2025-10-15T17-29-55Z
-          sudo curl --fail --location \
+          curl --fail --location \
             https://github.com/Shopify/toxiproxy/releases/download/v2.12.0/toxiproxy-server-linux-amd64 \
-            --output /usr/local/bin/toxiproxy-server
-          sudo chmod 0755 /usr/local/bin/toxiproxy-server
+            --output /tmp/toxiproxy-server
+          echo '556d891134a3c582dc1e1a3f7335fd55142e5965769855a00b944e13e48302fc  /tmp/toxiproxy-server' \
+            | sha256sum -c
+          sudo install -m 0755 /tmp/toxiproxy-server /usr/local/bin/toxiproxy-server
           cargo install --locked fsx --version 0.3.2
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
           sudo chmod a+rw /dev/fuse
@@ -68,11 +70,7 @@ jobs:
           cargo nextest run -p herdfs-lab \
             --test smoke --test round_trip --test semantics --test faults \
             --test cli --test plans --test local_issuer
-          if [[ -e crates/lab/tests/control.rs ]]; then
-            cargo nextest run -p herdfs-lab --test control
-          else
-            echo 'control gated: its test target is not present on this branch.'
-          fi
+          # Add --test control when the control branch merges.
       - name: fsx stream and chaos
         env:
           FSX_OPS: 20000

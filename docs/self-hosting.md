@@ -28,11 +28,11 @@ Choose one mode.
 
 ### Built-in local issuer
 
-Start the authority with `--local-issuer` as above. It creates `herdfs.db.local-issuer.json` with mode 0600. In another shell, issue one token per machine:
+Start the authority with `--local-issuer` as above. Its `--listen` port must be fixed and nonzero. The issuer URL is tied to that address; changing `--listen` requires deleting the key file and reissuing every token. It creates `herdfs.db.local-issuer.json` with mode 0600. In another shell, issue one token per machine:
 
 ```sh
-./target/release/herdfs-authority issue-token \
-  --db ./herdfs.db --user alice --days 30 > ./alice.token
+(umask 077; ./target/release/herdfs-authority issue-token \
+  --db ./herdfs.db --user alice --days 30 > ./alice.token)
 ```
 
 The command writes the token ID to standard error. Revoke that machine immediately with:
@@ -41,6 +41,8 @@ The command writes the token ID to standard error. Revoke that machine immediate
 ./target/release/herdfs-authority revoke-token \
   --db ./herdfs.db TOKEN_ID
 ```
+
+The key file can mint tokens for any user, so protect it and back it up with the database; deleting it invalidates every token.
 
 ### Any OIDC provider
 

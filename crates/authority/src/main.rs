@@ -1,8 +1,8 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
-use herdfs_authority::{Authority, LocalIssuer, Policy, server::Server};
+use clap::{Args as ClapArgs, Parser, Subcommand};
+use herdfs_authority::{Authority, Issued, LocalIssuer, Policy, server::Server};
 use rusty_s3::{Bucket, Credentials, UrlStyle};
 use tracing_subscriber::EnvFilter;
 
@@ -27,13 +27,10 @@ struct Args {
     s3_bucket: Option<String>,
     #[arg(long, required = true)]
     s3_region: Option<String>,
-    #[arg(long, requires = "oidc_audience", conflicts_with = "local_issuer")]
-    oidc_issuer: Option<String>,
+    #[command(flatten)]
+    issuer: IssuerArgs,
     #[arg(long, requires = "oidc_issuer", conflicts_with = "local_issuer")]
     oidc_audience: Option<String>,
-    /// Issues and validates tokens without an external identity provider.
-    #[arg(long)]
-    local_issuer: bool,
     /// The newest versions of each file kept, its head included.
     #[arg(long, default_value_t = 16)]
     retain_versions: u32,
@@ -51,6 +48,16 @@ struct Args {
     grant_ttl: u64,
 }
 
+#[derive(ClapArgs)]
+#[group(required = true, multiple = false)]
+struct IssuerArgs {
+    #[arg(long, requires = "oidc_audience")]
+    oidc_issuer: Option<String>,
+    /// Issues and validates tokens without an external identity provider.
+    #[arg(long)]
+    local_issuer: bool,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Prints a local-issuer token for one machine.
@@ -59,7 +66,7 @@ enum Command {
         db: PathBuf,
         #[arg(long)]
         user: String,
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..))]
         days: u32,
     },
     /// Revokes a local-issuer token by its issued id.
@@ -102,45 +109,21 @@ async fn main() -> anyhow::Result<()> {
 fn run_command(command: Command) -> anyhow::Result<()> {
     match command {
         Command::IssueToken { db, user, days } => {
-            let authority = Authority::open(&db)?;
             let issuer = LocalIssuer::load(&db)?;
+            let mut authority = Authority::open(&db)?;
             let ttl = Duration::from_secs(u64::from(days) * 24 * 60 * 60);
-            let (id, token) = issuer.issue(&authority, &user, ttl)?;
+            let Issued { id, token } = authority.issue_local_token(&issuer, &user, ttl)?;
             eprintln!("token id: {id}");
             println!("{token}");
         }
         Command::RevokeToken { db, id } => {
-            let authority = Authority::open(&db)?;
-            LocalIssuer::load(&db)?.revoke(&authority, &id)?;
+            Authority::open(&db)?.revoke_local_token(&id)?;
         }
     }
     Ok(())
 }
 
 async fn serve(args: Args) -> anyhow::Result<()> {
-    let requested = args.listen.context("--listen is required")?;
-    let listener = tokio::net::TcpListener::bind(requested).await?;
-    let listen = listener.local_addr()?;
-    let db = args.db.as_ref().context("--db is required")?;
-    let s3_endpoint = args.s3_endpoint.as_deref().context("--s3-endpoint is required")?;
-    let s3_public_endpoint = args
-        .s3_public_endpoint
-        .as_deref()
-        .context("--s3-public-endpoint is required")?;
-    let s3_bucket = args.s3_bucket.as_ref().context("--s3-bucket is required")?;
-    let s3_region = args.s3_region.as_ref().context("--s3-region is required")?;
-    anyhow::ensure!(
-        args.local_issuer || args.oidc_issuer.is_some(),
-        "use --local-issuer or set --oidc-issuer and --oidc-audience"
-    );
-    let key = |name: &str| std::env::var(name).with_context(|| format!("{name} is not set"));
-    let credentials = Credentials::new(key("AWS_ACCESS_KEY_ID")?, key("AWS_SECRET_ACCESS_KEY")?);
-    let bucket = |endpoint: &str| -> anyhow::Result<Bucket> {
-        let (name, region) = (s3_bucket.clone(), s3_region.clone());
-        Ok(Bucket::new(endpoint.parse()?, UrlStyle::Path, name, region)?)
-    };
-    let (bucket, public_bucket) = (bucket(s3_endpoint)?, bucket(s3_public_endpoint)?);
-    let authority = Authority::open(db).with_context(|| format!("opening {}", db.display()))?;
     // Outstanding URLs and uploads awaiting their commit must not race the sweep, whose grace
     // counts from the collection before a chunk left the live set.
     anyhow::ensure!(
@@ -148,24 +131,59 @@ async fn serve(args: Args) -> anyhow::Result<()> {
         "--gc-grace must be at least twice --grant-ttl, and at least --gc-every plus --grant-ttl"
     );
     let settings = settings(&args)?;
-    let server = if args.local_issuer {
-        let issuer = LocalIssuer::open(db, listen)?;
+    let Args {
+        listen: Some(requested),
+        db: Some(db),
+        s3_endpoint: Some(s3_endpoint),
+        s3_public_endpoint: Some(s3_public_endpoint),
+        s3_bucket: Some(s3_bucket),
+        s3_region: Some(s3_region),
+        oidc_audience,
+        issuer:
+            IssuerArgs {
+                oidc_issuer,
+                local_issuer,
+            },
+        ..
+    } = args
+    else {
+        unreachable!("clap requires serving arguments when no subcommand is present")
+    };
+    anyhow::ensure!(
+        !local_issuer || requested.port() != 0,
+        "--local-issuer requires a fixed, nonzero --listen port"
+    );
+    let listener = tokio::net::TcpListener::bind(requested).await?;
+    let listen = listener.local_addr()?;
+    let key = |name: &str| std::env::var(name).with_context(|| format!("{name} is not set"));
+    let credentials = Credentials::new(key("AWS_ACCESS_KEY_ID")?, key("AWS_SECRET_ACCESS_KEY")?);
+    let bucket = |endpoint: &str| -> anyhow::Result<Bucket> {
+        let (name, region) = (s3_bucket.clone(), s3_region.clone());
+        Ok(Bucket::new(endpoint.parse()?, UrlStyle::Path, name, region)?)
+    };
+    let (bucket, public_bucket) = (bucket(&s3_endpoint)?, bucket(&s3_public_endpoint)?);
+    let authority = Authority::open(&db).with_context(|| format!("opening {}", db.display()))?;
+    let server = if local_issuer {
+        let issuer = LocalIssuer::open(&db, listen)?;
         Server::new_local(
             authority,
             bucket,
             public_bucket,
             credentials,
-            issuer,
+            &issuer,
             settings.grant_ttl,
         )
     } else {
+        let (Some(issuer), Some(audience)) = (oidc_issuer, oidc_audience) else {
+            unreachable!("clap requires an OIDC issuer and audience")
+        };
         Server::new(
             authority,
             bucket,
             public_bucket,
             credentials,
-            args.oidc_issuer.context("--oidc-issuer is required")?,
-            args.oidc_audience.context("--oidc-audience is required")?,
+            issuer,
+            audience,
             settings.grant_ttl,
         )
     };
@@ -191,9 +209,11 @@ mod tests {
             s3_public_endpoint: Some(String::new()),
             s3_bucket: Some(String::new()),
             s3_region: Some(String::new()),
-            oidc_issuer: Some(String::new()),
+            issuer: IssuerArgs {
+                oidc_issuer: Some(String::new()),
+                local_issuer: false,
+            },
             oidc_audience: Some(String::new()),
-            local_issuer: false,
             retain_versions: 7,
             retain_days: 2,
             gc_every: 3,
