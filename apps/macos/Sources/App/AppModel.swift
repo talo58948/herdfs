@@ -74,7 +74,12 @@ final class AppModel: ObservableObject {
             var next: [SpaceState] = []
             for space in access {
                 let mount = mounts.first { $0.space == space.space && $0.authority == authority }
-                let status = if let mount { try? await ControlClient.status(mount) } else { nil }
+                let status: MountStatus?
+                if let mount {
+                    status = try? await ControlClient.status(mount)
+                } else {
+                    status = nil
+                }
                 next.append(SpaceState(access: space, mount: mount, status: status))
             }
             spaces = next

@@ -44,8 +44,7 @@ private final class LineRequest<Value: Decodable> {
     }
 
     func start() {
-        connection.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
+        connection.stateUpdateHandler = { state in
             switch state {
             case .ready: self.send()
             case .failed(let error): self.finish(.failure(error))
@@ -93,6 +92,7 @@ private final class LineRequest<Value: Decodable> {
     private func finish(_ result: Result<Value, Error>) {
         guard !finished else { return }
         finished = true
+        connection.stateUpdateHandler = nil
         connection.cancel()
         continuation.resume(with: result)
     }
