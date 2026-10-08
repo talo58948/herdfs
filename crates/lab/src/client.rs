@@ -1,7 +1,7 @@
 //! A FUSE client: its mount process, its directories and its stats.
 
 use std::fs;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -37,7 +37,7 @@ pub enum Strategy {
 
 /// Filesystem adapter a lab client mounts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Mount {
+pub(crate) enum Mount {
     #[default]
     Fuse,
     Nfs,
@@ -136,6 +136,16 @@ impl Client {
                 .args(["--jev-url", jev.url()]);
         }
         let mut mount = Proc::spawn(&self.spec.name, command, &self.dir.join("client.log"))?;
+        if self.spec.mount == Mount::Nfs {
+            mount.wait_until("serving NFS", || {
+                nfs_port(&self.dir)
+                    .is_some_and(|port| TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_ok())
+            })?;
+            mount_nfs(
+                &self.mount,
+                nfs_port(&self.dir).context("NFS server did not publish its port")?,
+            )?;
+        }
         mount.wait_until("mounted", || is_mounted(&self.mount))?;
         self.process = Some(mount);
         Ok(())
@@ -190,11 +200,14 @@ impl Client {
         if self.spec.mount == Mount::Fuse {
             return Ok(self.stats()?["pending_commits"] != 0);
         }
+        // Journal records are JSON files in this directory; NFS identity is journal.nfs.json
+        // beside it. This is deliberately the lab's on-disk format probe for mounts without xattrs.
         let records = fs::read_dir(self.dir.join("journal"))?;
         Ok(records.filter_map(|record| record.ok()).any(|record| {
-            let path = record.path();
-            path.extension().is_some_and(|extension| extension == "json")
-                && path.file_name().is_some_and(|name| name != "nfs.json")
+            record
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "json")
         }))
     }
 }
@@ -213,4 +226,23 @@ fn is_mounted(path: &Path) -> bool {
     };
     // The fifth field of each line is the mount point.
     table.lines().any(|line| line.split(' ').nth(4) == path.to_str())
+}
+
+fn nfs_port(dir: &Path) -> Option<u16> {
+    let identity = fs::read(dir.join("journal.nfs.json")).ok()?;
+    let identity: Value = serde_json::from_slice(&identity).ok()?;
+    u16::try_from(identity["port"].as_u64()?).ok()
+}
+
+fn mount_nfs(mountpoint: &Path, port: u16) -> Result<()> {
+    let options = format!(
+        "vers=3,tcp,nolock,noacl,actimeo=1,lookupcache=none,rsize=131072,wsize=131072,port={port},mountport={port}"
+    );
+    let status = Command::new("sudo")
+        .arg("mount.nfs")
+        .args(["-o", &options, "127.0.0.1:/"])
+        .arg(mountpoint)
+        .status()?;
+    ensure!(status.success(), "mounting {}: {status}", mountpoint.display());
+    Ok(())
 }

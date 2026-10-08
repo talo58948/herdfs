@@ -31,7 +31,7 @@ use crate::toxiproxy::Toxiproxy;
 
 pub use crate::authority::Collection;
 pub use crate::chunks::overlapping_chunk_bytes;
-pub use crate::client::{Mount, Strategy};
+pub use crate::client::Strategy;
 pub use crate::issuer::{AUDIENCE, BadToken, Issuer};
 pub use crate::jev::{FakeJev, JevMode};
 pub use crate::lifecycle::LabConfig;
@@ -61,11 +61,6 @@ pub struct Lab {
 impl Lab {
     pub fn mount_path(&self, name: &str) -> &Path {
         &self.client(name).mount
-    }
-
-    /// Whether client `name` uses the loopback NFS adapter.
-    pub fn is_nfs(&self, name: &str) -> bool {
-        self.client(name).spec.mount == Mount::Nfs
     }
 
     /// Client `name`'s cache, journal, token file and log: what an attacker on its host holds.

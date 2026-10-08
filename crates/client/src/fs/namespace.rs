@@ -31,7 +31,7 @@ impl Space {
         mode: u32,
         exclusive: bool,
         open_mode: OpenMode,
-        pid: u32,
+        comm: &str,
     ) -> Result<(Attributes, u64)> {
         let parent_id = self.entry_id(parent);
         let name = child_name(&name)?;
@@ -44,7 +44,7 @@ impl Space {
             Err(Error::Api(error)) if error.code == ErrorCode::Exists && !exclusive => {
                 let (entry, asked, local) = self.child(parent, name).await?;
                 let attr = self.looked_up(&entry, asked, local.as_deref());
-                let open = self.clone().open(self.ino(entry.id), open_mode, pid);
+                let open = self.clone().open(self.ino(entry.id), open_mode, comm);
                 return Ok((attr, open.await?));
             }
             created => created?,

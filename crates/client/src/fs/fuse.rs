@@ -1,6 +1,5 @@
 //! The `fuser` adapter. Callbacks that may wait on the network hand their work to the tokio
 //! runtime and reply from the task, so one slow download never stalls other operations.
-//! fuser's defaults answer everything not implemented here: ENOSYS, and EPERM for hard links.
 
 use std::time::SystemTime;
 use std::{ffi::OsStr, io, path::Path, sync::Arc};
@@ -27,11 +26,9 @@ impl Fuse {
     pub fn new(space: Arc<Space>, runtime: Runtime) -> Self {
         Self { space, runtime }
     }
-
     pub fn mounted(space: &Space, notifier: Notifier) {
         answer::mounted(space, notifier);
     }
-
     fn space(&self) -> Arc<Space> {
         self.space.clone()
     }
@@ -179,7 +176,11 @@ impl Filesystem for Fuse {
     }
 
     fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
-        self.spawn(reply, self.space().open(inode(ino), open_mode(flags), req.pid()));
+        let comm = super::access::process_name(req.pid());
+        let space = self.space();
+        self.spawn(reply, async move {
+            space.open(inode(ino), open_mode(flags), &comm).await
+        });
     }
 
     fn read(
@@ -282,15 +283,17 @@ impl Filesystem for Fuse {
         reply: ReplyCreate,
     ) {
         let child = (inode(parent), name.to_owned());
-        self.spawn(
-            reply,
-            self.space().create(
-                child,
-                mode & !umask,
-                flags & libc::O_EXCL != 0,
-                open_mode(OpenFlags(flags)),
-                req.pid(),
-            ),
-        );
+        let (space, comm) = (self.space(), super::access::process_name(req.pid()));
+        self.spawn(reply, async move {
+            space
+                .create(
+                    child,
+                    mode & !umask,
+                    flags & libc::O_EXCL != 0,
+                    open_mode(OpenFlags(flags)),
+                    &comm,
+                )
+                .await
+        });
     }
 }

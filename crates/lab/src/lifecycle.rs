@@ -46,12 +46,6 @@ impl Default for LabConfig {
 }
 
 impl LabConfig {
-    /// Uses `mount` for every client in this lab.
-    pub fn mount(mut self, mount: Mount) -> Self {
-        self.mount = mount;
-        self
-    }
-
     /// Adds client `name`, which mounts as `user` in `groups`.
     pub fn client(
         mut self,

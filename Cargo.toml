@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["vendor/nfsserve"]
 
 [workspace.package]
 edition = "2024"

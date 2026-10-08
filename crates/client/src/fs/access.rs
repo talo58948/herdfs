@@ -122,12 +122,8 @@ impl Space {
     }
 }
 
-pub(super) fn process_name_for(pid: u32) -> String {
-    process_name(pid)
-}
-
 #[cfg(target_os = "linux")]
-fn process_name(pid: u32) -> String {
+pub(super) fn process_name(pid: u32) -> String {
     std::fs::read_to_string(format!("/proc/{pid}/comm"))
         .unwrap_or_default()
         .trim_end()
@@ -136,7 +132,7 @@ fn process_name(pid: u32) -> String {
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-fn process_name(pid: u32) -> String {
+pub(super) fn process_name(pid: u32) -> String {
     let Ok(pid) = i32::try_from(pid) else {
         return String::new();
     };
@@ -151,6 +147,6 @@ fn process_name(pid: u32) -> String {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn process_name(_pid: u32) -> String {
+pub(super) fn process_name(_pid: u32) -> String {
     String::new()
 }

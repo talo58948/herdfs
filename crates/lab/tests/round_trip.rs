@@ -30,7 +30,7 @@ fn a_write_on_one_client_reads_back_on_another() -> Result<()> {
     file.sync_all()?;
     drop(file);
     assert_eq!(fs::read_to_string(lab.mount_path("a").join("hello.txt"))?, text);
-    if !lab.is_nfs("a") {
+    if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
         assert!(lab.stats("a")?["commits"].as_u64() >= Some(1));
     }
 

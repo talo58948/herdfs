@@ -83,6 +83,7 @@ features = [
     "net",
     "io-util",
     "sync",
+    "time",
     "fs",
     "rt",
     "macros",

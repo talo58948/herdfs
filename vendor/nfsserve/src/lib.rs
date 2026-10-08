@@ -1,5 +1,4 @@
 #![cfg_attr(feature = "strict", deny(warnings))]
-#![allow(clippy::double_must_use)]
 
 mod context;
 mod rpc;

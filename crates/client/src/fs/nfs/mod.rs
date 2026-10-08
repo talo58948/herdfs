@@ -26,29 +26,25 @@ const MAX_FILE_SIZE: u64 = 350 * 1024 * 1024 * 1024;
 
 pub(crate) struct Nfs {
     space: Arc<Space>,
-    root: EntryId,
     identity: Arc<Identity>,
+    handle_prefix: [u8; 24],
     verifier: [u8; 8],
-    flows: Mutex<HashMap<EntryId, Arc<AsyncMutex<flow::Flow>>>>,
+    flows: Arc<Mutex<HashMap<EntryId, Arc<AsyncMutex<flow::Flow>>>>>,
 }
 
 impl Nfs {
-    pub(crate) fn new(space: Arc<Space>, root: EntryId, identity: Arc<Identity>) -> Self {
+    pub(crate) fn new(space: Arc<Space>, identity: Arc<Identity>) -> Self {
+        let mut handle_prefix = [0; 24];
+        handle_prefix[..4].copy_from_slice(MAGIC);
+        handle_prefix[4..8].copy_from_slice(&FORMAT.to_be_bytes());
+        handle_prefix[8..].copy_from_slice(&identity.export_id());
         Self {
             space,
-            root,
             identity,
+            handle_prefix,
             verifier: rand::random(),
-            flows: Mutex::new(HashMap::new()),
+            flows: Arc::new(Mutex::new(HashMap::new())),
         }
-    }
-
-    fn entry(id: u64) -> EntryId {
-        EntryId(id)
-    }
-
-    fn id(entry: EntryId) -> u64 {
-        entry.0
     }
 
     fn flow(&self, entry: EntryId) -> Arc<AsyncMutex<flow::Flow>> {
@@ -58,8 +54,12 @@ impl Nfs {
             .clone()
     }
 
+    fn existing_flow(&self, entry: EntryId) -> Option<Arc<AsyncMutex<flow::Flow>>> {
+        lock(&self.flows).get(&entry).cloned()
+    }
+
     fn ino(&self, id: u64) -> super::InodeNo {
-        self.space.ino(Self::entry(id))
+        self.space.ino(EntryId(id))
     }
 
     fn name(name: &nfs::filename3) -> Result<OsString, nfsstat3> {
@@ -68,7 +68,7 @@ impl Nfs {
     }
 
     fn attr(&self, attr: &Attributes) -> nfs::fattr3 {
-        let fileid = Self::id(self.space.entry_id(attr.ino));
+        let fileid = self.space.entry_id(attr.ino).0;
         let ftype = match attr.kind {
             FileKind::File => nfs::ftype3::NF3REG,
             FileKind::Directory => nfs::ftype3::NF3DIR,
@@ -92,7 +92,17 @@ impl Nfs {
         }
     }
 
-    fn status(error: &Error) -> nfsstat3 {
+    fn stale(error: Error) -> nfsstat3 {
+        if error.errno() == libc::ENOENT {
+            nfsstat3::NFS3ERR_STALE
+        } else {
+            error.into()
+        }
+    }
+}
+
+impl From<Error> for nfsstat3 {
+    fn from(error: Error) -> Self {
         match error.errno() {
             libc::EPERM => nfsstat3::NFS3ERR_PERM,
             libc::ENOENT => nfsstat3::NFS3ERR_NOENT,
@@ -121,7 +131,7 @@ fn nfs_time(time: SystemTime) -> nfs::nfstime3 {
     }
 }
 
-fn unix_ms(time: nfs::nfstime3) -> i64 {
+fn nfs_unix_ms(time: nfs::nfstime3) -> i64 {
     i64::from(time.seconds) * 1_000 + i64::from(time.nseconds / 1_000_000)
 }
 
@@ -139,7 +149,7 @@ mod tests {
     use crate::stats::Stats;
     use crate::strategy::{Decider, Strategy};
 
-    fn adapter(root: &std::path::Path) -> Nfs {
+    fn adapter(root: &std::path::Path) -> (Nfs, Arc<Identity>) {
         let journal_dir = root.join("journal");
         let inodes = Arc::new(Inodes::default());
         let (journal, _) = Journal::open(journal_dir.clone(), &inodes).unwrap();
@@ -159,32 +169,32 @@ mod tests {
             inodes,
         ));
         let identity = Arc::new(Identity::open(&journal_dir).unwrap());
-        Nfs::new(space, entry, identity)
+        (Nfs::new(space, identity.clone()), identity)
     }
 
     // contract: M1
     #[test]
     fn handles_and_export_identity_survive_a_restart() {
         let root = tempfile::tempdir().unwrap();
-        let first = adapter(root.path());
-        first.identity.set_port(23_456).unwrap();
+        let (first, identity) = adapter(root.path());
+        identity.set_port(23_456).unwrap();
         let handle = first.id_to_fh(42);
         assert_eq!(handle.data.len(), 32);
         assert!(matches!(first.fh_to_id(&handle), Ok(42)));
         drop(first);
 
-        let restarted = adapter(root.path());
-        assert_eq!(restarted.identity.port(), 23_456);
+        let (restarted, identity) = adapter(root.path());
+        assert_eq!(identity.port(), 23_456);
         assert_eq!(restarted.id_to_fh(42).data, handle.data);
         assert!(matches!(restarted.fh_to_id(&handle), Ok(42)));
     }
 
-    // contract: M2
+    // contract: C4a, M1
     #[test]
     fn write_verifier_changes_for_each_server_incarnation() {
         let root = tempfile::tempdir().unwrap();
-        let first = adapter(root.path()).write_verifier();
-        let second = adapter(root.path()).write_verifier();
+        let first = adapter(root.path()).0.write_verifier();
+        let second = adapter(root.path()).0.write_verifier();
         assert_ne!(first, second);
     }
 

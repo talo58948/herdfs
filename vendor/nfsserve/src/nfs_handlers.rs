@@ -89,7 +89,7 @@ program NFS_PROGRAM {
 #[allow(non_camel_case_types)]
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Copy, Clone, Debug, FromPrimitive, ToPrimitive)]
-enum NFSProgram {
+pub(crate) enum NFSProgram {
     NFSPROC3_NULL = 0,
     NFSPROC3_GETATTR = 1,
     NFSPROC3_SETATTR = 2,
@@ -113,6 +113,38 @@ enum NFSProgram {
     NFSPROC3_PATHCONF = 20,
     NFSPROC3_COMMIT = 21,
     INVALID = 22,
+}
+
+pub(crate) fn ordered_handle(
+    call: &call_body,
+    input: &mut impl Read,
+) -> Result<Option<Vec<u8>>, anyhow::Error> {
+    let proc = NFSProgram::from_u32(call.proc).unwrap_or(NFSProgram::INVALID);
+    if !matches!(
+        proc,
+        NFSProgram::NFSPROC3_SETATTR | NFSProgram::NFSPROC3_WRITE | NFSProgram::NFSPROC3_COMMIT
+    ) {
+        return Ok(None);
+    }
+    let mut handle = nfs::nfs_fh3::default();
+    handle.deserialize(input)?;
+    Ok(Some(handle.data))
+}
+
+pub(crate) fn caches_reply(call: &call_body) -> bool {
+    let proc = NFSProgram::from_u32(call.proc).unwrap_or(NFSProgram::INVALID);
+    matches!(
+        proc,
+        NFSProgram::NFSPROC3_SETATTR
+            | NFSProgram::NFSPROC3_WRITE
+            | NFSProgram::NFSPROC3_CREATE
+            | NFSProgram::NFSPROC3_MKDIR
+            | NFSProgram::NFSPROC3_SYMLINK
+            | NFSProgram::NFSPROC3_REMOVE
+            | NFSProgram::NFSPROC3_RMDIR
+            | NFSProgram::NFSPROC3_RENAME
+            | NFSProgram::NFSPROC3_COMMIT
+    )
 }
 
 pub async fn handle_nfs(
@@ -1200,7 +1232,7 @@ pub async fn nfsproc3_write(
     };
     match context
         .vfs
-        .write(id, args.offset, &args.data, requested, context.arrival)
+        .write(id, args.offset, &args.data, requested)
         .await
     {
         Ok((fattr, committed)) => {
@@ -1258,19 +1290,8 @@ pub async fn nfsproc3_commit(
             return Ok(());
         }
     };
-    let before = context
-        .vfs
-        .getattr(id)
-        .await
-        .ok()
-        .map_or(nfs::pre_op_attr::Void, |attr| {
-            nfs::pre_op_attr::attributes(nfs::wcc_attr {
-                size: attr.size,
-                mtime: attr.mtime,
-                ctime: attr.ctime,
-            })
-        });
-    match context.vfs.commit(id, context.arrival).await {
+    let before = nfs::pre_op_attr::Void;
+    match context.vfs.commit(id).await {
         Ok(attr) => {
             make_success_reply(xid).serialize(output)?;
             nfs::nfsstat3::NFS3_OK.serialize(output)?;

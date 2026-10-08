@@ -1,32 +1,34 @@
 //! NFS data-access epochs and whole-file write generations (M2).
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use herdfs_core::proto::EntryId;
+use tokio::sync::Mutex as AsyncMutex;
 
 use super::Nfs;
 use crate::Result;
-use crate::fs::{Attributes, OpenMode, Space, handles::Handle};
+use crate::fs::{Attributes, OpenMode, Space, handles::Handle, namespace::AttrChange};
+use crate::lock;
 use crate::reader::Head;
 
 const IDLE: Duration = Duration::from_secs(1);
 
-pub(super) struct Epoch {
-    pub(super) head: Head,
-    pub(super) attr: Attributes,
-    pub(super) handle: u64,
+struct Epoch {
+    head: Head,
+    attr: Attributes,
+    handle: u64,
 }
 
 #[derive(Default)]
 pub(super) struct Flow {
-    pub(super) epoch: Option<Epoch>,
-    pub(super) write: Option<u64>,
-    pub(super) last_data: Option<Instant>,
-    write_serial: Arc<AtomicU64>,
+    epoch: Option<Epoch>,
+    write: Option<u64>,
+    last_data: Option<Instant>,
+    serial: u64,
 }
 
 impl Nfs {
@@ -35,7 +37,7 @@ impl Nfs {
         let flow = self.flow(entry);
         let mut state = flow.lock().await;
         let expired = state.last_data.is_none_or(|last| last.elapsed() >= IDLE);
-        if state.epoch.is_none() || expired {
+        if state.write.is_none() && (state.epoch.is_none() || expired) {
             if let Some(epoch) = state.epoch.take() {
                 self.space.clone().release(epoch.handle).await?;
             }
@@ -69,37 +71,69 @@ impl Nfs {
     ) -> Result<()> {
         let flow = self.flow(entry);
         let mut state = flow.lock().await;
-        if let Some(epoch) = state.epoch.take() {
-            self.space.clone().release(epoch.handle).await?;
+        self.drop_epoch(&mut state).await?;
+        let (handle, started) = self.write_handle(entry, &mut state, OpenMode::Write).await?;
+        state.last_data = Some(Instant::now());
+        if started {
+            arm_idle(
+                self.space.clone(),
+                self.flows.clone(),
+                entry,
+                flow.clone(),
+                state.serial,
+            );
         }
-        let handle = match state.write {
-            Some(handle) => handle,
-            None => {
-                let handle = self
-                    .space
-                    .clone()
-                    .open(self.space.ino(entry), OpenMode::Write, 0)
-                    .await?;
+        self.space.clone().write(handle, off, data.to_vec()).await?;
+        if !stable {
+            return Ok(());
+        }
+        state.write = None;
+        drop(state);
+        let result = self.finish_generation(entry, handle).await;
+        remove_empty(&self.flows, entry, &flow).await;
+        result
+    }
+
+    pub(super) async fn size_generation(
+        &self,
+        entry: EntryId,
+        size: u64,
+        mut change: AttrChange,
+        initial: Option<u64>,
+    ) -> Result<Attributes> {
+        let flow = self.flow(entry);
+        let mut state = flow.lock().await;
+        self.drop_epoch(&mut state).await?;
+        let (handle, started) = match (state.write, initial) {
+            (Some(handle), _) => (handle, false),
+            (None, Some(handle)) => {
                 state.write = Some(handle);
-                handle
+                state.serial = state.serial.wrapping_add(1);
+                (handle, true)
+            }
+            (None, None) => {
+                let mode = OpenMode::for_set_len(size);
+                self.write_handle(entry, &mut state, mode).await?
             }
         };
-        self.space.clone().write(handle, off, data.to_vec()).await?;
         state.last_data = Some(Instant::now());
-        let serial = state.write_serial.fetch_add(1, Ordering::Relaxed) + 1;
-        if stable {
-            state.write = None;
-            drop(state);
-            return self.finish_generation(entry, handle).await;
+        if started {
+            arm_idle(
+                self.space.clone(),
+                self.flows.clone(),
+                entry,
+                flow.clone(),
+                state.serial,
+            );
         }
-        let serials = state.write_serial.clone();
-        drop(state);
-        schedule_idle(self.space.clone(), flow, serials, serial);
-        Ok(())
+        change.fh = Some(handle);
+        self.space.clone().setattr(self.space.ino(entry), change).await
     }
 
     pub(super) async fn commit_generation(&self, entry: EntryId) -> Result<()> {
-        let flow = self.flow(entry);
+        let Some(flow) = self.existing_flow(entry) else {
+            return self.space.sync_entry(entry, None).await;
+        };
         let mut state = flow.lock().await;
         let handle = state.write.take();
         let epoch = state.epoch.take();
@@ -107,23 +141,31 @@ impl Nfs {
         if let Some(epoch) = epoch {
             self.space.clone().release(epoch.handle).await?;
         }
-        match handle {
+        let result = match handle {
             Some(handle) => self.finish_generation(entry, handle).await,
-            None => self.space.nfs_commit(entry).await,
-        }
+            None => self.space.sync_entry(entry, None).await,
+        };
+        remove_empty(&self.flows, entry, &flow).await;
+        result
     }
 
-    pub(super) async fn epoch_attr(&self, entry: EntryId) -> Option<Attributes> {
-        let flow = self.flow(entry);
+    pub(super) async fn flow_attr(&self, entry: EntryId) -> Option<Attributes> {
+        let flow = self.existing_flow(entry)?;
         let mut state = flow.lock().await;
+        if state.write.is_some() {
+            return self.space.known_attr(entry);
+        }
         if state.last_data.is_some_and(|last| last.elapsed() < IDLE) {
             return state.epoch.as_ref().map(|epoch| epoch.attr.clone());
         }
         let epoch = state.epoch.take();
         drop(state);
-        if let Some(epoch) = epoch {
-            let _ = self.space.clone().release(epoch.handle).await;
+        if let Some(epoch) = epoch
+            && let Err(error) = self.space.clone().release(epoch.handle).await
+        {
+            tracing::warn!(%error, entry = entry.0, "ending NFS read epoch failed");
         }
+        remove_empty(&self.flows, entry, &flow).await;
         None
     }
 
@@ -139,62 +181,91 @@ impl Nfs {
         Ok(Epoch { head, attr, handle })
     }
 
+    async fn write_handle(&self, entry: EntryId, state: &mut Flow, mode: OpenMode) -> Result<(u64, bool)> {
+        if let Some(handle) = state.write {
+            return Ok((handle, false));
+        }
+        let handle = self
+            .space
+            .clone()
+            .open(self.space.ino(entry), mode, "nfs")
+            .await?;
+        state.write = Some(handle);
+        state.serial = state.serial.wrapping_add(1);
+        Ok((handle, true))
+    }
+
+    async fn drop_epoch(&self, state: &mut Flow) -> Result<()> {
+        if let Some(epoch) = state.epoch.take() {
+            self.space.clone().release(epoch.handle).await?;
+        }
+        Ok(())
+    }
+
     fn local_copy(&self, entry: EntryId) -> Option<Arc<File>> {
         self.space.inodes.local(entry, |local| local.copy()).flatten()
     }
 
     async fn finish_generation(&self, entry: EntryId, handle: u64) -> Result<()> {
-        let committed = self.space.nfs_commit_handle(entry, handle).await;
+        let committed = self.space.sync_entry(entry, Some(handle)).await;
         let released = self.space.clone().release(handle).await;
         committed.and(released)
     }
 }
 
-impl Space {
-    async fn nfs_commit_handle(self: &Arc<Self>, entry: EntryId, handle: u64) -> Result<()> {
-        if self.remote.link.check().is_ok() {
-            return self.clone().fsync(handle).await;
-        }
-        self.nfs_journal(entry)
-    }
-
-    async fn nfs_commit(&self, entry: EntryId) -> Result<()> {
-        self.nfs_journal(entry)?;
-        if self.remote.link.check().is_err() {
-            return Ok(());
-        }
-        self.committed(entry).await
-    }
-
-    fn nfs_journal(&self, entry: EntryId) -> Result<()> {
-        tokio::task::block_in_place(|| self.seal_entry(entry))?;
-        let activated = self
-            .inodes
-            .local(entry, |local| local.activate(&self.journal, entry));
-        activated.unwrap_or(Ok(()))?;
-        self.urge(entry);
-        Ok(())
-    }
-}
-
-fn schedule_idle(
+fn arm_idle(
     space: Arc<Space>,
-    flow: Arc<tokio::sync::Mutex<Flow>>,
-    serials: Arc<AtomicU64>,
+    flows: Arc<Mutex<HashMap<EntryId, Arc<AsyncMutex<Flow>>>>>,
+    entry: EntryId,
+    flow: Arc<AsyncMutex<Flow>>,
     serial: u64,
 ) {
     tokio::spawn(async move {
-        tokio::time::sleep(IDLE).await;
-        let mut state = flow.lock().await;
-        if serials.load(Ordering::Relaxed) != serial {
-            return;
+        loop {
+            let deadline = {
+                let state = flow.lock().await;
+                if state.serial != serial || state.write.is_none() {
+                    break;
+                }
+                state.last_data.unwrap_or_else(Instant::now) + IDLE
+            };
+            tokio::time::sleep_until(deadline.into()).await;
+            let mut state = flow.lock().await;
+            if state.serial != serial || state.write.is_none() {
+                break;
+            }
+            if state.last_data.is_some_and(|last| last + IDLE > Instant::now()) {
+                continue;
+            }
+            let handle = state.write.take();
+            drop(state);
+            if let Some(handle) = handle
+                && let Err(error) = space.release(handle).await
+            {
+                tracing::warn!(%error, entry = entry.0, "sealing idle NFS write failed");
+            }
+            break;
         }
-        let handle = state.write.take();
-        drop(state);
-        if let Some(handle) = handle {
-            let _ = space.release(handle).await;
-        }
+        remove_empty(&flows, entry, &flow).await;
     });
+}
+
+async fn remove_empty(
+    flows: &Mutex<HashMap<EntryId, Arc<AsyncMutex<Flow>>>>,
+    entry: EntryId,
+    flow: &Arc<AsyncMutex<Flow>>,
+) {
+    let empty = {
+        let state = flow.lock().await;
+        state.epoch.is_none() && state.write.is_none()
+    };
+    if !empty {
+        return;
+    }
+    let mut flows = lock(flows);
+    if flows.get(&entry).is_some_and(|found| Arc::ptr_eq(found, flow)) && Arc::strong_count(flow) == 2 {
+        flows.remove(&entry);
+    }
 }
 
 fn read_copy(copy: &File, off: u64, count: u32) -> std::io::Result<Vec<u8>> {

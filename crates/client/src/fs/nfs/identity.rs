@@ -4,6 +4,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use herdfs_core::proto::EntryId;
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,6 @@ use crate::lock;
 struct State {
     export_id: [u8; 16],
     port: u16,
-    #[serde(default)]
     creates: Vec<Create>,
 }
 
@@ -24,7 +24,10 @@ struct Create {
     name: String,
     verifier: [u8; 8],
     entry: EntryId,
+    created: u64,
 }
+
+const CREATE_WINDOW: Duration = Duration::from_secs(10 * 60);
 
 pub(crate) struct Identity {
     path: PathBuf,
@@ -34,20 +37,26 @@ pub(crate) struct Identity {
 impl Identity {
     pub(crate) fn open(journal: &Path) -> io::Result<Self> {
         let path = journal.with_extension("nfs.json");
-        let state = match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => State {
-                export_id: rand::random(),
-                port: 0,
-                creates: Vec::new(),
-            },
+        let (mut state, created) = match fs::read(&path) {
+            Ok(bytes) => (serde_json::from_slice(&bytes)?, false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (
+                State {
+                    export_id: rand::random(),
+                    port: 0,
+                    creates: Vec::new(),
+                },
+                true,
+            ),
             Err(error) => return Err(error),
         };
+        let before = state.creates.len();
+        state.creates.retain(|create| create.created >= create_cutoff());
+        let pruned = state.creates.len() != before;
         let identity = Self {
             path,
             state: Mutex::new(state),
         };
-        if !identity.path.exists() {
+        if created || pruned {
             identity.persist()?;
         }
         Ok(identity)
@@ -71,7 +80,12 @@ impl Identity {
             .creates
             .iter()
             .rev()
-            .find(|create| create.parent == parent && create.name == name && create.verifier == verifier)
+            .find(|create| {
+                create.created >= create_cutoff()
+                    && create.parent == parent
+                    && create.name == name
+                    && create.verifier == verifier
+            })
             .map(|create| create.entry)
     }
 
@@ -82,12 +96,16 @@ impl Identity {
         verifier: [u8; 8],
         entry: EntryId,
     ) -> io::Result<()> {
-        lock(&self.state).creates.push(Create {
+        let mut state = lock(&self.state);
+        state.creates.retain(|create| create.created >= create_cutoff());
+        state.creates.push(Create {
             parent,
             name,
             verifier,
             entry,
+            created: unix_seconds(),
         });
+        drop(state);
         self.persist()
     }
 
@@ -100,4 +118,15 @@ impl Identity {
         fs::rename(temp, &self.path)?;
         File::open(self.path.parent().unwrap_or(Path::new(".")))?.sync_all()
     }
+}
+
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn create_cutoff() -> u64 {
+    unix_seconds().saturating_sub(CREATE_WINDOW.as_secs())
 }

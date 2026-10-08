@@ -54,7 +54,7 @@ impl Drop for Handle {
 }
 
 impl Space {
-    pub async fn open(self: Arc<Self>, ino: InodeNo, mode: OpenMode, pid: u32) -> Result<u64> {
+    pub async fn open(self: Arc<Self>, ino: InodeNo, mode: OpenMode, comm: &str) -> Result<u64> {
         let entry = self.entry_id(ino);
         let (writable, truncate) = (mode.writes(), mode.truncates());
         let handle = Handle::new(entry, writable, &self.inodes);
@@ -67,7 +67,7 @@ impl Space {
                 Some(_) => None,
                 None => self.head(entry, mode).await?,
             };
-            upgrade = self.start(file.as_ref(), super::access::process_name_for(pid), &handle);
+            upgrade = self.start(file.as_ref(), comm.to_owned(), &handle);
         }
         if truncate {
             self.prepare(entry, true).await?;

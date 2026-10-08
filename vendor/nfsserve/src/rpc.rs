@@ -78,9 +78,9 @@ pub enum auth_stat {
     AUTH_BADCRED = 1,
     /// client must begin new session
     AUTH_REJECTEDCRED = 2,
-    /// bad verifier (seal broken)
+    /// bad verifier (seal broken)    
     AUTH_BADVERF = 3,
-    /// verifier expired or replayed
+    /// verifier expired or replayed  
     AUTH_REJECTEDVERF = 4,
     /// rejected for security reasons
     AUTH_TOOWEAK = 5,
@@ -495,6 +495,14 @@ pub fn garbage_args_reply_message(xid: u32) -> rpc_msg {
 
 pub fn rpc_vers_mismatch(xid: u32) -> rpc_msg {
     let reply = reply_body::MSG_DENIED(rejected_reply::RPC_MISMATCH(mismatch_info::default()));
+    rpc_msg {
+        xid,
+        body: rpc_body::REPLY(reply),
+    }
+}
+
+pub fn auth_error_reply_message(xid: u32) -> rpc_msg {
+    let reply = reply_body::MSG_DENIED(rejected_reply::AUTH_ERROR(auth_stat::AUTH_TOOWEAK));
     rpc_msg {
         xid,
         body: rpc_body::REPLY(reply),

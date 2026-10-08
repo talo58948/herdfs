@@ -1,6 +1,5 @@
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,7 +10,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
-use crate::context::{ArrivalSequencer, RPCContext};
+use crate::context::{HandleSequencer, RPCContext};
 use crate::rpcwire::*;
 use crate::transaction_tracker::TransactionTracker;
 use crate::vfs::NFSFileSystem;
@@ -24,8 +23,7 @@ pub struct NFSTcpListener<T: NFSFileSystem + Send + Sync + 'static> {
     mount_signal: Option<mpsc::Sender<bool>>,
     export_name: Arc<String>,
     transaction_tracker: Arc<TransactionTracker>,
-    arrivals: Arc<AtomicU64>,
-    sequencer: Arc<ArrivalSequencer>,
+    handle_sequences: Arc<HandleSequencer>,
 }
 
 pub fn generate_host_ip(hostnum: u16) -> String {
@@ -162,8 +160,7 @@ impl<T: NFSFileSystem + Send + Sync + 'static> NFSTcpListener<T> {
             mount_signal: None,
             export_name: Arc::from("/".to_string()),
             transaction_tracker: Arc::new(TransactionTracker::new(Duration::from_secs(60))),
-            arrivals: Arc::new(AtomicU64::new(0)),
-            sequencer: Arc::new(ArrivalSequencer::new()),
+            handle_sequences: Arc::new(HandleSequencer::default()),
         })
     }
 
@@ -199,8 +196,16 @@ impl<T: NFSFileSystem + Send + Sync + 'static> NFSTcp for NFSTcpListener<T> {
 
     /// Loops forever and never returns handling all incoming connections.
     async fn handle_forever(&self) -> io::Result<()> {
+        let mut sweep = tokio::time::interval(Duration::from_secs(60));
+        sweep.tick().await;
         loop {
-            let (socket, _) = self.listener.accept().await?;
+            let socket = tokio::select! {
+                accepted = self.listener.accept() => accepted?.0,
+                _ = sweep.tick() => {
+                    self.transaction_tracker.sweep();
+                    continue;
+                }
+            };
             let context = RPCContext {
                 local_port: self.port,
                 client_addr: socket.peer_addr().unwrap().to_string(),
@@ -209,9 +214,7 @@ impl<T: NFSFileSystem + Send + Sync + 'static> NFSTcp for NFSTcpListener<T> {
                 mount_signal: self.mount_signal.clone(),
                 export_name: self.export_name.clone(),
                 transaction_tracker: self.transaction_tracker.clone(),
-                arrivals: self.arrivals.clone(),
-                arrival: 0,
-                sequencer: self.sequencer.clone(),
+                handle_sequences: self.handle_sequences.clone(),
             };
             info!("Accepting connection from {}", context.client_addr);
             debug!("Accepting socket {:?} {:?}", socket, context);

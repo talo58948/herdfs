@@ -138,10 +138,9 @@ pub trait NFSFileSystem: Sync {
         offset: u64,
         data: &[u8],
         stability: WriteStability,
-        sequence: u64,
     ) -> Result<(fattr3, WriteStability), nfsstat3>;
 
-    async fn commit(&self, id: fileid3, sequence: u64) -> Result<fattr3, nfsstat3>;
+    async fn commit(&self, id: fileid3) -> Result<fattr3, nfsstat3>;
 
     /// Creates a file with the following attributes.
     /// If not supported due to readonly file system

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use nfsserve::nfs::{self, nfsstat3};
 use nfsserve::vfs::{NFSFileSystem, ReadDirResult, VFSCapabilities, WriteStability};
 
-use super::{FORMAT, MAGIC, MAX_FILE_SIZE, Nfs};
+use super::{MAX_FILE_SIZE, Nfs};
 
 #[async_trait]
 impl NFSFileSystem for Nfs {
@@ -13,7 +13,7 @@ impl NFSFileSystem for Nfs {
     }
 
     fn root_dir(&self) -> nfs::fileid3 {
-        self.root.0
+        self.space.kernel.root().0
     }
 
     async fn lookup(&self, dirid: u64, filename: &nfs::filename3) -> Result<u64, nfsstat3> {
@@ -29,9 +29,9 @@ impl NFSFileSystem for Nfs {
     }
 
     async fn read(&self, id: u64, offset: u64, count: u32) -> Result<(Vec<u8>, bool), nfsstat3> {
-        self.read_epoch(Self::entry(id), offset, count)
+        self.read_epoch(herdfs_core::proto::EntryId(id), offset, count)
             .await
-            .map_err(|error| Self::status(&error))
+            .map_err(Self::stale)
     }
 
     async fn write(
@@ -40,12 +40,11 @@ impl NFSFileSystem for Nfs {
         offset: u64,
         data: &[u8],
         stability: WriteStability,
-        _sequence: u64,
     ) -> Result<(nfs::fattr3, WriteStability), nfsstat3> {
         let stable = stability != WriteStability::Unstable;
-        self.write_generation(Self::entry(id), offset, data, stable)
+        self.write_generation(herdfs_core::proto::EntryId(id), offset, data, stable)
             .await
-            .map_err(|error| Self::status(&error))?;
+            .map_err(Self::stale)?;
         let attr = self.get_attr(id).await?;
         let committed = if stable {
             WriteStability::FileSync
@@ -55,10 +54,10 @@ impl NFSFileSystem for Nfs {
         Ok((attr, committed))
     }
 
-    async fn commit(&self, id: u64, _sequence: u64) -> Result<nfs::fattr3, nfsstat3> {
-        self.commit_generation(Self::entry(id))
+    async fn commit(&self, id: u64) -> Result<nfs::fattr3, nfsstat3> {
+        self.commit_generation(herdfs_core::proto::EntryId(id))
             .await
-            .map_err(|error| Self::status(&error))?;
+            .map_err(Self::stale)?;
         self.get_attr(id).await
     }
 
@@ -112,8 +111,8 @@ impl NFSFileSystem for Nfs {
                 (self.ino(to_dirid), Self::name(to_filename)?),
             )
             .await
-            .map(drop)
-            .map_err(|error| Self::status(&error))
+            .map(drop)?;
+        Ok(())
     }
 
     async fn readdir(
@@ -141,7 +140,7 @@ impl NFSFileSystem for Nfs {
             .readlink(self.ino(id))
             .await
             .map(Into::into)
-            .map_err(|error| Self::status(&error))
+            .map_err(Self::stale)
     }
 
     async fn fsinfo(&self, root_fileid: u64) -> Result<nfs::fsinfo3, nfsstat3> {
@@ -166,26 +165,18 @@ impl NFSFileSystem for Nfs {
 
     fn id_to_fh(&self, id: u64) -> nfs::nfs_fh3 {
         let mut data = Vec::with_capacity(32);
-        data.extend_from_slice(MAGIC);
-        data.extend_from_slice(&FORMAT.to_be_bytes());
-        data.extend_from_slice(&self.identity.export_id());
+        data.extend_from_slice(&self.handle_prefix);
         data.extend_from_slice(&id.to_be_bytes());
         nfs::nfs_fh3 { data }
     }
 
     fn fh_to_id(&self, handle: &nfs::nfs_fh3) -> Result<u64, nfsstat3> {
-        let data: [u8; 32] = handle
-            .data
-            .as_slice()
-            .try_into()
-            .map_err(|_| nfsstat3::NFS3ERR_BADHANDLE)?;
-        if &data[..4] != MAGIC
-            || u32::from_be_bytes(data[4..8].try_into().map_err(|_| nfsstat3::NFS3ERR_BADHANDLE)?) != FORMAT
-            || data[8..24] != self.identity.export_id()
-        {
+        if handle.data.len() != 32 || handle.data[..24] != self.handle_prefix {
             return Err(nfsstat3::NFS3ERR_BADHANDLE);
         }
-        let id = u64::from_be_bytes(data[24..].try_into().map_err(|_| nfsstat3::NFS3ERR_BADHANDLE)?);
+        let mut encoded = [0; 8];
+        encoded.copy_from_slice(&handle.data[24..]);
+        let id = u64::from_be_bytes(encoded);
         if id == 0 || id > i64::MAX as u64 {
             return Err(nfsstat3::NFS3ERR_BADHANDLE);
         }

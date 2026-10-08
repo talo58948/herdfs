@@ -5,8 +5,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::mpsc;
 use tracing::{debug, error, trace, warn};
 
-use crate::context::RPCContext;
+use crate::context::{HandleTicket, RPCContext};
 use crate::rpc::*;
+use crate::transaction_tracker::Begin;
 use crate::xdr::*;
 use crate::{mount, mount_handlers, nfs, nfs_handlers, portmap, portmap_handlers};
 
@@ -23,32 +24,41 @@ async fn handle_rpc(
     mut context: RPCContext,
 ) -> Result<bool, anyhow::Error> {
     let mut recv = rpc_msg::default();
-    if let Err(error) = recv.deserialize(input) {
-        context.sequence(false).await;
-        return Err(error.into());
-    }
+    recv.deserialize(input)?;
     let xid = recv.xid;
     if let rpc_body::CALL(call) = recv.body {
-        let ordered = call.prog == nfs::PROGRAM && matches!(call.proc, 2 | 7..=15 | 21);
-        let turn = context.sequence(ordered).await;
-        if let auth_flavor::AUTH_UNIX = call.cred.flavor {
-            let mut auth = auth_unix::default();
-            auth.deserialize(&mut Cursor::new(&call.cred.body))?;
-            context.auth = auth;
-        }
         if call.rpcvers != 2 {
             warn!("Invalid RPC version {} != 2", call.rpcvers);
             rpc_vers_mismatch(xid).serialize(output)?;
             return Ok(true);
         }
-
-        if let Some(reply) = context.transaction_tracker.begin(xid, &context.client_addr).await {
-            debug!(
-                "Replaying xid: {}, client_addr: {}, call: {:?}",
-                xid, context.client_addr, call
-            );
-            std::io::Write::write_all(output, &reply)?;
+        if call.prog == nfs::PROGRAM
+            && call.proc != 0
+            && !matches!(call.cred.flavor, auth_flavor::AUTH_UNIX)
+        {
+            auth_error_reply_message(xid).serialize(output)?;
             return Ok(true);
+        }
+        if matches!(call.cred.flavor, auth_flavor::AUTH_UNIX) {
+            let mut auth = auth_unix::default();
+            auth.deserialize(&mut Cursor::new(&call.cred.body))?;
+            context.auth = auth;
+        }
+
+        let tracked = call.prog == nfs::PROGRAM && nfs_handlers::caches_reply(&call);
+        if tracked {
+            match context.transaction_tracker.begin(xid, &context.client_addr).await {
+                Begin::New => {}
+                Begin::Replay(reply) => {
+                    debug!(
+                        "Replaying xid: {}, client_addr: {}, call: {:?}",
+                        xid, context.client_addr, call
+                    );
+                    std::io::Write::write_all(output, &reply)?;
+                    return Ok(true);
+                }
+                Begin::Drop => return Ok(false),
+            }
         }
 
         let res = {
@@ -72,13 +82,17 @@ async fn handle_rpc(
             }
         }
         .map(|_| true);
-        context
-            .transaction_tracker
-            .mark_processed(xid, &context.client_addr, output.clone());
-        drop(turn);
+        if tracked {
+            if res.is_ok() {
+                context
+                    .transaction_tracker
+                    .mark_processed(xid, &context.client_addr, output.clone());
+            } else {
+                context.transaction_tracker.mark_failed(xid, &context.client_addr);
+            }
+        }
         res
     } else {
-        context.sequence(false).await;
         error!("Unexpectedly received a Reply instead of a Call");
         Err(anyhow!("Bad RPC Call format"))
     }
@@ -163,12 +177,16 @@ impl SocketMessageHandler {
         let is_last = read_fragment(&mut self.socket_receive_channel, &mut self.cur_fragment).await?;
         if is_last {
             let fragment = std::mem::take(&mut self.cur_fragment);
-            let mut context = self.context.clone();
-            context.arrived();
+            let context = self.context.clone();
+            let ticket = handle_ticket(&context, &fragment)?;
             let send = self.reply_send_channel.clone();
             tokio::spawn(async move {
+                if let Some(ticket) = &ticket {
+                    ticket.wait().await;
+                }
                 let mut write_buf: Vec<u8> = Vec::new();
                 let maybe_reply = handle_rpc(&mut Cursor::new(fragment), &mut write_buf, context).await;
+                drop(ticket);
                 match maybe_reply {
                     Err(e) => {
                         error!("RPC Error: {:?}", e);
@@ -185,4 +203,18 @@ impl SocketMessageHandler {
         }
         Ok(())
     }
+}
+
+fn handle_ticket(context: &RPCContext, fragment: &[u8]) -> Result<Option<HandleTicket>, anyhow::Error> {
+    let mut input = Cursor::new(fragment);
+    let mut message = rpc_msg::default();
+    message.deserialize(&mut input)?;
+    let rpc_body::CALL(call) = message.body else {
+        return Ok(None);
+    };
+    if call.prog != nfs::PROGRAM {
+        return Ok(None);
+    }
+    let handle = nfs_handlers::ordered_handle(&call, &mut input)?;
+    Ok(handle.map(|handle| context.handle_sequences.ticket(handle)))
 }

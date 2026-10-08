@@ -93,7 +93,7 @@ fn exercise(strategy: impl FnOnce(u64) -> Strategy) -> Result<()> {
             bytes.iter().zip(&expected).position(|(got, want)| got != want)
         );
     }
-    if lab.is_nfs("b") {
+    if std::env::var("LAB_MOUNT").as_deref() == Ok("nfs") {
         return Ok(());
     }
     let decisions = lab.stats("b")?["decisions"].clone();

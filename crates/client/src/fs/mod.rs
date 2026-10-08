@@ -12,6 +12,7 @@ mod inodes;
 mod kernel;
 mod namespace;
 mod nfs;
+mod sync;
 
 use std::sync::{Arc, Mutex, atomic::AtomicU64};
 use std::time::{Duration, Instant, SystemTime};
@@ -36,7 +37,7 @@ use crate::{
 };
 
 /// How long the kernel and this client may reuse an attribute or listing (T_vis, C2).
-pub(crate) const TTL: Duration = Duration::from_secs(1);
+const TTL: Duration = Duration::from_secs(1);
 /// Only permission bits are stored; the file type comes from the entry kind.
 const PERMISSIONS: u32 = 0o7777;
 /// The longest name POSIX filesystems take, in bytes.
@@ -228,6 +229,11 @@ impl Space {
             gid: self.owner.1,
             blksize: 4096,
         }
+    }
+
+    fn known_attr(&self, entry: EntryId) -> Option<Attributes> {
+        let (entry, local) = self.inodes.with(entry, |state| state.view()).flatten()?;
+        Some(self.attr(&entry, local.as_deref()))
     }
 
     /// The counters behind `user.herdfs.stats`.

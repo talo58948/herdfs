@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
 
@@ -18,56 +19,81 @@ pub struct RPCContext {
     pub mount_signal: Option<mpsc::Sender<bool>>,
     pub export_name: Arc<String>,
     pub transaction_tracker: Arc<TransactionTracker>,
-    pub arrivals: Arc<AtomicU64>,
-    pub arrival: u64,
-    pub sequencer: Arc<ArrivalSequencer>,
+    pub handle_sequences: Arc<HandleSequencer>,
 }
 
-impl RPCContext {
-    pub(crate) fn arrived(&mut self) {
-        self.arrival = self.arrivals.fetch_add(1, Ordering::Relaxed) + 1;
-    }
+#[derive(Default)]
+pub(crate) struct HandleSequencer(Mutex<HashMap<Vec<u8>, Arc<Completion>>>);
 
-    pub(crate) async fn sequence(&self, ordered: bool) -> Option<ArrivalTurn> {
-        loop {
-            let notified = {
-                let mut next = self.sequencer.next.lock().expect("unable to lock RPC sequencer");
-                if *next == self.arrival {
-                    if ordered {
-                        return Some(ArrivalTurn(self.sequencer.clone()));
-                    }
-                    *next += 1;
-                    self.sequencer.changed.notify_waiters();
-                    return None;
-                }
-                self.sequencer.changed.clone().notified_owned()
-            };
-            notified.await;
+impl HandleSequencer {
+    pub(crate) fn ticket(self: &Arc<Self>, handle: Vec<u8>) -> HandleTicket {
+        let current = Arc::new(Completion::default());
+        let previous = self
+            .0
+            .lock()
+            .expect("unable to lock handle sequencer")
+            .insert(handle.clone(), current.clone());
+        HandleTicket {
+            sequencer: self.clone(),
+            handle,
+            previous,
+            current,
         }
     }
 }
 
 #[derive(Default)]
-pub(crate) struct ArrivalSequencer {
-    next: Mutex<u64>,
-    changed: Arc<Notify>,
+struct Completion {
+    done: AtomicBool,
+    notify: Notify,
 }
 
-impl ArrivalSequencer {
-    pub(crate) fn new() -> Self {
-        Self {
-            next: Mutex::new(1),
-            changed: Arc::new(Notify::new()),
+impl Completion {
+    async fn wait(&self) {
+        while !self.done.load(Ordering::Acquire) {
+            let notified = self.notify.notified();
+            if self.done.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn finish(&self) {
+        self.done.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+}
+
+pub(crate) struct HandleTicket {
+    sequencer: Arc<HandleSequencer>,
+    handle: Vec<u8>,
+    previous: Option<Arc<Completion>>,
+    current: Arc<Completion>,
+}
+
+impl HandleTicket {
+    pub(crate) async fn wait(&self) {
+        if let Some(previous) = &self.previous {
+            previous.wait().await;
         }
     }
 }
 
-pub(crate) struct ArrivalTurn(Arc<ArrivalSequencer>);
-
-impl Drop for ArrivalTurn {
+impl Drop for HandleTicket {
     fn drop(&mut self) {
-        *self.0.next.lock().expect("unable to lock RPC sequencer") += 1;
-        self.0.changed.notify_waiters();
+        self.current.finish();
+        let mut sequences = self
+            .sequencer
+            .0
+            .lock()
+            .expect("unable to lock handle sequencer");
+        if sequences
+            .get(&self.handle)
+            .is_some_and(|last| Arc::ptr_eq(last, &self.current))
+        {
+            sequences.remove(&self.handle);
+        }
     }
 }
 
