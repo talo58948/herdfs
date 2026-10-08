@@ -89,7 +89,8 @@ final class FinderSync: FIFinderSync {
     }
 
     private func selectedContext() -> ActionContext? {
-        guard let url = FIFinderSyncController.default().targetedURL(),
+        let controller = FIFinderSyncController.default()
+        guard let url = controller.selectedItemURLs()?.first ?? controller.targetedURL(),
               let located = registry.locate(url) else { return nil }
         return ActionContext(mount: located.mount, relativePath: located.relativePath)
     }

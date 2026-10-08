@@ -30,7 +30,7 @@ private final class ShareModel: ObservableObject {
     func revoke() async {
         guard let grant = grants.first(where: { $0.id == selection }) else { return }
         await change([
-            "revoke", context.mount.space, context.relativePath, grant.principal, "--json",
+            "revoke", context.mount.space, grant.path, grant.principal, "--json",
         ])
     }
 
