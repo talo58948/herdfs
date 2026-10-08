@@ -2,7 +2,7 @@ import AppKit
 import FinderSync
 
 @MainActor
-final class FinderSync: FIFinderSync {
+final class FinderSync: FIFinderSync, @unchecked Sendable {
     private let registry = MountRegistry()
     private var records: [MountRecord] = []
     private var directories: Set<URL> = []
@@ -10,8 +10,23 @@ final class FinderSync: FIFinderSync {
     private var commandErrors: Set<URL> = []
     private var registryTimer: DispatchSourceTimer?
 
-    override init() {
+    override nonisolated init() {
         super.init()
+        MainActor.assumeIsolated { start() }
+    }
+
+    override nonisolated func requestBadgeIdentifier(for url: URL) {
+        MainActor.assumeIsolated {
+            requested.insert(url)
+            updateBadge(for: url)
+        }
+    }
+
+    override nonisolated func menu(for menuKind: FIMenuKind) -> NSMenu? {
+        MainActor.assumeIsolated { makeMenu(for: menuKind) }
+    }
+
+    private func start() {
         registerBadges()
         refresh()
         let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -21,12 +36,7 @@ final class FinderSync: FIFinderSync {
         registryTimer = timer
     }
 
-    override func requestBadgeIdentifier(for url: URL) {
-        requested.insert(url)
-        updateBadge(for: url)
-    }
-
-    override func menu(for menuKind: FIMenuKind) -> NSMenu? {
+    private func makeMenu(for menuKind: FIMenuKind) -> NSMenu? {
         guard menuKind == .contextualMenuForItems else { return nil }
         let menu = NSMenu(title: "HerdFS")
         menu.addItem(item("Keep Downloaded", #selector(keepDownloaded)))
