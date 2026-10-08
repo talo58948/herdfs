@@ -85,6 +85,9 @@ fn exercise(strategy: impl FnOnce(u64) -> Strategy) -> Result<()> {
     fsx(local.path(), local.path(), seed, ops)?;
     let expected = fs::read(local.path().join(FILE))?;
     fsx(lab.mount_path("a"), lab.client_dir("a"), seed, ops)?;
+    if env::var("LAB_MOUNT").as_deref() == Ok("nfs") {
+        thread::sleep(VISIBLE_AFTER);
+    }
     lab.wait_committed("a")?;
     thread::sleep(VISIBLE_AFTER);
 
