@@ -41,7 +41,7 @@ impl Strategy {
 pub struct OpenContext {
     pub size: u64,
     pub extension: Option<String>,
-    /// The opening process's name, from `/proc/<pid>/comm`.
+    /// The opening process's name, when the platform provides it.
     pub comm: String,
     /// The fraction of the version's bytes already cached.
     pub coverage: f64,
