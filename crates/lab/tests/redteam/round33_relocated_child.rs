@@ -1,14 +1,12 @@
 //! Round 33: an offline truncating open through a held directory after another client moves it.
 
 use std::fs::{self, File};
-use std::os::fd::AsRawFd;
-use std::path::PathBuf;
 use std::thread;
 
 use anyhow::{Result, ensure};
 use herdfs_lab::{Lab, Links};
 
-use crate::{VISIBLE_AFTER, assert_bytes, save, two_clients};
+use crate::{VISIBLE_AFTER, assert_bytes, entry_names, save, two_clients, write_entry};
 
 const TRIALS: usize = 3;
 
@@ -24,8 +22,7 @@ fn replace_below_held(lab: &Lab, trial: usize, moved: bool) -> Result<(std::io::
     thread::sleep(VISIBLE_AFTER);
 
     let held = File::open(b.join(&old))?;
-    let through_fd = PathBuf::from(format!("/proc/self/fd/{}", held.as_raw_fd()));
-    ensure!(fs::read_dir(&through_fd)?.count() == 1, "b lists the child");
+    ensure!(entry_names(&held)?.len() == 1, "b lists the child");
     let authoritative = if moved {
         fs::rename(a.join(&old), a.join(&new))?;
         a.join(&new).join("child")
@@ -36,7 +33,7 @@ fn replace_below_held(lab: &Lab, trial: usize, moved: bool) -> Result<(std::io::
     held.metadata()?;
 
     lab.cut("b", Links::Authority)?;
-    let written = fs::write(through_fd.join("child"), b"new");
+    let written = write_entry(&held, "child", b"new");
     lab.restore("b", Links::Authority)?;
     if written.is_ok() {
         lab.wait_committed("b")?;

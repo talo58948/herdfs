@@ -4,51 +4,20 @@
 
 use std::fs::{self, File};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, ensure};
 use herdfs_core::SpacePath;
-use herdfs_core::proto::{Request, Response, Version};
+use herdfs_core::proto::Request;
 use herdfs_lab::{ADMIN, Lab, LabConfig, Links, Profile, SPACE, Strategy};
 
-use crate::{VISIBLE_AFTER, random_bytes, read_at, save};
+use crate::{SLOW_ANSWERS, VISIBLE_AFTER, random_bytes, read_at, save, wait_for_rewrite};
 
 /// Several chunks, so a read of the first page leaves the last one uncached.
 const LEN: usize = 4 << 20;
 const PAGE: usize = 4096;
 /// a's links: half a second each way, so the answer to a commit is still on its way when the
 /// test sees the version at the authority and cuts a's links.
-const SLOW_ANSWERS: Profile = Profile::Custom {
-    round_trip_ms: 1_000,
-    kilobytes_per_sec: 100_000,
-    store_first_byte_ms: 0,
-};
-const COMMITTED_WITHIN: Duration = Duration::from_secs(30);
-
-/// The versions of `f` in [`SPACE`], as the admin sees them.
-fn history(lab: &Lab) -> Result<Vec<Version>> {
-    let request = Request::History {
-        space: SPACE.into(),
-        path: SpacePath::try_from("f")?,
-    };
-    match lab.rpc(ADMIN, &request)? {
-        Response::History { versions } => Ok(versions),
-        reply => bail!("history answers with versions, not {reply:?}"),
-    }
-}
-
-/// Polls the authority until `f` has a version other than `known`.
-fn wait_for_new_version(lab: &Lab, known: &Version) -> Result<()> {
-    let deadline = Instant::now() + COMMITTED_WITHIN;
-    while history(lab)?.iter().all(|version| version == known) {
-        if Instant::now() > deadline {
-            bail!("no commit after {COMMITTED_WITHIN:?}");
-        }
-        thread::sleep(Duration::from_millis(2));
-    }
-    Ok(())
-}
-
 /// a saves v1 of `f`, then closes a rewrite of it without fsync, opens `f` again for reading and
 /// reads its first page, which is the rewrite's. The moment the authority has committed the
 /// rewrite, and before its answer crosses a's slow link, the test cuts a's links, so a's committer
@@ -75,7 +44,7 @@ fn read_after_a_retried_commit(purge: bool) -> Result<Option<[&'static str; 2]>>
         read_at(&file, 0, PAGE)? == rewrite[..PAGE],
         "a reads its rewrite before it commits"
     );
-    wait_for_new_version(&lab, &v1)?;
+    wait_for_rewrite(&lab, "f", &v1)?;
     lab.cut("a", Links::Both)?;
     thread::sleep(Duration::from_millis(500));
     ensure!(

@@ -4,36 +4,8 @@ use std::fs::{self, File};
 use std::thread;
 
 use anyhow::{Result, ensure};
-use herdfs_lab::{Lab, LabConfig, Links, Profile, Strategy};
 
-use crate::{VISIBLE_AFTER, assert_bytes, random_bytes, read_at, save};
-
-const OLD_LEN: usize = 512 << 10;
-const NEW_LEN: usize = 8 << 20;
-const CACHE_BYTES: u64 = 1 << 20;
-const PAGE: usize = 4096;
-const TRIALS: usize = 3;
-
-fn start() -> Result<Option<Lab>> {
-    if let Some(reason) = herdfs_lab::missing_binaries() {
-        eprintln!("skipped: {reason}");
-        return Ok(None);
-    }
-    let config = LabConfig::default()
-        .client("a", "alice", &[], Profile::Lan, Strategy::Stream)
-        .client("b", "bob", &[], Profile::Lan, Strategy::Pin)
-        .cache_bytes("b", CACHE_BYTES);
-    Lab::start(config).map(Some)
-}
-
-/// Reads all of `bytes`, cuts b's store link, then reports whether its first page still reads.
-fn reads_without_store(lab: &Lab, file: &File, bytes: &[u8]) -> Result<bool> {
-    assert_bytes(&read_at(file, 0, bytes.len())?, bytes, "the whole new version");
-    lab.cut("b", Links::Store)?;
-    let reread = read_at(file, 0, PAGE);
-    lab.restore("b", Links::Store)?;
-    Ok(reread.is_ok_and(|page| page == bytes[..PAGE]))
-}
+use crate::{PIN_NEW_LEN, PIN_OLD_LEN, PIN_TRIALS, VISIBLE_AFTER, pin_lab, random_bytes, save, stays_pinned};
 
 /// Repro: b opens v1 with Pin. After a commits v2, a stat switches the held inode to v2. Reading
 /// all of v2 exceeds b's cache; with the store cut, rereading its start tests whether the Pin
@@ -41,33 +13,33 @@ fn reads_without_store(lab: &Lab, file: &File, bytes: &[u8]) -> Result<bool> {
 // contract: C3, P1 (docs/architecture.md: Pin is chosen once per open and is never evicted while pinned)
 #[test]
 fn a_pin_handle_keeps_the_version_it_follows_pinned() -> Result<()> {
-    let Some(lab) = start()? else {
+    let Some(lab) = pin_lab()? else {
         return Ok(());
     };
     let mut switched_failures = 0;
-    for trial in 0..TRIALS {
+    for trial in 0..PIN_TRIALS {
         let name = format!("pin-{trial}");
         let path_a = lab.mount_path("a").join(&name);
         let path_b = lab.mount_path("b").join(&name);
-        save(&path_a, &random_bytes(OLD_LEN))?;
+        save(&path_a, &random_bytes(PIN_OLD_LEN))?;
         thread::sleep(VISIBLE_AFTER);
         let held = File::open(&path_b)?;
-        let new = random_bytes(NEW_LEN);
+        let new = random_bytes(PIN_NEW_LEN);
         save(&path_a, &new)?;
         thread::sleep(VISIBLE_AFTER);
-        ensure!(fs::metadata(&path_b)?.len() == NEW_LEN as u64, "b follows v2");
-        switched_failures += usize::from(!reads_without_store(&lab, &held, &new)?);
+        ensure!(fs::metadata(&path_b)?.len() == PIN_NEW_LEN as u64, "b follows v2");
+        switched_failures += usize::from(!stays_pinned(&lab, &held, &new, "the whole new version")?);
         drop(held);
 
         let control = File::open(&path_b)?;
         ensure!(
-            reads_without_store(&lab, &control, &new)?,
+            stays_pinned(&lab, &control, &new, "fresh Pin version")?,
             "fresh Pin control {trial} needed the store"
         );
     }
     assert_eq!(
         switched_failures, 0,
-        "switched Pin handles that could not reread with the store cut, of {TRIALS}"
+        "switched Pin handles that could not reread with the store cut, of {PIN_TRIALS}"
     );
     Ok(())
 }
