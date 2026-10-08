@@ -1,14 +1,12 @@
 //! Sending requests, refreshing authentication, and probing an offline link.
 
-use std::fs;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::{RequestBuilder, StatusCode};
 
 use super::Remote;
-use crate::{Error, Result, lock};
+use crate::{Error, Result};
 
 pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a connection may stay silent before its request fails and can be retried.
@@ -56,15 +54,13 @@ impl Remote {
         response
     }
 
-    /// Sends with the current token. On 401 it re-reads the token file and tries once more,
-    /// so a refreshed token takes effect without a remount.
+    /// Sends with the current token. On 401 it forces one refresh and tries once more.
     async fn exchange(&self, request: impl Fn(&str) -> RequestBuilder) -> Result<reqwest::Response> {
-        let token = lock(&self.token).clone();
+        let token = self.token.access(&self.http, false).await?;
         let mut response = request(&token).send().await?;
         if response.status() == StatusCode::UNAUTHORIZED {
-            let fresh = read_token(&self.token_file)?;
+            let fresh = self.token.access(&self.http, true).await?;
             response = request(&fresh).send().await?;
-            *lock(&self.token) = fresh;
         }
         let status = response.status();
         if status.is_success() {
@@ -73,8 +69,4 @@ impl Remote {
         let refusal = serde_json::from_slice(&response.bytes().await?);
         Err(refusal.map_or_else(|_| Error::Protocol(format!("HTTP {status}")), Error::Api))
     }
-}
-
-pub(super) fn read_token(path: &Path) -> Result<String> {
-    Ok(fs::read_to_string(path)?.trim().to_owned())
 }

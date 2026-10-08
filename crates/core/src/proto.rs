@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ChunkRef, SpacePath};
 
+mod access;
+pub use access::{AclRow, SpaceAccess};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct EntryId(pub u64);
@@ -62,6 +65,8 @@ pub struct Version {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     Whoami,
+    /// Spaces where the caller has a user or group grant.
+    Spaces,
     /// Creates a space with the caller as its admin.
     CreateSpace {
         space: String,
@@ -204,6 +209,11 @@ pub enum Request {
         principal: String,
         perm: Option<Perm>,
     },
+    /// Explicit grants on `path` and its ancestors. Needs admin on `path`.
+    Access {
+        space: String,
+        path: SpacePath,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +222,12 @@ pub enum Response {
     Me {
         principal: String,
         groups: Vec<String>,
+    },
+    Spaces {
+        spaces: Vec<SpaceAccess>,
+    },
+    Access {
+        grants: Vec<AclRow>,
     },
     Entry {
         entry: Entry,

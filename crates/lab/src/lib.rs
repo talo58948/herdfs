@@ -19,6 +19,7 @@ mod sweep;
 mod toxiproxy;
 
 use std::path::Path;
+use std::process::Command;
 
 use anyhow::Result;
 use serde_json::Value;
@@ -87,6 +88,11 @@ impl Lab {
         self.client(name).authority_url(self.authority.port)
     }
 
+    /// How many refresh-token grants the test issuer has served.
+    pub fn issuer_refresh_count(&self) -> u64 {
+        self.issuer.refresh_count()
+    }
+
     /// Client `name`'s counters, from the `user.herdfs.stats` xattr on its mount root.
     pub fn stats(&self, name: &str) -> Result<Value> {
         self.client(name).stats()
@@ -135,6 +141,11 @@ pub fn missing_binaries() -> Option<String> {
         .into_iter()
         .find_map(|name| process::binary(name).err())
         .map(|error| error.to_string())
+}
+
+/// A command for the workspace's `herdfs` binary.
+pub fn herdfs_command() -> Result<Command> {
+    Ok(Command::new(process::binary(process::CLIENT)?))
 }
 
 /// A client name the lab does not know is a bug in the test.

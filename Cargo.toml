@@ -12,6 +12,7 @@ herdfs-client = { path = "crates/client" }
 herdfs-core = { path = "crates/core" }
 anyhow = "1"
 axum = "0.8"
+base64 = "0.22"
 blake3 = "1"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
@@ -21,14 +22,16 @@ futures = "0.3"
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 libc = "0.2"
 rand = "0.10"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 rustix = { version = "1", features = ["fs"] }
 rusty-s3 = { version = "0.10", default-features = false, features = ["rustcrypto"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"
+time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use herdfs_authority::{Outcome, Principal};
 use herdfs_core::{
     SpacePath,
-    proto::{Kind, Perm, Request, Response, VersionId},
+    proto::{AclRow, Kind, Perm, Request, Response, SpaceAccess, VersionId},
 };
 
 use crate::model::{Model, Space};
@@ -27,6 +27,23 @@ impl Model {
                         groups: who.groups.clone()
                     }
                 );
+            }
+            Request::Spaces => {
+                let spaces = self
+                    .spaces
+                    .iter()
+                    .filter(|(name, space)| {
+                        space
+                            .acl
+                            .keys()
+                            .any(|(path, _)| self.perm(name, path, who).is_some())
+                    })
+                    .map(|(space, _)| SpaceAccess {
+                        space: space.clone(),
+                        root_perm: self.perm(space, &SpacePath::root(), who),
+                    })
+                    .collect();
+                assert_eq!(*reply, Response::Spaces { spaces });
             }
             Request::CreateSpace { space } => {
                 let granted_seq = self.versions.keys().next_back().map_or(0, |id| id.0);
@@ -238,6 +255,27 @@ impl Model {
                     Some(perm) => acl.entry(key).or_insert((*perm, granted_seq)).0 = *perm,
                     None => drop(acl.remove(&key)),
                 };
+            }
+            Request::Access { space, path } => {
+                let mut grants: Vec<AclRow> = self.spaces[space]
+                    .acl
+                    .iter()
+                    .filter(|((at, _), _)| path.is_within(at))
+                    .map(|((path, principal), (perm, _))| AclRow {
+                        path: path.clone(),
+                        principal: principal.clone(),
+                        perm: *perm,
+                    })
+                    .collect();
+                grants.sort_by(|left, right| {
+                    left.path
+                        .as_str()
+                        .len()
+                        .cmp(&right.path.as_str().len())
+                        .then_with(|| left.path.cmp(&right.path))
+                        .then_with(|| left.principal.cmp(&right.principal))
+                });
+                assert_eq!(*reply, Response::Access { grants });
             }
         }
     }
