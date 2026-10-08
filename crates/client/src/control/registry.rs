@@ -52,7 +52,7 @@ pub(crate) fn only_mount(path: Option<&Path>) -> anyhow::Result<Registration> {
     }
     let mounts = registrations(true)?;
     ensure!(mounts.len() == 1, "expected one mounted space, found {}", mounts.len());
-    Ok(mounts.into_iter().next().expect("length checked above"))
+    mounts.into_iter().next().context("mounted space disappeared")
 }
 
 fn registrations(live_only: bool) -> anyhow::Result<Vec<Registration>> {

@@ -7,7 +7,7 @@ use crate::strategy::StrategyArg;
 use {
     crate::{
         cache::Cache,
-        fs::{Fuse, Inodes, Kernel, Space},
+        fs::{Fuse, Inodes, Kernel, MountState, Space},
         journal::{Committer, Journal},
         kept::Kept,
         journal::CommitGate,
@@ -76,7 +76,7 @@ pub fn mount(args: &MountArgs) -> anyhow::Result<()> {
     let journal = crate::control::absolute(&args.journal)?;
     let state = journal.parent().context("--journal must have a parent directory")?;
     let _control = crate::control::serve(
-        space.clone(),
+        space,
         &args.authority,
         &args.space,
         &args.mountpoint,
@@ -149,9 +149,7 @@ async fn connect(args: &MountArgs) -> anyhow::Result<Arc<Space>> {
     let space = Arc::new(Space::new(
         remote.clone(),
         cache,
-        journal,
-        commits,
-        Some(kept.clone()),
+        MountState { journal, commits, kept: Some(kept.clone()) },
         stats,
         decider,
         kernel,

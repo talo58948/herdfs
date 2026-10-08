@@ -71,7 +71,7 @@ fn save(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn socket_request(lab: &Lab, request: Value) -> Result<Value> {
+fn socket_request(lab: &Lab, request: &Value) -> Result<Value> {
     let mut stream = UnixStream::connect(lab.client_dir("b").join("control.sock"))?;
     writeln!(stream, "{}", serde_json::to_string(&request)?)?;
     let mut line = String::new();
@@ -97,7 +97,7 @@ fn kept_folder_survives_restart_follows_heads_and_becomes_evictable() -> Result<
         .mode();
     assert_eq!(mode & 0o777, 0o600);
     assert_eq!(
-        socket_request(&lab, serde_json::json!({"op":"stats"}))?["ok"],
+        socket_request(&lab, &serde_json::json!({"op":"stats"}))?["ok"],
         true
     );
     assert_eq!(command(&lab, "pin", Some(&pinned))?["ok"], true);

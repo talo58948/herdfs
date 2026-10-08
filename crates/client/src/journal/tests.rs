@@ -57,9 +57,11 @@ impl Mount {
         let space = Space::new(
             remote,
             cache,
-            journal.clone(),
-            Arc::new(crate::journal::CommitGate::default()),
-            None,
+            crate::fs::MountState {
+                journal: journal.clone(),
+                commits: Arc::new(crate::journal::CommitGate::default()),
+                kept: None,
+            },
             stats,
             Decider::Fixed(AccessPlan::STREAM),
             kernel,

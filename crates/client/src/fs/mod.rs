@@ -89,6 +89,12 @@ pub(crate) enum Invalidation {
     },
 }
 
+pub(crate) struct MountState {
+    pub journal: Arc<Journal>,
+    pub commits: Arc<CommitGate>,
+    pub kept: Option<Arc<Kept>>,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum OpenMode {
     Read,
@@ -137,9 +143,7 @@ impl Space {
     pub fn new(
         remote: Arc<Remote>,
         cache: Arc<Cache>,
-        journal: Arc<Journal>,
-        commits: Arc<CommitGate>,
-        kept: Option<Arc<Kept>>,
+        mount: MountState,
         stats: Arc<Stats>,
         decider: Decider,
         kernel: Arc<Kernel>,
@@ -150,9 +154,9 @@ impl Space {
             remote,
             reader,
             cache,
-            journal,
-            commits,
-            kept,
+            journal: mount.journal,
+            commits: mount.commits,
+            kept: mount.kept,
             stats,
             decider: Mutex::new(decider),
             accesses: Mutex::default(),

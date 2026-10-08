@@ -58,7 +58,7 @@ pub(crate) fn serve(
         id: format!("{:032x}", rand::random::<u128>()),
         space: space_name.to_owned(),
         authority: authority.to_owned(),
-        mountpoint: mountpoint.clone(),
+        mountpoint,
         socket: socket.clone(),
         pid: std::process::id(),
     };
@@ -89,8 +89,10 @@ async fn connection(stream: UnixStream, space: Arc<Space>, mount: Registration) 
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
         let response = match serde_json::from_str(&line) {
-            Ok(request) => answer(&space, &mount, request).await.unwrap_or_else(failure),
-            Err(error) => failure(error.into()),
+            Ok(request) => answer(&space, &mount, request)
+                .await
+                .unwrap_or_else(|error| failure(&error)),
+            Err(error) => failure(&error.into()),
         };
         write.write_all(&serde_json::to_vec(&response)?).await?;
         write.write_all(b"\n").await?;
@@ -167,7 +169,7 @@ fn with_ok(mut value: Value) -> anyhow::Result<Value> {
     Ok(value)
 }
 
-fn failure(error: anyhow::Error) -> Value {
+fn failure(error: &anyhow::Error) -> Value {
     json!({"ok":false,"error":error.to_string()})
 }
 

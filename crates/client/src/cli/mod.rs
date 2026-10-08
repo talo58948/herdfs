@@ -208,20 +208,20 @@ fn control_path(op: &str, path: &Path, json: bool) -> anyhow::Result<()> {
     let registration = crate::control::find_mount(path)?;
     let path = crate::control::absolute(path)?;
     let request = serde_json::json!({"op":op,"path":path});
-    control(registration, request, json)
+    control(&registration, request, json)
 }
 
 fn control_mount(op: &str, mountpoint: Option<&Path>, json: bool) -> anyhow::Result<()> {
     let registration = crate::control::only_mount(mountpoint)?;
-    control(registration, serde_json::json!({"op":op}), json)
+    control(&registration, serde_json::json!({"op":op}), json)
 }
 
 fn control(
-    registration: crate::control::Registration,
+    registration: &crate::control::Registration,
     request: serde_json::Value,
     json: bool,
 ) -> anyhow::Result<()> {
-    let response = runtime()?.block_on(crate::control::request(&registration, request))?;
+    let response = runtime()?.block_on(crate::control::request(registration, request))?;
     if json {
         println!("{}", serde_json::to_string(&response)?);
     } else {
