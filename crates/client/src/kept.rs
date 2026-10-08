@@ -3,18 +3,17 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use herdfs_core::SpacePath;
-use herdfs_core::proto::{Entry, Version};
+use herdfs_core::proto::Version;
 use tokio::sync::Notify;
 
 use crate::cache::Cache;
 use crate::fs::{Inodes, Kernel};
 use crate::reader::Reader;
 use crate::remote::Remote;
-use crate::version::OpenVersion;
-use crate::{Result, lock};
+use crate::lock;
 
 const REFRESH: Duration = Duration::from_secs(1);
 
@@ -159,69 +158,6 @@ impl Kept {
             .any(|root| progress.get(*root).is_some_and(|state| state.downloading));
         let error = roots.iter().find_map(|root| progress.get(*root)?.error.clone());
         (!roots.is_empty(), downloading, error)
-    }
-
-    async fn refresh(&self) {
-        let roots: Vec<_> = lock(&self.saved).roots.iter().cloned().collect();
-        let mut seen = BTreeSet::new();
-        let mut entries = HashSet::new();
-        let mut complete = true;
-        for root in roots {
-            match self.scan(&root).await {
-                Ok((files, found)) => {
-                    entries.extend(found);
-                    for (path, entry, version) in files {
-                        seen.insert(path.clone());
-                        if let Err(error) = self.fetch(path, entry, version).await {
-                            complete = false;
-                            self.set_progress(&root, false, Some(error.to_string()));
-                        }
-                    }
-                    if lock(&self.progress)
-                        .get(&root)
-                        .is_some_and(|state| state.error.is_none())
-                    {
-                        self.set_progress(&root, false, None);
-                    }
-                }
-                Err(error) => {
-                    complete = false;
-                    self.set_progress(&root, false, Some(error.to_string()));
-                }
-            }
-        }
-        if complete {
-            self.drop_unseen(&seen);
-            self.inodes.keep(entries);
-        }
-    }
-
-    async fn fetch(&self, path: SpacePath, entry: Entry, version: Option<Version>) -> Result<()> {
-        self.inodes.observe(&entry, Instant::now(), false);
-        let Some(version) = version else {
-            return Ok(());
-        };
-        let downloading = self.prepare(&path, &version)?;
-        if downloading {
-            self.set_path_progress(&path, true);
-        }
-        let open = OpenVersion::new(version.clone());
-        self.reader.cache_all(&open).await?;
-        if !version
-            .chunks
-            .iter()
-            .all(|chunk| self.cache.get(&chunk.id).is_some())
-        {
-            return Err(crate::Error::Corrupt(version.chunks[0].id));
-        }
-        self.finish(&path)?;
-        let switched = self
-            .inodes
-            .with(entry.id, |state| state.switch((Some(version), true)));
-        if downloading || switched == Some(true) {
-            self.kernel.invalidate_attrs(entry.id);
-        }
-        Ok(())
     }
 
     fn prepare(&self, path: &SpacePath, version: &Version) -> std::io::Result<bool> {
