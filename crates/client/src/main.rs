@@ -1,8 +1,9 @@
 //! The `herdfs` command.
 
-use std::io::{self, IsTerminal};
-
-use std::path::PathBuf;
+use std::{
+    io::{self, IsTerminal},
+    path::PathBuf,
+};
 
 use anyhow::Context;
 use clap::Parser;
@@ -30,7 +31,7 @@ fn main() -> anyhow::Result<()> {
         Command::Mount(args) => herdfs_client::mount(&args),
         Command::Explain { path } => {
             let value = xattr::get(&path, "user.herdfs.plan")?
-                .with_context(|| format!("{} has no completed access to explain", path.display()))?;
+                .with_context(|| format!("{} has not been read since mount", path.display()))?;
             let json: serde_json::Value = serde_json::from_slice(&value)?;
             println!("{}", serde_json::to_string_pretty(&json)?);
             Ok(())

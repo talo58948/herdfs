@@ -7,13 +7,11 @@ use herdfs_core::proto::EntryId;
 
 use super::{Space, handles::Handle};
 use crate::lock;
-use crate::reader::{LARGE_CHUNKS, SMALL_CHUNKS};
-use crate::strategy::{
-    AccessPlan, AccessRecord, Jev, JevAnswer, Keep, OpenContext, PlanSource, ReadAhead, Upgrade,
-};
+use crate::strategy::{AccessPlan, AccessRecord, Decided, Keep, OpenContext, PlanSource, Upgrade};
 use crate::version::OpenVersion;
 
 const REOPENED_WITHIN: Duration = Duration::from_secs(300);
+/// Recent opens and access records retained for Jev context and `explain`.
 const OPENS: u64 = 4096;
 
 impl Space {
@@ -52,14 +50,12 @@ impl Space {
             round_trip: self.remote.round_trip.get().unwrap_or_default(),
         };
         let decision = lock(&self.decider).decide(&context);
-        self.stats.decided(decision.plan);
-        tracing::debug!(?path, plan = ?decision.plan, ?decision.source, ?context, "access plan");
-        let record = Arc::new(AccessRecord::new(
-            decision.plan,
-            decision.source,
-            decision.confidence,
-        ));
-        lock(&self.accesses).insert(entry, record.clone());
+        self.stats.decided(decision.decided.plan);
+        tracing::debug!(?path, plan = ?decision.decided.plan, source = ?decision.decided.source, ?context, "access plan");
+        let record = Arc::new(AccessRecord::new(decision.decided));
+        let mut accesses = lock(&self.accesses);
+        accesses.insert(entry, 1, record.clone());
+        accesses.evict(OPENS, |_| false);
         (record, decision.upgrade)
     }
 
@@ -87,9 +83,9 @@ impl Space {
         let Some(file) = file else {
             return;
         };
-        let (reader, file, bytes) = (self.reader.clone(), file.clone(), access.clone());
+        let (reader, file, access) = (self.reader.clone(), file.clone(), access.clone());
         tokio::spawn(async move {
-            if let Err(err) = reader.prefetch(&file, plan.prefetch, &bytes.bytes_fetched).await {
+            if let Err(err) = reader.prefetch(&file, plan.prefetch, &access.bytes_fetched).await {
                 tracing::warn!(%err, entry = file.version.entry.0, "prefetch failed");
             }
         });
@@ -109,15 +105,11 @@ impl Space {
     }
 
     pub(super) fn read_ahead(&self, file: Arc<OpenVersion>, after: u64, access: Arc<AccessRecord>) {
-        let chunks = match access.plan().read_ahead {
-            ReadAhead::None => return,
-            ReadAhead::Small => SMALL_CHUNKS,
-            ReadAhead::Large => LARGE_CHUNKS,
-        };
+        let read_ahead = access.plan().read_ahead;
         let reader = self.reader.clone();
         tokio::spawn(async move {
             if let Err(err) = reader
-                .read_ahead(&file, after, chunks, &access.bytes_fetched)
+                .read_ahead(&file, after, read_ahead, &access.bytes_fetched)
                 .await
             {
                 tracing::warn!(%err, entry = file.version.entry.0, "read-ahead failed");
@@ -142,28 +134,33 @@ impl Space {
         let Ok(answer) = upgrade.await else {
             return;
         };
-        let Some(handle) = lock(&self.handles).get(&fh).cloned() else {
+        // Pinning under the handles lock: release either comes later and unpins, or came first.
+        let handles = lock(&self.handles);
+        let Some(handle) = handles.get(&fh) else {
             return;
         };
         let Some(access) = &handle.access else {
             return;
         };
-        let added = answer.plan(AccessPlan::STREAM, Jev::CONFIDENT);
-        let plan = access.plan().merged(added);
-        access.update(plan, source(answer), Some(answer.confidence()));
+        let current = access.decided();
+        let plan = current.plan.merged(answer.plan(AccessPlan::NONE));
+        if plan == current.plan {
+            access.update(Decided {
+                answer: Some(answer),
+                ..current
+            });
+            return;
+        }
+        access.update(Decided {
+            plan,
+            source: answer.source(PlanSource::Jev),
+            answer: Some(answer),
+        });
         let file = self.inodes.with(handle.entry, |state| state.followed()).flatten();
-        self.begin(file.as_ref(), &handle);
+        self.begin(file.as_ref(), handle);
     }
 
-    pub fn plan(&self, entry: EntryId) -> Option<Vec<u8>> {
-        lock(&self.accesses).get(&entry).map(|access| access.json())
-    }
-}
-
-fn source(answer: JevAnswer) -> PlanSource {
-    if answer.any_confident(Jev::CONFIDENT) {
-        PlanSource::Jev
-    } else {
-        PlanSource::Rule
+    pub(super) fn explain(&self, entry: EntryId) -> Option<Vec<u8>> {
+        lock(&self.accesses).get(&entry)?.json().ok()
     }
 }

@@ -4,7 +4,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::{Json, Router};
 
 use super::*;
-use crate::strategy::{AccessPlan, Decider};
+use crate::strategy::{AccessPlan, Decider, Keep, PlanSource, Prefetch, ReadAhead};
 
 const BIG: u64 = 512 << 20;
 
@@ -64,15 +64,12 @@ async fn a_miss_uses_the_rule_then_remembers_each_confident_setting() {
     let (jev, asked) = fake_jev(reply, Duration::ZERO).await;
     let stats: Arc<Stats> = Arc::default();
     let now = jev.decide(&context(), &stats);
-    assert_eq!(now.plan, AccessPlan::STREAM);
+    assert_eq!(now.decided.plan, AccessPlan::STREAM);
     let answer = now.upgrade.unwrap().await.unwrap();
-    assert_eq!(
-        answer.plan(AccessPlan::STREAM, Jev::CONFIDENT).name(),
-        "index/large/yes"
-    );
+    assert_eq!(answer.plan(AccessPlan::STREAM).name(), "index/large/yes");
     let remembered = jev.decide(&context(), &stats);
-    assert_eq!(remembered.plan.name(), "index/large/yes");
-    assert_eq!(remembered.source, PlanSource::Remembered);
+    assert_eq!(remembered.decided.plan.name(), "index/large/yes");
+    assert_eq!(remembered.decided.source, PlanSource::Remembered);
     assert_eq!((asked.load(Relaxed), stats.jev_answers.load(Relaxed)), (1, 3));
 }
 
@@ -87,12 +84,9 @@ async fn uncertainty_and_one_malformed_answer_fall_back_per_setting() {
     let (jev, _) = fake_jev(reply, Duration::ZERO).await;
     let stats: Arc<Stats> = Arc::default();
     let answer = jev.ask(&context()).await.unwrap();
-    assert_eq!(
-        answer.plan(AccessPlan::STREAM, Jev::CONFIDENT).name(),
-        "index/none/no"
-    );
-    assert_eq!(answer.confidence().read_ahead, Some(0.1));
-    assert_eq!(answer.confidence().keep, None);
+    assert_eq!(answer.plan(AccessPlan::STREAM).name(), "index/none/no");
+    assert_eq!(answer.confidences()[1], Some(0.1));
+    assert_eq!(answer.confidences()[2], None);
 
     let decision = jev.decide(&context(), &stats);
     let _ = decision.upgrade.unwrap().await.unwrap();
@@ -130,5 +124,5 @@ fn contexts_are_sent_as_words() {
         "time to download the whole file": "tens of seconds",
     });
     assert_eq!(phrase(&context()), expected);
-    assert_eq!(Decider::Rule.decide(&context()).plan, AccessPlan::STREAM);
+    assert_eq!(Decider::Rule.decide(&context()).decided.plan, AccessPlan::STREAM);
 }

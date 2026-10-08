@@ -30,7 +30,7 @@ use crate::{
     reader::Reader,
     remote::Remote,
     stats::Stats,
-    strategy::Decider,
+    strategy::{AccessRecord, Decider},
 };
 
 /// How long the kernel and this client may reuse an attribute or listing (T_vis, C2).
@@ -80,7 +80,7 @@ pub struct Space {
     pub(crate) stats: Arc<Stats>,
     decider: Mutex<Decider>,
     /// Latest access record by entry, retained after its handle closes for `explain`.
-    accesses: Mutex<HashMap<EntryId, Arc<crate::strategy::AccessRecord>>>,
+    accesses: Mutex<Lru<EntryId, Arc<AccessRecord>>>,
     pub(crate) kernel: Arc<Kernel>,
     /// The mounting user and group, shown as the owner of every entry.
     owner: (u32, u32),

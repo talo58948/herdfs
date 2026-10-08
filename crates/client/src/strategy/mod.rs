@@ -7,77 +7,65 @@ mod record;
 use std::sync::Arc;
 
 use rand::{RngExt, rngs::SmallRng};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use tokio::sync::oneshot;
 
-pub use arg::StrategyArg;
+pub(crate) use arg::StrategyArg;
 pub use jev::Jev;
 pub(crate) use record::AccessRecord;
 
 use crate::stats::Stats;
 
-/// The rule keeps today's cutoff: small files are fetched whole, larger files stream.
+/// Files smaller than 64 MiB are fetched whole; larger files stream.
 const FETCH_BELOW: u64 = 64 << 20;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Prefetch {
-    None,
-    First,
-    Index,
-    Whole,
-}
+pub(crate) trait Setting: Copy + 'static {
+    const ALL: &'static [Self];
 
-impl Prefetch {
-    pub const ALL: [Self; 4] = [Self::None, Self::First, Self::Index, Self::Whole];
+    fn name(self) -> &'static str;
 
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Index => "index",
-            Self::First => "first",
-            Self::Whole => "whole",
-        }
+    fn parse(name: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|setting| setting.name() == name)
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ReadAhead {
-    None,
-    Small,
-    Large,
-}
-
-impl ReadAhead {
-    pub const ALL: [Self; 3] = [Self::None, Self::Small, Self::Large];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Small => "small",
-            Self::Large => "large",
+macro_rules! settings {
+    ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+        pub enum $name {
+            $($variant),+
         }
-    }
-}
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Keep {
-    No,
-    Yes,
-}
+        impl Setting for $name {
+            const ALL: &'static [Self] = &[$(Self::$variant),+];
 
-impl Keep {
-    pub const ALL: [Self; 2] = [Self::No, Self::Yes];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::No => "no",
-            Self::Yes => "yes",
+            fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $value),+
+                }
+            }
         }
-    }
+
+        impl Serialize for $name {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(self.name())
+            }
+        }
+    };
 }
+
+settings!(Prefetch {
+    None => "none",
+    First => "first",
+    Index => "index",
+    Whole => "whole",
+});
+settings!(ReadAhead {
+    None => "none",
+    Small => "small",
+    Large => "large",
+});
+settings!(Keep { No => "no", Yes => "yes" });
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct AccessPlan {
@@ -87,6 +75,7 @@ pub struct AccessPlan {
 }
 
 impl AccessPlan {
+    pub(crate) const NONE: Self = Self::new(Prefetch::None, ReadAhead::None, Keep::No);
     pub const STREAM: Self = Self::new(Prefetch::None, ReadAhead::None, Keep::No);
     pub const FETCH: Self = Self::new(Prefetch::Whole, ReadAhead::None, Keep::No);
     pub const PIN: Self = Self::new(Prefetch::Whole, ReadAhead::None, Keep::Yes);
@@ -116,10 +105,8 @@ impl AccessPlan {
 
 fn add_prefetch(now: Prefetch, later: Prefetch) -> Prefetch {
     match (now, later) {
-        (Prefetch::None, later) => later,
-        (now, Prefetch::None) => now,
+        (Prefetch::None, other) | (other, Prefetch::None) => other,
         (now, later) if now == later => now,
-        (Prefetch::Whole, _) | (_, Prefetch::Whole) => Prefetch::Whole,
         // First and format-index regions need not overlap, so their representable union is whole.
         _ => Prefetch::Whole,
     }
@@ -127,19 +114,12 @@ fn add_prefetch(now: Prefetch, later: Prefetch) -> Prefetch {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum PlanSource {
+pub(crate) enum PlanSource {
     Remembered,
     Rule,
     Jev,
     Fixed,
     Chaos,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
-pub struct Confidence {
-    pub prefetch: Option<f64>,
-    pub read_ahead: Option<f64>,
-    pub keep: Option<f64>,
 }
 
 /// What a decider knows about one access.
@@ -159,71 +139,85 @@ pub struct OpenContext {
     pub opens: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Setting<T> {
-    pub value: T,
-    pub confidence: f64,
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+struct Chosen<T> {
+    value: T,
+    confidence: f64,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct JevAnswer {
-    pub prefetch: Option<Setting<Prefetch>>,
-    pub read_ahead: Option<Setting<ReadAhead>>,
-    pub keep: Option<Setting<Keep>>,
+    prefetch: Option<Chosen<Prefetch>>,
+    read_ahead: Option<Chosen<ReadAhead>>,
+    keep: Option<Chosen<Keep>>,
 }
 
 impl JevAnswer {
-    pub fn plan(self, fallback: AccessPlan, confident: f64) -> AccessPlan {
+    pub fn plan(self, fallback: AccessPlan) -> AccessPlan {
         AccessPlan::new(
-            accepted(self.prefetch, confident).map_or(fallback.prefetch, |answer| answer.value),
-            accepted(self.read_ahead, confident).map_or(fallback.read_ahead, |answer| answer.value),
-            accepted(self.keep, confident).map_or(fallback.keep, |answer| answer.value),
+            accepted(self.prefetch).map_or(fallback.prefetch, |answer| answer.value),
+            accepted(self.read_ahead).map_or(fallback.read_ahead, |answer| answer.value),
+            accepted(self.keep).map_or(fallback.keep, |answer| answer.value),
         )
     }
 
-    pub fn confidence(self) -> Confidence {
-        Confidence {
-            prefetch: self.prefetch.map(|answer| answer.confidence),
-            read_ahead: self.read_ahead.map(|answer| answer.confidence),
-            keep: self.keep.map(|answer| answer.confidence),
-        }
-    }
-
-    pub fn any_confident(self, confident: f64) -> bool {
+    fn confidences(self) -> [Option<f64>; 3] {
         [
             self.prefetch.map(|answer| answer.confidence),
             self.read_ahead.map(|answer| answer.confidence),
             self.keep.map(|answer| answer.confidence),
         ]
-        .into_iter()
-        .flatten()
-        .any(|confidence| confidence >= confident)
+    }
+
+    fn any_confident(self) -> bool {
+        self.confidences()
+            .into_iter()
+            .flatten()
+            .any(|confidence| confidence >= Jev::CONFIDENT)
+    }
+
+    pub(crate) fn source(self, confident: PlanSource) -> PlanSource {
+        if self.any_confident() {
+            confident
+        } else {
+            PlanSource::Rule
+        }
     }
 }
 
-fn accepted<T>(answer: Option<Setting<T>>, confident: f64) -> Option<Setting<T>> {
-    answer.filter(|answer| answer.confidence >= confident)
+fn accepted<T>(answer: Option<Chosen<T>>) -> Option<Chosen<T>> {
+    answer.filter(|answer| answer.confidence >= Jev::CONFIDENT)
 }
 
-pub type Upgrade = oneshot::Receiver<JevAnswer>;
+pub(crate) type Upgrade = oneshot::Receiver<JevAnswer>;
 
-pub struct Decision {
+#[derive(Clone, Copy, Serialize)]
+pub(crate) struct Decided {
     pub plan: AccessPlan,
     pub source: PlanSource,
-    pub confidence: Option<Confidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer: Option<JevAnswer>,
+}
+
+pub(crate) struct Decision {
+    pub decided: Decided,
     pub upgrade: Option<Upgrade>,
 }
 
 #[derive(Clone)]
-pub enum Decider {
+pub(crate) enum Decider {
+    /// The plan explicitly selected on the command line.
     Fixed(AccessPlan),
+    /// Fetch files under 64 MiB and stream larger ones.
     Rule,
+    /// Seeded random settings let tests reach every plan reproducibly (C8).
     Chaos(SmallRng),
+    /// Jev's remembered answers, else the rule while one request runs.
     Jev(Arc<Jev>, Arc<Stats>),
 }
 
 impl Decider {
-    pub fn decide(&mut self, context: &OpenContext) -> Decision {
+    pub(crate) fn decide(&mut self, context: &OpenContext) -> Decision {
         let (plan, source) = match self {
             Self::Fixed(plan) => (*plan, PlanSource::Fixed),
             Self::Rule => (rule(context), PlanSource::Rule),
@@ -231,15 +225,17 @@ impl Decider {
             Self::Jev(jev, stats) => return jev.decide(context, stats),
         };
         Decision {
-            plan,
-            source,
-            confidence: None,
+            decided: Decided {
+                plan,
+                source,
+                answer: None,
+            },
             upgrade: None,
         }
     }
 }
 
-pub fn rule(context: &OpenContext) -> AccessPlan {
+pub(super) fn rule(context: &OpenContext) -> AccessPlan {
     if context.size < FETCH_BELOW {
         AccessPlan::FETCH
     } else {

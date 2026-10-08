@@ -79,25 +79,20 @@ impl Space {
         let entry = self.entry_id(ino);
         let mode = OpenMode::for_open(flags);
         let (writable, truncate) = (mode.writes(), mode.truncates());
-        let mut upgrade = None;
-        let mut file = None;
-        let mut access = None;
-        // Every open for writing asks for write access, over pending changes too (C1, C4a).
-        if writable {
+        let (file, access, upgrade) = if writable {
+            // Every open for writing asks for write access, over pending changes too (C1, C4a).
             self.head(entry, mode).await?;
+            (None, None, None)
         } else {
-            file = match self.changes(entry) {
+            let file = match self.changes(entry) {
                 Some(_) => None,
                 None => self.head(entry, mode).await?,
             };
-            let started = self.start(file.as_ref(), pid, entry);
-            access = Some(started.0);
-            upgrade = started.1;
-        }
+            let (access, upgrade) = self.start(file.as_ref(), pid, entry);
+            (file, Some(access), upgrade)
+        };
         let handle = Handle::new(entry, writable, access, &self.inodes);
-        if !writable {
-            self.begin(file.as_ref(), &handle);
-        }
+        self.begin(file.as_ref(), &handle);
         if truncate {
             self.prepare(entry, true).await?;
             handle.truncated.store(true, Relaxed);

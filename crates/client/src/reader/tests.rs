@@ -129,6 +129,31 @@ async fn concurrent_reads_fetch_a_chunk_once() {
 
 // contract: C9
 #[tokio::test]
+async fn overlapping_prefetch_batches_fetch_each_chunk_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (reader, file, chunks) = setup(dir.path());
+    let fetched = std::sync::Mutex::new(Vec::<usize>::new());
+    let fetch = |missing: Vec<usize>| {
+        fetched.lock().unwrap().extend(&missing);
+        let bytes: Vec<_> = missing.iter().map(|&index| Ok(chunks[index].clone())).collect();
+        async move {
+            tokio::task::yield_now().await;
+            Ok(stream::iter(bytes).boxed())
+        }
+    };
+    let (first, second) = tokio::join!(
+        reader.load(&file, &[0, 1, 2], fetch),
+        reader.load(&file, &[1, 2, 3], fetch)
+    );
+    assert_eq!(first.unwrap().len(), 3);
+    assert_eq!(second.unwrap().len(), 3);
+    let mut fetched = fetched.into_inner().unwrap();
+    fetched.sort_unstable();
+    assert_eq!(fetched, [0, 1, 2, 3]);
+}
+
+// contract: C9
+#[tokio::test]
 async fn a_read_waits_only_for_its_own_chunk_of_a_prefetch_batch() {
     let dir = tempfile::tempdir().unwrap();
     let (reader, file, chunks) = setup(dir.path());

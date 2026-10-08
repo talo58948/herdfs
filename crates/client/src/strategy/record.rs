@@ -3,56 +3,45 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use serde::Serialize;
 
-use super::{AccessPlan, Confidence, PlanSource};
+use super::{AccessPlan, Decided};
 use crate::lock;
 
-#[derive(Clone, Copy, Serialize)]
-struct Decision {
-    plan: AccessPlan,
-    source: PlanSource,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    confidence: Option<Confidence>,
-}
-
 pub(crate) struct AccessRecord {
-    decision: Mutex<Decision>,
+    decided: Mutex<Decided>,
     pub bytes_fetched: AtomicU64,
 }
 
 impl AccessRecord {
-    pub fn new(plan: AccessPlan, source: PlanSource, confidence: Option<Confidence>) -> Self {
+    pub(crate) fn new(decided: Decided) -> Self {
         Self {
-            decision: Mutex::new(Decision {
-                plan,
-                source,
-                confidence,
-            }),
+            decided: Mutex::new(decided),
             bytes_fetched: AtomicU64::new(0),
         }
     }
 
-    pub fn plan(&self) -> AccessPlan {
-        lock(&self.decision).plan
+    pub(crate) fn plan(&self) -> AccessPlan {
+        lock(&self.decided).plan
     }
 
-    pub fn update(&self, plan: AccessPlan, source: PlanSource, confidence: Option<Confidence>) {
-        *lock(&self.decision) = Decision {
-            plan,
-            source,
-            confidence,
-        };
+    pub(crate) fn decided(&self) -> Decided {
+        *lock(&self.decided)
     }
 
-    pub fn json(&self) -> Vec<u8> {
-        let decision = *lock(&self.decision);
-        let mut value = serde_json::json!({
-            "plan": decision.plan,
-            "source": decision.source,
-            "bytes_fetched": self.bytes_fetched.load(Relaxed),
-        });
-        if let Some(confidence) = decision.confidence {
-            value["confidence"] = serde_json::json!(confidence);
+    pub(crate) fn update(&self, decided: Decided) {
+        *lock(&self.decided) = decided;
+    }
+
+    pub(crate) fn json(&self) -> serde_json::Result<Vec<u8>> {
+        #[derive(Serialize)]
+        struct Record {
+            #[serde(flatten)]
+            decided: Decided,
+            bytes_fetched: u64,
         }
-        value.to_string().into_bytes()
+
+        serde_json::to_vec(&Record {
+            decided: self.decided(),
+            bytes_fetched: self.bytes_fetched.load(Relaxed),
+        })
     }
 }

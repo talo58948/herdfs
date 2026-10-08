@@ -5,33 +5,36 @@ use std::ops::Range;
 use std::sync::atomic::AtomicU64;
 
 use crate::Result;
-use crate::strategy::Prefetch;
+use crate::strategy::{Prefetch, ReadAhead};
 use crate::version::OpenVersion;
 
 use super::Reader;
 
 /// The first-window prefetch and small read-ahead are two chunks (about 2 MiB at the average
 /// chunk size): enough to hide one round trip without dominating a short access.
-pub const FIRST_CHUNKS: usize = 2;
-pub const SMALL_CHUNKS: usize = 2;
+const FIRST_CHUNKS: usize = 2;
+const SMALL_CHUNKS: usize = 2;
 /// Large read-ahead is eight chunks (about 8 MiB): one download-concurrency batch.
-pub const LARGE_CHUNKS: usize = 8;
+const LARGE_CHUNKS: usize = 8;
 
+/// ZIP's 22-byte EOCD plus its maximum 65,535-byte comment.
 const ZIP_TAIL: u64 = 65_557;
+/// Enough for an MP4 box's 64-bit `largesize` header.
 const BOX_HEADER: u64 = 16;
+/// Bounded box walking finds the common early `moov` without scanning the file.
 const BOX_PROBES: usize = 4;
 
 impl Reader {
-    pub async fn prefetch(&self, file: &OpenVersion, plan: Prefetch, access: &AtomicU64) -> Result<()> {
+    pub async fn prefetch(&self, file: &OpenVersion, plan: Prefetch, fetched: &AtomicU64) -> Result<()> {
         let chunks = file.version.chunks.len();
         match plan {
             Prefetch::None => Ok(()),
             Prefetch::First => {
-                self.prefetch_indices(file, 0..chunks.min(FIRST_CHUNKS), access)
+                self.prefetch_indices(file, 0..chunks.min(FIRST_CHUNKS), fetched)
                     .await
             }
-            Prefetch::Whole => self.prefetch_indices(file, 0..chunks, access).await,
-            Prefetch::Index => self.prefetch_index(file, access).await,
+            Prefetch::Whole => self.prefetch_indices(file, 0..chunks, fetched).await,
+            Prefetch::Index => self.prefetch_index(file, fetched).await,
         }
     }
 
@@ -39,59 +42,55 @@ impl Reader {
         &self,
         file: &OpenVersion,
         after: u64,
-        chunks: usize,
-        access: &AtomicU64,
+        read_ahead: ReadAhead,
+        fetched: &AtomicU64,
     ) -> Result<()> {
+        let chunks = match read_ahead {
+            ReadAhead::None => return Ok(()),
+            ReadAhead::Small => SMALL_CHUNKS,
+            ReadAhead::Large => LARGE_CHUNKS,
+        };
         let first = file.overlapping(after.saturating_sub(1), 1).end;
         let end = first.saturating_add(chunks).min(file.version.chunks.len());
-        self.prefetch_indices(file, first..end, access).await
+        self.prefetch_indices(file, first..end, fetched).await
     }
 
-    async fn prefetch_index(&self, file: &OpenVersion, access: &AtomicU64) -> Result<()> {
+    async fn prefetch_index(&self, file: &OpenVersion, fetched: &AtomicU64) -> Result<()> {
         let size = file.version.size;
         if size == 0 {
             return Ok(());
         }
-        let first = self.read(file, 0, BOX_HEADER.min(size), Some(access)).await?;
-        if first.starts_with(b"PAR1") {
-            let tail_start = size.saturating_sub(8);
-            let tail = self
-                .read(file, tail_start, size - tail_start, Some(access))
-                .await?;
-            return match parquet(size, &tail) {
-                Some(range) => self.prefetch_range(file, range, access).await,
-                None => self.prefetch_edges(file, access).await,
-            };
-        }
+        let first = self.read(file, 0, BOX_HEADER.min(size), Some(fetched)).await?;
+        let parquet_file = first.starts_with(b"PAR1");
         if mp4_header(&first)
-            && let Some(range) = self.mp4(file, first, access).await?
+            && let Some(range) = self.mp4(file, first, fetched).await?
         {
-            return self.prefetch_range(file, range, access).await;
+            return self.prefetch_range(file, range, fetched).await;
         }
         let tail_start = size.saturating_sub(ZIP_TAIL);
         let tail = self
-            .read(file, tail_start, size - tail_start, Some(access))
+            .read(file, tail_start, size - tail_start, Some(fetched))
             .await?;
-        if let Some(range) = zip(size, tail_start, &tail) {
-            return self.prefetch_range(file, range, access).await;
+        if parquet_file {
+            return match parquet(size, &tail) {
+                Some(range) => self.prefetch_range(file, range, fetched).await,
+                None => self.prefetch_edges(file, fetched).await,
+            };
         }
-        self.prefetch_edges(file, access).await
+        if let Some(range) = zip(size, tail_start, &tail) {
+            return self.prefetch_range(file, range, fetched).await;
+        }
+        self.prefetch_edges(file, fetched).await
     }
 
     async fn mp4(
         &self,
         file: &OpenVersion,
         first: Vec<u8>,
-        access: &AtomicU64,
+        fetched: &AtomicU64,
     ) -> Result<Option<Range<u64>>> {
-        let (mut offset, size) = (0, file.version.size);
-        for probe in 0..BOX_PROBES {
-            let header = if probe == 0 {
-                first.clone()
-            } else {
-                self.read(file, offset, BOX_HEADER.min(size - offset), Some(access))
-                    .await?
-            };
+        let (mut offset, size, mut header) = (0, file.version.size, first);
+        for remaining in (0..BOX_PROBES).rev() {
             let Some((kind, range)) = mp4_box(offset, size, &header) else {
                 return Ok(None);
             };
@@ -99,27 +98,30 @@ impl Reader {
                 return Ok(Some(range));
             }
             offset = range.end;
-            if offset >= size {
+            if offset >= size || remaining == 0 {
                 return Ok(None);
             }
+            header = self
+                .read(file, offset, BOX_HEADER.min(size - offset), Some(fetched))
+                .await?;
         }
         Ok(None)
     }
 
-    async fn prefetch_range(&self, file: &OpenVersion, range: Range<u64>, access: &AtomicU64) -> Result<()> {
+    async fn prefetch_range(&self, file: &OpenVersion, range: Range<u64>, fetched: &AtomicU64) -> Result<()> {
         self.prefetch_indices(
             file,
             file.overlapping(range.start, range.end - range.start),
-            access,
+            fetched,
         )
         .await
     }
 
-    async fn prefetch_edges(&self, file: &OpenVersion, access: &AtomicU64) -> Result<()> {
+    async fn prefetch_edges(&self, file: &OpenVersion, fetched: &AtomicU64) -> Result<()> {
         let chunks = file.version.chunks.len();
         let last = chunks.saturating_sub(FIRST_CHUNKS);
         let indices = (0..chunks.min(FIRST_CHUNKS)).chain(last..chunks);
-        self.prefetch_indices(file, indices, access).await
+        self.prefetch_indices(file, indices, fetched).await
     }
 }
 

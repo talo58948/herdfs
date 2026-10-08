@@ -8,12 +8,14 @@ use std::{fs, path::Path, time::Duration};
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 
-use super::{Decision, JevAnswer, Keep, OpenContext, PlanSource, Prefetch, ReadAhead, Setting, rule};
+use super::{Chosen, Decided, Decision, JevAnswer, OpenContext, PlanSource, Setting, rule};
 use crate::stats::{Stats, bump};
 use crate::{Result, lock};
 
 const MODEL: &str = "typesafe-ai/jev";
+/// Jev answers warm in about 350 ms; past this the rule stays in effect (P2).
 const TIMEOUT: Duration = Duration::from_secs(2);
+/// Download throughput assumed until one is measured, in bytes per second.
 const FIRST_THROUGHPUT: f64 = 10e6;
 
 pub struct Jev {
@@ -25,8 +27,9 @@ pub struct Jev {
 }
 
 impl Jev {
-    /// R5's earlier measurements found answers at or above 0.3 reliable.
-    pub const CONFIDENT: f64 = 0.3;
+    /// Answers below this leave the rule's setting (P2). R5's mean regret of Jev's top choice by
+    /// confidence: 0.2-0.3 n=1 1.15; 0.3-0.4 n=2 1.00; 0.4-0.6 n=6 1.00; 0.6+ n=15 1.00.
+    pub(crate) const CONFIDENT: f64 = 0.3;
 
     pub fn new(key_file: &Path, url: &str) -> Result<Self> {
         Ok(Self {
@@ -72,43 +75,20 @@ impl Jev {
                 }
             }
         });
-        let reply: Value = self
-            .http
-            .post(&self.url)
-            .bearer_auth(&self.key)
-            .json(&request)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let request = self.http.post(&self.url).bearer_auth(&self.key).json(&request);
+        let reply: Value = request.send().await?.error_for_status()?.json().await?;
         let answers = &reply["answers"];
         Ok(JevAnswer {
-            prefetch: choice(&answers["prefetch"], &Prefetch::ALL, Prefetch::name),
-            read_ahead: choice(&answers["read_ahead"], &ReadAhead::ALL, ReadAhead::name),
-            keep: choice(&answers["keep"], &Keep::ALL, Keep::name),
+            prefetch: choice(&answers["prefetch"]),
+            read_ahead: choice(&answers["read_ahead"]),
+            keep: choice(&answers["keep"]),
         })
     }
 
     pub(super) fn decide(self: &Arc<Self>, open: &OpenContext, stats: &Arc<Stats>) -> Decision {
         let (key, fallback) = (phrase(open).to_string(), rule(open));
         match lock(&self.answers).entry(key.clone()) {
-            Entry::Occupied(known) => {
-                let Some(answer) = *known.get() else {
-                    return decision(fallback, PlanSource::Rule, None, None);
-                };
-                let source = if answer.any_confident(Self::CONFIDENT) {
-                    PlanSource::Remembered
-                } else {
-                    PlanSource::Rule
-                };
-                return decision(
-                    answer.plan(fallback, Self::CONFIDENT),
-                    source,
-                    Some(answer.confidence()),
-                    None,
-                );
-            }
+            Entry::Occupied(known) => return remembered(*known.get(), fallback),
             Entry::Vacant(asking) => {
                 asking.insert(None);
             }
@@ -120,7 +100,14 @@ impl Jev {
                 let _ = upgrade.send(answer);
             }
         });
-        decision(fallback, PlanSource::Rule, None, Some(upgraded))
+        Decision {
+            decided: Decided {
+                plan: fallback,
+                source: PlanSource::Rule,
+                answer: None,
+            },
+            upgrade: Some(upgraded),
+        }
     }
 
     async fn learn(&self, key: String, context: &OpenContext, stats: &Stats) -> Option<JevAnswer> {
@@ -128,16 +115,13 @@ impl Jev {
             Ok(answer) => answer,
             Err(err) => {
                 tracing::warn!(%err, "asking Jev failed; the rule decides");
+                // One failed request leaves all three questions unanswered.
                 bump(&stats.jev_errors, 3);
                 lock(&self.answers).remove(&key);
                 return None;
             }
         };
-        for confidence in [
-            answer.prefetch.map(|answer| answer.confidence),
-            answer.read_ahead.map(|answer| answer.confidence),
-            answer.keep.map(|answer| answer.confidence),
-        ] {
+        for confidence in answer.confidences() {
             match confidence {
                 Some(value) if value >= Self::CONFIDENT => bump(&stats.jev_answers, 1),
                 Some(_) => bump(&stats.jev_unsure, 1),
@@ -149,27 +133,35 @@ impl Jev {
     }
 }
 
-fn decision(
-    plan: super::AccessPlan,
-    source: PlanSource,
-    confidence: Option<super::Confidence>,
-    upgrade: Option<super::Upgrade>,
-) -> Decision {
+fn remembered(answer: Option<JevAnswer>, fallback: super::AccessPlan) -> Decision {
+    let Some(answer) = answer else {
+        return Decision {
+            decided: Decided {
+                plan: fallback,
+                source: PlanSource::Rule,
+                answer: None,
+            },
+            upgrade: None,
+        };
+    };
     Decision {
-        plan,
-        source,
-        confidence,
-        upgrade,
+        decided: Decided {
+            plan: answer.plan(fallback),
+            source: answer.source(PlanSource::Remembered),
+            answer: Some(answer),
+        },
+        upgrade: None,
     }
 }
 
-fn choice<T: Copy>(answer: &Value, values: &[T], name: impl Fn(T) -> &'static str) -> Option<Setting<T>> {
+fn choice<T: Setting>(answer: &Value) -> Option<Chosen<T>> {
     let chosen = answer["choice"].as_str()?;
-    let value = values.iter().copied().find(|value| name(*value) == chosen)?;
+    let value = T::parse(chosen)?;
     let confidence = answer["confidence"].as_f64()?;
-    confidence.is_finite().then_some(Setting { value, confidence })
+    confidence.is_finite().then_some(Chosen { value, confidence })
 }
 
+/// The access in words, with the arithmetic done here because Jev is weak at it.
 fn phrase(context: &OpenContext) -> Value {
     let cached = match (context.coverage * 100.0) as u8 {
         0 => "none of it",

@@ -49,10 +49,9 @@ fn jev_beats_every_fixed_strategy_by_regret() -> Result<()> {
     let asked = ask_all(&jev, &contexts)?;
     // As the client's decider does: an unsure or failed answer leaves the rule's choice.
     let by_jev = contexts.iter().zip(&asked).map(|(context, asked)| {
-        asked.answer.map_or_else(
-            || rule(context),
-            |answer| answer.plan(rule(context), Jev::CONFIDENT),
-        )
+        asked
+            .answer
+            .map_or_else(|| rule(context), |answer| answer.plan(rule(context)))
     });
     let mut deciders: Vec<(&str, Vec<AccessPlan>)> = PLANS
         .into_iter()
@@ -60,13 +59,6 @@ fn jev_beats_every_fixed_strategy_by_regret() -> Result<()> {
         .collect();
     deciders.push(("rule", contexts.iter().map(rule).collect()));
     deciders.push(("jev", by_jev.collect()));
-    // Jev's answers whatever their confidence, to show what the threshold costs. Not asserted.
-    let raw = contexts.iter().zip(&asked).map(|(context, asked)| {
-        asked
-            .answer
-            .map_or_else(|| rule(context), |answer| answer.plan(rule(context), 0.0))
-    });
-    deciders.push(("jev-raw", raw.collect()));
     let scores: Vec<(f64, f64)> = deciders
         .iter()
         .map(|(_, choices)| score(&cases, choices))
@@ -152,13 +144,12 @@ fn report(
             .iter()
             .map(|(_, choices)| choices[index].name())
             .collect();
-        let answer = asked.answer.map(|answer| {
-            json!({"plan": answer.plan(rule(&context(case)), 0.0), "confidence": answer.confidence()})
-        });
+        let answer = asked.answer;
         let (best, name) = (case.best().name(), case.name());
-        let said = answer
-            .as_ref()
-            .map_or_else(|| "failed".into(), ToString::to_string);
+        let said = match answer {
+            Some(answer) => serde_json::to_string(&answer)?,
+            None => "failed".into(),
+        };
         println!(
             "{name:<22} {best:<16} {:<16} {:<16} {said} in {} ms",
             decisions[PLANS.len()],

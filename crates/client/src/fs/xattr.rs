@@ -7,10 +7,10 @@ use super::Space;
 const STATS: &str = "user.herdfs.stats";
 const PLAN: &str = "user.herdfs.plan";
 
-pub fn get(space: &Space, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
+pub(super) fn get(space: &Space, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
     let value = match (ino, name) {
         (INodeNo::ROOT, name) if name == STATS => Some(space.stats()),
-        (_, name) if name == PLAN => space.plan(space.kernel.entry(ino)),
+        (_, name) if name == PLAN => space.explain(space.kernel.entry(ino)),
         _ => None,
     };
     match value {
@@ -19,13 +19,13 @@ pub fn get(space: &Space, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXat
     }
 }
 
-pub fn list(space: &Space, ino: INodeNo, size: u32, reply: ReplyXattr) {
+pub(super) fn list(space: &Space, ino: INodeNo, size: u32, reply: ReplyXattr) {
     let mut names = Vec::new();
     if ino == INodeNo::ROOT {
         names.extend_from_slice(STATS.as_bytes());
         names.push(0);
     }
-    if space.plan(space.kernel.entry(ino)).is_some() {
+    if space.explain(space.kernel.entry(ino)).is_some() {
         names.extend_from_slice(PLAN.as_bytes());
         names.push(0);
     }

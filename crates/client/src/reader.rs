@@ -18,8 +18,6 @@ use crate::stats::{Stats, bump};
 use crate::version::OpenVersion;
 use crate::{Average, Error, Result, cache::Cache, lock, lru::Lru, remote::Remote};
 
-pub use index::{LARGE_CHUNKS, SMALL_CHUNKS};
-
 /// Concurrent downloads per request, which is also the prefetch batch size.
 const DOWNLOADS: usize = 8;
 /// A cached grant this close to expiry is renewed rather than reused; a shorter grant TTL
@@ -70,9 +68,9 @@ impl Reader {
         file: &OpenVersion,
         off: u64,
         len: u64,
-        access: Option<&AtomicU64>,
+        fetched: Option<&AtomicU64>,
     ) -> Result<Vec<u8>> {
-        self.read_with(file, off, len, |missing| self.fetch(file, missing, access))
+        self.read_with(file, off, len, |missing| self.fetch(file, missing, fetched))
             .await
     }
 
@@ -80,9 +78,9 @@ impl Reader {
         &self,
         file: &OpenVersion,
         indices: impl IntoIterator<Item = usize>,
-        access: &AtomicU64,
+        fetched: &AtomicU64,
     ) -> Result<()> {
-        let fetch = |missing| self.fetch(file, missing, Some(access));
+        let fetch = |missing| self.fetch(file, missing, Some(fetched));
         let missing: Vec<usize> = indices
             .into_iter()
             .filter(|&index| !self.cache.contains(&file.id(index)))
@@ -205,11 +203,11 @@ impl Reader {
         &'a self,
         file: &'a OpenVersion,
         wanted: Vec<usize>,
-        access: Option<&'a AtomicU64>,
+        fetched: Option<&'a AtomicU64>,
     ) -> Fetched<'a> {
         let urls = self.urls(file, &wanted).await?;
         let downloads = wanted.into_iter().zip(urls);
-        let downloads = downloads.map(move |(index, url)| self.download(file, index, url, access));
+        let downloads = downloads.map(move |(index, url)| self.download(file, index, url, fetched));
         Ok(stream::iter(downloads).buffered(DOWNLOADS).boxed())
     }
 
@@ -218,7 +216,7 @@ impl Reader {
         file: &OpenVersion,
         index: usize,
         url: String,
-        access: Option<&AtomicU64>,
+        fetched: Option<&AtomicU64>,
     ) -> Result<Vec<u8>> {
         let started = Instant::now();
         let chunk = self.remote.download(&url, file.version.chunks[index]).await;
@@ -228,8 +226,8 @@ impl Reader {
         };
         bump(&self.stats.chunks_fetched, 1);
         bump(&self.stats.bytes_fetched, bytes.len() as u64);
-        if let Some(access) = access {
-            access.fetch_add(bytes.len() as u64, Relaxed);
+        if let Some(fetched) = fetched {
+            fetched.fetch_add(bytes.len() as u64, Relaxed);
         }
         self.throughput
             .add(bytes.len() as f64 / started.elapsed().as_secs_f64());

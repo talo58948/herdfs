@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use serde_json::json;
 
-use crate::strategy::{AccessPlan, Keep, Prefetch, ReadAhead};
+use crate::strategy::{AccessPlan, Keep, Prefetch, ReadAhead, Setting};
 
 #[derive(Default)]
 pub struct Stats {
@@ -38,10 +38,6 @@ impl Stats {
     /// The counters as JSON. Pending commits are counted by the journal, the round trip (seconds)
     /// by the remote.
     pub fn json(&self, pending_commits: usize, round_trip: Option<f64>) -> Vec<u8> {
-        let prefetch = |setting: Prefetch| (setting.name(), self.prefetch[setting as usize].load(Relaxed));
-        let read_ahead =
-            |setting: ReadAhead| (setting.name(), self.read_ahead[setting as usize].load(Relaxed));
-        let keep = |setting: Keep| (setting.name(), self.keep[setting as usize].load(Relaxed));
         json!({
             "bytes_fetched": self.bytes_fetched.load(Relaxed),
             "chunks_fetched": self.chunks_fetched.load(Relaxed),
@@ -54,12 +50,20 @@ impl Stats {
             "jev_unsure": self.jev_unsure.load(Relaxed),
             "jev_errors": self.jev_errors.load(Relaxed),
             "decisions": {
-                "prefetch": BTreeMap::from(Prefetch::ALL.map(prefetch)),
-                "read_ahead": BTreeMap::from(ReadAhead::ALL.map(read_ahead)),
-                "keep": BTreeMap::from(Keep::ALL.map(keep)),
+                "prefetch": counts::<Prefetch>(&self.prefetch),
+                "read_ahead": counts::<ReadAhead>(&self.read_ahead),
+                "keep": counts::<Keep>(&self.keep),
             },
         })
         .to_string()
         .into_bytes()
     }
+}
+
+fn counts<T: Setting>(counts: &[AtomicU64]) -> BTreeMap<&'static str, u64> {
+    T::ALL
+        .iter()
+        .enumerate()
+        .map(|(index, setting)| (setting.name(), counts[index].load(Relaxed)))
+        .collect()
 }

@@ -22,15 +22,21 @@ fn decider(value: &str) -> Decider {
 // contract: P1, P3
 #[test]
 fn named_strategies_are_fixed_plans_and_rule_keeps_its_cutoff() {
-    assert_eq!(decider("stream").decide(&context(1)).plan, AccessPlan::STREAM);
-    assert_eq!(decider("fetch").decide(&context(1)).plan, AccessPlan::FETCH);
-    assert_eq!(decider("pin").decide(&context(1)).plan, AccessPlan::PIN);
     assert_eq!(
-        decider("rule").decide(&context(FETCH_BELOW - 1)).plan,
+        decider("stream").decide(&context(1)).decided.plan,
+        AccessPlan::STREAM
+    );
+    assert_eq!(
+        decider("fetch").decide(&context(1)).decided.plan,
+        AccessPlan::FETCH
+    );
+    assert_eq!(decider("pin").decide(&context(1)).decided.plan, AccessPlan::PIN);
+    assert_eq!(
+        decider("rule").decide(&context(FETCH_BELOW - 1)).decided.plan,
         AccessPlan::FETCH
     );
     assert_eq!(
-        decider("rule").decide(&context(FETCH_BELOW)).plan,
+        decider("rule").decide(&context(FETCH_BELOW)).decided.plan,
         AccessPlan::STREAM
     );
 }
@@ -38,12 +44,12 @@ fn named_strategies_are_fixed_plans_and_rule_keeps_its_cutoff() {
 // contract: P3, C8
 #[test]
 fn explicit_and_chaos_plans_choose_settings_independently() {
-    let plan = decider("index/large/no").decide(&context(1)).plan;
+    let plan = decider("index/large/no").decide(&context(1)).decided.plan;
     assert_eq!(plan, AccessPlan::new(Prefetch::Index, ReadAhead::Large, Keep::No));
     let picks = |seed: &str| {
         let mut chaos = decider(seed);
         (0..128)
-            .map(|_| chaos.decide(&context(1)).plan)
+            .map(|_| chaos.decide(&context(1)).decided.plan)
             .collect::<Vec<_>>()
     };
     let first = picks("chaos:7");
@@ -71,4 +77,8 @@ fn names_jev_and_rejects_malformed_plans() {
     assert!(matches!("jev".parse(), Ok(StrategyArg::Jev)));
     assert!("chaos:x".parse::<StrategyArg>().is_err());
     assert!("index/huge/no".parse::<StrategyArg>().is_err());
+    let Err(error) = "unknown".parse::<StrategyArg>() else {
+        panic!("unknown names a strategy");
+    };
+    assert!(error.contains("PREFETCH/READ_AHEAD/KEEP"));
 }
