@@ -53,8 +53,9 @@ impl LocalIssuer {
         let path = key_path(db)?;
         let issuer = issuer_url(listen);
         let stored = match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .with_context(|| format!("reading {}", path.display()))?,
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).with_context(|| format!("reading {}", path.display()))?
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => create(&path, issuer.clone())?,
             Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
         };
@@ -79,10 +80,17 @@ impl LocalIssuer {
     }
 
     /// Issues one revocable token for `user` that lasts for `ttl`.
-    pub fn issue(&self, authority: &Authority, user: &str, ttl: Duration) -> anyhow::Result<(String, String)> {
+    pub fn issue(
+        &self,
+        authority: &Authority,
+        user: &str,
+        ttl: Duration,
+    ) -> anyhow::Result<(String, String)> {
         anyhow::ensure!(!user.is_empty(), "--user must not be empty");
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        let exp = now.checked_add(ttl.as_secs()).context("token expiry is too large")?;
+        let exp = now
+            .checked_add(ttl.as_secs())
+            .context("token expiry is too large")?;
         let id = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 16]>());
         authority.db.execute(
             "INSERT INTO local_tokens (id, user, expires_ms) VALUES (?1, ?2, ?3)",
@@ -167,7 +175,10 @@ impl Authority {
         if active {
             return Ok(());
         }
-        Err(proto::Error::new(ErrorCode::Unauthenticated, "local token is expired or revoked"))
+        Err(proto::Error::new(
+            ErrorCode::Unauthenticated,
+            "local token is expired or revoked",
+        ))
     }
 }
 

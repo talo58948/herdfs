@@ -118,7 +118,11 @@ fn issue(db: &std::path::Path, user: &str, days: u32) -> (String, String) {
         .args(["--user", user, "--days", &days.to_string()])
         .output()
         .unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let token = String::from_utf8(output.stdout).unwrap().trim().to_owned();
     let id = String::from_utf8(output.stderr)
         .unwrap()
@@ -150,7 +154,10 @@ async fn wait_healthy(base: &str) {
         {
             return;
         }
-        assert!(started.elapsed() <= Duration::from_secs(10), "authority did not become healthy");
+        assert!(
+            started.elapsed() <= Duration::from_secs(10),
+            "authority did not become healthy"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }

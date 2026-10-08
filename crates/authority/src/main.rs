@@ -150,7 +150,14 @@ async fn serve(args: Args) -> anyhow::Result<()> {
     let settings = settings(&args)?;
     let server = if args.local_issuer {
         let issuer = LocalIssuer::open(db, listen)?;
-        Server::new_local(authority, bucket, public_bucket, credentials, issuer, settings.grant_ttl)
+        Server::new_local(
+            authority,
+            bucket,
+            public_bucket,
+            credentials,
+            issuer,
+            settings.grant_ttl,
+        )
     } else {
         Server::new(
             authority,

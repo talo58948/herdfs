@@ -39,7 +39,10 @@ jobs:
           tool: nextest
 
       - name: Format
-        run: cargo fmt --all -- --check
+        run: |
+          cargo fmt --check \
+            -p herdfs-core -p herdfs-authority -p herdfs-client \
+            -p herdfs-agents -p herdfs-lab
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Crate tests

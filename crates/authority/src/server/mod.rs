@@ -193,11 +193,17 @@ impl Server {
 }
 
 async fn discovery(State(server): State<Arc<Server>>) -> Option<Json<serde_json::Value>> {
-    server.local_issuer.as_ref().map(|issuer| Json(issuer.discovery()))
+    server
+        .local_issuer
+        .as_ref()
+        .map(|issuer| Json(issuer.discovery()))
 }
 
 async fn jwks(State(server): State<Arc<Server>>) -> Option<Json<serde_json::Value>> {
-    server.local_issuer.as_ref().map(|issuer| Json(issuer.jwks()))
+    server
+        .local_issuer
+        .as_ref()
+        .map(|issuer| Json(issuer.jwks()))
 }
 
 async fn rpc(
