@@ -167,7 +167,7 @@ fn handles_survive_restart_without_lookup_and_deleted_handles_are_stale() -> Res
 
 /// A missing child under a live directory controls three lookups through deleted directory
 /// handles. The latter must identify the handle as stale, not describe the child as absent.
-// contract: M1, C7
+// contract: M1
 #[test]
 #[ignore = "ROUND57: LOOKUP maps a deleted directory handle to NOENT instead of STALE"]
 fn round57_deleted_directory_handles_return_stale_from_lookup() -> Result<()> {
@@ -202,7 +202,7 @@ fn round57_deleted_directory_handles_return_stale_from_lookup() -> Result<()> {
 
 /// Reusing an XID on one connection controls three reconnect retransmissions of REMOVE. A
 /// retransmission must replay success instead of executing the mutation again and seeing NOENT.
-// contract: M1, C7
+// contract: M1
 #[test]
 #[ignore = "ROUND57: duplicate XID after TCP reconnect reruns REMOVE"]
 fn round57_duplicate_xid_replays_after_a_tcp_reconnect() -> Result<()> {
