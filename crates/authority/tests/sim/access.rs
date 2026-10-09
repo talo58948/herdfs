@@ -145,7 +145,7 @@ impl Model {
                 });
             }
             None => {
-                drop(space.acl.remove(&key));
+                let _ = space.acl.remove(&key);
                 let active = space
                     .access
                     .iter_mut()
