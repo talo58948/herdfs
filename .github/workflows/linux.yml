@@ -2,7 +2,7 @@ name: Linux
 
 on:
   push:
-    branches: [main, v0.1, 'v01-*', 'fix*']
+    branches: [main, v0.1, 'v01-*', 'fix*', 'round*']
     paths:
       - crates/**
       - vendor/**
@@ -75,7 +75,7 @@ jobs:
       - name: Confirmed default-mount probes
         run: |
           cargo nextest run -p herdfs-lab --test redteam \
-            -E 'test(round57) | test(round59_invalid_zip) | test(round59_paused_fsync)' \
+            -E 'test(round57) | test(round59_invalid_zip) | test(round59_paused_fsync) | test(round61_kept)' \
             --no-fail-fast --no-tests=pass
       - name: fsx stream and chaos
         env:
@@ -85,10 +85,10 @@ jobs:
         env:
           LAB_MOUNT: nfs
         run: cargo nextest run -p herdfs-lab --test nfs --test round_trip --test control --no-fail-fast
-      - name: Round 59 NFS probes
+      - name: Round 59-61 NFS probes
         env:
           LAB_MOUNT: nfs
         run: |
           cargo nextest run -p herdfs-lab --test redteam \
-            -E 'test(round59_independent) | test(round59_remove) | test(round59_concurrent)' \
+            -E 'test(round59_independent) | test(round59_remove) | test(round59_concurrent) | test(round61_nfs)' \
             --no-fail-fast --no-tests=pass
