@@ -99,7 +99,6 @@ fn history(authority: &mut Authority, who: &str, path: &str) -> Vec<VersionId> {
 /// its original history floor. A genuinely late grant at the same ancestor is the control.
 // contract: C4b, C14, S8
 #[test]
-#[ignore = "ROUND62: schema v10 migration loses overlapping ACL history"]
 fn v10_migration_keeps_overlapping_access_history() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("authority.db");
