@@ -143,10 +143,7 @@ fn cancel_stops_queued_sessions_with_a_slow_scan_interval() {
     sleep(Duration::from_millis(5_200));
     let stopped = queued
         .iter()
-        .filter(|dir| {
-            fs::read_to_string(dir.join("status"))
-                .is_ok_and(|status| status.trim() == "cancelled")
-        })
+        .filter(|dir| fs::read_to_string(dir.join("status")).is_ok_and(|status| status.trim() == "cancelled"))
         .count();
 
     let control_started = Instant::now();
