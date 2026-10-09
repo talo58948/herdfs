@@ -64,6 +64,8 @@ sequential read-ahead (`none`, two chunks, or eight chunks), and whether accesse
 cached until that access ends. Index discovery reads bounded headers/tails and finds Parquet
 footers, ZIP central directories, or an MP4 `moov`; unexpected input falls back to the first and
 last two chunks. All bytes use the same grant, hash verification and cache path (C8, C9).
+A kept chunk damaged on disk after verification fails its hash when read and is refetched once the
+authority is reachable; offline, that file is unreadable until then (P4, C11).
 
 Fixed, size-rule and seeded-chaos deciders return a plan immediately. Jev asks the three settings
 as named `choice` questions in one request. A remembered setting applies immediately; otherwise
@@ -129,6 +131,8 @@ AUTH_SYS: any process already running as the mounting user can make equivalent
 loopback requests, and root on that Mac can impersonate that local user. The
 mount still carries only that client's principal and object-store grants, so
 this does not expand what the client itself may read (S1-S4).
+Replay identity assumes the single kernel client (XID, request checksum,
+address), so a second raw RPC caller on loopback is not separated from it (M1).
 
 ## Deliberately out of v0.1
 

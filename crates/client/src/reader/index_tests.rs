@@ -75,8 +75,8 @@ fn mp4_walk_finds_moov() {
         b"metadata",
     ]
     .concat();
-    let (_, first) = mp4_box(0, file.len() as u64, &file).unwrap();
-    let (kind, second) = mp4_box(first.end, file.len() as u64, &file[first.end as usize..]).unwrap();
+    let (_, first, _) = mp4_box(0, file.len() as u64, &file).unwrap();
+    let (kind, second, _) = mp4_box(first.end, file.len() as u64, &file[first.end as usize..]).unwrap();
     assert_eq!((&kind, second), (b"moov", 12..28));
 }
 
