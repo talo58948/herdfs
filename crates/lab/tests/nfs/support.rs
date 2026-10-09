@@ -147,12 +147,7 @@ impl Rpc {
         Ok(entries)
     }
 
-    pub fn remove_replayed(
-        &mut self,
-        directory: &[u8],
-        name: &str,
-        reconnect: bool,
-    ) -> Result<[u32; 2]> {
+    pub fn remove_replayed(&mut self, directory: &[u8], name: &str, reconnect: bool) -> Result<[u32; 2]> {
         let xid = self.next_xid();
         let mut call = rpc_header(xid, 12, 1);
         opaque(&mut call, directory);

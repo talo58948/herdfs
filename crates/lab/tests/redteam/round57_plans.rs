@@ -82,12 +82,21 @@ fn round57_fake_zip_footer_does_not_trigger_whole_file_prefetch() -> Result<()> 
     let lab = Lab::start(
         LabConfig::default()
             .client("writer", "alice", &[], Profile::Lan, Strategy::Stream)
-            .client("index", "index", &[], Profile::Lan, Strategy::Plan("index/none/no"))
+            .client(
+                "index",
+                "index",
+                &[],
+                Profile::Lan,
+                Strategy::Plan("index/none/no"),
+            )
             .on_tmpfs(),
     )?;
 
     let (bound, fetched) = access(&lab, "zip-control.bin", &non_zip(false))?;
-    ensure!(fetched == bound, "unknown-file control fetched {fetched}, expected {bound}");
+    ensure!(
+        fetched == bound,
+        "unknown-file control fetched {fetched}, expected {bound}"
+    );
 
     let mut failures = 0;
     for trial in 0..3 {
@@ -96,9 +105,6 @@ fn round57_fake_zip_footer_does_not_trigger_whole_file_prefetch() -> Result<()> 
         eprintln!("trial {trial}: fake ZIP fetched {fetched} bytes; fallback bound {bound}");
         failures += usize::from(fetched > bound);
     }
-    assert_eq!(
-        failures, 0,
-        "fake ZIP tails that widened index prefetch, of 3"
-    );
+    assert_eq!(failures, 0, "fake ZIP tails that widened index prefetch, of 3");
     Ok(())
 }
