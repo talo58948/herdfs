@@ -38,8 +38,12 @@ jobs:
 
       - name: Format
         run: |
-          cargo fmt --check -p herdfs-agents
+          cargo fmt --check -p herdfs-authority -p herdfs-agents
       - name: Clippy
-        run: cargo clippy -p herdfs-agents --all-targets -- -D warnings
+        run: cargo clippy -p herdfs-authority -p herdfs-agents --all-targets -- -D warnings
+      - name: Round 60 authority probes and controls
+        run: |
+          cargo nextest run -p herdfs-authority \
+            --test round60_history --test local_tokens --test migration --test acl --no-fail-fast
       - name: Round 60 agents probes and controls
         run: cargo nextest run -p herdfs-agents --test sessions --test round60_cancel --no-fail-fast
