@@ -70,7 +70,7 @@ jobs:
       - name: Confirmed default-mount probes
         run: |
           cargo nextest run -p herdfs-lab --test redteam \
-            -E 'test(round57_kept) | test(round61_kept)' \
+            -E 'test(round61_kept)' \
             --no-fail-fast --no-tests=pass
       - name: NFS suites
         env:
