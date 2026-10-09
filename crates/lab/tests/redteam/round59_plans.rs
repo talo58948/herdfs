@@ -97,7 +97,10 @@ fn round59_invalid_zip_directory_does_not_widen_index_prefetch() -> Result<()> {
             .on_tmpfs(),
     )?;
     let (bound, fetched) = access(&lab, "zip-control.bin", &unknown(false))?;
-    ensure!(fetched == bound, "unknown control fetched {fetched}, expected {bound}");
+    ensure!(
+        fetched == bound,
+        "unknown control fetched {fetched}, expected {bound}"
+    );
 
     let mut failures = 0;
     for trial in 0..3 {

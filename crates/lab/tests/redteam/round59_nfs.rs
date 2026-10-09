@@ -21,9 +21,13 @@ fn lab() -> Result<Option<Lab>> {
         eprintln!("skipped: set LAB_MOUNT=nfs for the NFS suite");
         return Ok(None);
     }
-    Ok(Some(Lab::start(
-        LabConfig::default().client("a", "alice", &[], Profile::Lan, Strategy::Stream),
-    )?))
+    Ok(Some(Lab::start(LabConfig::default().client(
+        "a",
+        "alice",
+        &[],
+        Profile::Lan,
+        Strategy::Stream,
+    ))?))
 }
 
 fn save(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -82,7 +86,10 @@ fn round59_independent_loopback_callers_do_not_share_xid_replays() -> Result<()>
         eprintln!("trial {trial}: second REMOVE status={status}, remains={remains}");
         failures += usize::from(status == 0 && remains);
     }
-    assert_eq!(failures, 0, "same-IP XID collisions that replayed another call, of 3");
+    assert_eq!(
+        failures, 0,
+        "same-IP XID collisions that replayed another call, of 3"
+    );
     Ok(())
 }
 
@@ -110,7 +117,10 @@ fn round59_remove_through_deleted_directory_handles_is_stale() -> Result<()> {
         eprintln!("trial {trial}: deleted-parent REMOVE returned {status}");
         failures += usize::from(status != NFS3ERR_STALE);
     }
-    assert_eq!(failures, 0, "deleted-parent REMOVEs that did not return STALE, of 3");
+    assert_eq!(
+        failures, 0,
+        "deleted-parent REMOVEs that did not return STALE, of 3"
+    );
     Ok(())
 }
 
@@ -156,13 +166,19 @@ fn round59_concurrent_exclusive_creates_persist_without_colliding() -> Result<()
         barrier.wait();
         let statuses: Vec<u32> = calls
             .into_iter()
-            .map(|call| call.join().map_err(|_| anyhow::anyhow!("create thread panicked"))?)
+            .map(|call| {
+                call.join()
+                    .map_err(|_| anyhow::anyhow!("create thread panicked"))?
+            })
             .collect::<Result<_>>()?;
         let failed = statuses.iter().filter(|status| **status != 0).count();
         eprintln!("trial {trial}: {failed} of 24 concurrent EXCLUSIVE creates failed: {statuses:?}");
         failed_batches += usize::from(failed != 0);
     }
-    assert_eq!(failed_batches, 0, "concurrent EXCLUSIVE batches with failures, of 3");
+    assert_eq!(
+        failed_batches, 0,
+        "concurrent EXCLUSIVE batches with failures, of 3"
+    );
     let _: serde_json::Value = serde_json::from_slice(
         &fs::read(lab.client_dir("a").join("journal.nfs.json")).context("read NFS identity")?,
     )?;

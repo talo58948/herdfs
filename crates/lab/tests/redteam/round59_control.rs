@@ -17,7 +17,11 @@ fn command(lab: &Lab, op: &str) -> Result<()> {
         .args(["--json", op])
         .arg(lab.mount_path("a"))
         .output()?;
-    ensure!(output.status.success(), "{op} failed: {}", String::from_utf8_lossy(&output.stderr));
+    ensure!(
+        output.status.success(),
+        "{op} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     Ok(())
 }
 
@@ -53,7 +57,10 @@ fn round59_paused_fsync_does_not_report_an_uncommitted_write() -> Result<()> {
     ensure!(fs::read(lab.mount_path("b").join("fsync-control"))? == b"after");
 
     for trial in 0..3 {
-        save(&lab.mount_path("a").join(format!("paused-fsync-{trial}")), b"before")?;
+        save(
+            &lab.mount_path("a").join(format!("paused-fsync-{trial}")),
+            b"before",
+        )?;
     }
     lab.wait_committed("a")?;
     command(&lab, "pause")?;
@@ -98,9 +105,14 @@ fn round59_paused_fsync_does_not_report_an_uncommitted_write() -> Result<()> {
                 Err(error) => return Err(error.into()),
             }
         }
-        worker.join().map_err(|_| anyhow::anyhow!("fsync worker panicked"))?;
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("fsync worker panicked"))?;
     }
     lab.wait_committed("a")?;
-    assert_eq!(early, 0, "paused fsyncs that returned before authority commit, of 3");
+    assert_eq!(
+        early, 0,
+        "paused fsyncs that returned before authority commit, of 3"
+    );
     Ok(())
 }
