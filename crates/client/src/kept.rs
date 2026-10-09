@@ -13,6 +13,7 @@ use crate::fs::Space;
 use crate::{Result, lock};
 
 const REFRESH: Duration = Duration::from_secs(60);
+const CHECK_HEADS: Duration = Duration::from_secs(1);
 
 mod scan;
 mod state;
@@ -44,11 +45,32 @@ impl Kept {
     pub async fn run(self: Arc<Self>, space: Arc<Space>) {
         loop {
             self.refresh(&space).await;
-            let _ = tokio::time::timeout(REFRESH, self.wake.notified()).await;
+            let refresh = tokio::time::sleep(REFRESH);
+            tokio::pin!(refresh);
+            loop {
+                tokio::select! {
+                    _ = self.wake.notified() => break,
+                    _ = tokio::time::sleep(CHECK_HEADS) => {
+                        if self.heads_changed(&space).await {
+                            break;
+                        }
+                    }
+                    _ = &mut refresh => break,
+                }
+            }
         }
     }
 
     pub async fn pin(&self, space: &Space, path: &SpacePath) -> Result<()> {
+        let entry = lock(&self.saved).roots.get(path).copied().flatten();
+        if let Some(entry) = entry
+            && let Ok(found) = space.remote.locate(entry).await
+            && found.path != *path
+        {
+            self.relocate(space, path, &found.path, found.id)?;
+            self.wake.notify_one();
+            return Ok(());
+        }
         if lock(&self.saved).roots.contains_key(path) {
             if lock(&self.errors).remove(path).is_some() {
                 lock(&self.pending).insert(path.clone());
@@ -122,7 +144,13 @@ impl Kept {
                         .files
                         .iter()
                         .filter(|(path, _)| path.is_within(root))
-                        .all(|(_, file)| file.ready);
+                        .all(|(path, file)| {
+                            file.ready
+                                && space
+                                    .inodes
+                                    .at(path)
+                                    .is_none_or(|(entry, _, _)| entry.head == Some(file.current.id))
+                        });
                 (root.as_str().to_owned(), ready)
             })
             .collect();

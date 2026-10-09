@@ -10,11 +10,16 @@ use crate::Result;
 
 impl Space {
     pub(super) async fn sync_entry(self: &Arc<Self>, entry: EntryId, handle: Option<u64>) -> Result<()> {
-        let online = self.remote.link.check().is_ok();
+        let online = self.remote.link.check().is_ok() && self.remote.link.connected();
         if online && let Some(handle) = handle {
             // NFS is built only on mount_nfs's multi-thread runtime, which supports fsync's
             // block_in_place around the journal's blocking file sync.
-            return self.clone().fsync(handle).await;
+            let committed = self.clone().fsync(handle).await;
+            return if self.remote.link.connected() {
+                committed
+            } else {
+                Ok(())
+            };
         }
         self.seal_entry_async(entry).await?;
         let activated = self
@@ -23,7 +28,12 @@ impl Space {
         activated.unwrap_or(Ok(()))?;
         self.urge(entry);
         if online {
-            self.committed(entry).await
+            let committed = self.committed(entry).await;
+            if self.remote.link.connected() {
+                committed
+            } else {
+                Ok(())
+            }
         } else {
             Ok(())
         }
