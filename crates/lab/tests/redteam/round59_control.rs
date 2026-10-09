@@ -72,8 +72,8 @@ fn round59_paused_fsync_journals_until_resume() -> Result<()> {
     lab.wait_committed("a")?;
     command(&lab, "pause")?;
 
-    for trial in 0..3 {
-        let path = lab.mount_path("a").join(format!("paused-fsync-{trial}"));
+    for (name, version) in &before {
+        let path = lab.mount_path("a").join(name);
         let (started_tx, started_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let worker = thread::spawn(move || {
@@ -101,7 +101,7 @@ fn round59_paused_fsync_journals_until_resume() -> Result<()> {
             .join()
             .map_err(|_| anyhow::anyhow!("fsync worker panicked"))?;
         ensure!(
-            lab.head(ADMIN, &before[trial].0)?.id == before[trial].1,
+            lab.head(ADMIN, name)?.id == *version,
             "paused fsync committed before resume"
         );
     }
