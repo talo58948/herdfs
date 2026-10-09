@@ -23,6 +23,7 @@ const DIR_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 const FILE_MODE: Mode = Mode::from_raw_mode(0o666);
+const STATUS_TEMP: &str = ".status.tmp";
 
 /// A prompt's size and mtime. Unchanged across two polls means its writer is done.
 #[derive(Clone, Copy, PartialEq)]
@@ -129,16 +130,21 @@ pub(crate) async fn claim(mount: &Path, dir: &Path) -> io::Result<Session> {
     Ok(session)
 }
 
-/// Marks the session failed if a previous runner left it `running`.
+/// Marks the session failed if a previous runner left an unfinished status.
 pub(crate) async fn recover(mount: &Path, dir: &Path) -> io::Result<()> {
     let session = session(mount, dir).await?;
-    if read(&session, "status")
-        .await?
-        .is_some_and(|status| status.trim() == "running")
-    {
-        transition(&session, Some("running"), "failed: runner restarted").await?;
+    let Some(status) = read(&session, "status").await? else {
+        return Ok(());
+    };
+    let status = status.trim();
+    if status == "running" || !valid_status(status) {
+        transition(&session, Some(status), "failed: runner restarted").await?;
     }
     Ok(())
+}
+
+fn valid_status(status: &str) -> bool {
+    matches!(status, "queued" | "running" | "done" | "cancelled") || status.starts_with("failed: ")
 }
 
 async fn transition(session: &Session, from: Option<&str>, status: &str) -> io::Result<()> {
@@ -148,7 +154,19 @@ async fn transition(session: &Session, from: Option<&str>, status: &str) -> io::
             "status changed before transition to {status}"
         )));
     }
-    write(session, "status", status).await
+    write_status(session, status).await
+}
+
+async fn write_status(session: &Session, status: &str) -> io::Result<()> {
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC;
+    let mut file = open(session, STATUS_TEMP, flags).await?;
+    file.write_all(format!("{status}\n").as_bytes()).await?;
+    file.sync_all().await?;
+    let dir = session.file.try_clone()?;
+    tokio::task::spawn_blocking(move || rustix::fs::renameat(&dir, STATUS_TEMP, &dir, "status"))
+        .await
+        .map_err(io::Error::other)??;
+    Ok(())
 }
 
 async fn write(session: &Session, name: &str, text: &str) -> io::Result<()> {
