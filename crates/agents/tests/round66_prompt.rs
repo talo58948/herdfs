@@ -65,7 +65,7 @@ fn wait_done(dir: &Path) {
 /// polls; a prompt closed before discovery controls the normal complete-session path.
 // contract: A1
 #[test]
-#[ignore = "ROUND66: a paused prompt writer is executed before close"]
+#[ignore = "outside A1: write prompt atomically; see docs/architecture.md"]
 fn prompt_waits_for_its_writer_to_close() {
     let mount = TempDir::new().unwrap();
     let control = session(mount.path(), "control");

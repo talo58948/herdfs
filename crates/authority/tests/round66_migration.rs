@@ -100,7 +100,7 @@ fn history(authority: &mut Authority, who: &str, path: &str) -> Vec<VersionId> {
 /// remained continuously readable; the late principal controls strict post-grant visibility.
 // contract: C4b, C14, S8
 #[test]
-#[ignore = "ROUND66: v10 migration cannot recover descendant-to-ancestor continuity"]
+#[ignore = "v10 never stored descendant->ancestor continuity; dev-only schema"]
 fn v10_descendant_handoffs_keep_their_history_after_migration() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("authority.db");
