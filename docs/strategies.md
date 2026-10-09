@@ -46,10 +46,9 @@ The default `rule` uses `whole/none/no` for files smaller than 64 MiB and `none/
 
 `prefetch=index` computes byte ranges in the client. Jev never supplies ranges.
 
-- Parquet uses the footer metadata when the leading and trailing `PAR1` markers are valid.
-- ZIP uses the range from the central directory to the end of the file.
-- MP4 uses a `moov` box found among the first four top-level boxes, beginning with an `ftyp` box.
-- Unknown or malformed input falls back to the first and last two chunks.
+Parquet fetches only its footer and `FileMetaData`, ZIP only its end-of-central-directory record and
+central directory, and MP4 only its `moov` box; index prefetch never follows their references into
+file data. Inputs without a bounded matching index envelope fall back to the first and last two chunks.
 
 Declared index regions larger than 8 MiB are treated as malformed. ZIP central directories must
 also begin with their expected signature. Including format probes, chunk boundaries and the

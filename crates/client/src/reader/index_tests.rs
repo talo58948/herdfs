@@ -3,7 +3,7 @@ use super::*;
 // contract: P3, C9
 #[test]
 fn parquet_footer_is_the_index() {
-    let metadata = b"\x15\x02\x19\x0c\x16\0\x19\x0c\0";
+    let metadata = b"metadata";
     let file = [
         b"PAR1data".as_slice(),
         metadata,
@@ -11,14 +11,14 @@ fn parquet_footer_is_the_index() {
         b"PAR1",
     ]
     .concat();
-    assert_eq!(parquet(file.len() as u64, &file), Some(8..25));
+    assert_eq!(parquet(file.len() as u64, &file), Some(8..file.len() as u64));
 }
 
 // contract: P3, C9
 #[test]
-fn invalid_parquet_metadata_is_not_an_index() {
+fn parquet_does_not_follow_metadata_contents() {
     let file = [b"PAR1data".as_slice(), b"\0", &1u32.to_le_bytes(), b"PAR1"].concat();
-    assert_eq!(parquet(file.len() as u64, &file), None);
+    assert_eq!(parquet(file.len() as u64, &file), Some(8..17));
 }
 
 // contract: P3, C9
@@ -75,8 +75,8 @@ fn mp4_walk_finds_moov() {
         b"metadata",
     ]
     .concat();
-    let (_, first, _) = mp4_box(0, file.len() as u64, &file).unwrap();
-    let (kind, second, _) = mp4_box(first.end, file.len() as u64, &file[first.end as usize..]).unwrap();
+    let (_, first) = mp4_box(0, file.len() as u64, &file).unwrap();
+    let (kind, second) = mp4_box(first.end, file.len() as u64, &file[first.end as usize..]).unwrap();
     assert_eq!((&kind, second), (b"moov", 12..28));
 }
 

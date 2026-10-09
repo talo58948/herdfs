@@ -69,7 +69,6 @@ fn pin(lab: &Lab, path: &str) -> Result<()> {
 /// Replacing the destination must not discard the pin that follows the source entry.
 // contract: P4, C7
 #[test]
-#[ignore = "ROUND67: replacing a separately pinned destination loses the source pin"]
 fn round67_replacing_rename_keeps_the_source_pin() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() == Ok("nfs") {
         eprintln!("skipped: the default-mount probe runs separately from NFS");
