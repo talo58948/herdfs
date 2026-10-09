@@ -57,7 +57,6 @@ jobs:
           echo '556d891134a3c582dc1e1a3f7335fd55142e5965769855a00b944e13e48302fc  /tmp/toxiproxy-server' \
             | sha256sum -c
           sudo install -m 0755 /tmp/toxiproxy-server /usr/local/bin/toxiproxy-server
-          cargo install --locked fsx --version 0.3.2
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
           sudo chmod a+rw /dev/fuse
           if ! grep --quiet '^user_allow_other$' /etc/fuse.conf; then
@@ -65,9 +64,9 @@ jobs:
           fi
       - name: Build lab binaries
         run: cargo build --workspace --bins
-      - name: Round 57 access-plan probes
-        run: cargo nextest run -p herdfs-lab --test redteam -E 'test(round57)' --no-fail-fast
       - name: NFS suites
         env:
           LAB_MOUNT: nfs
         run: cargo nextest run -p herdfs-lab --test nfs -E 'test(round57)' --no-fail-fast
+      - name: Round 57 client probes
+        run: cargo nextest run -p herdfs-lab --test redteam -E 'test(round57)' --no-fail-fast

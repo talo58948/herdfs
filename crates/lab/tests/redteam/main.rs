@@ -70,6 +70,7 @@ mod round51_cache;
 mod round51_journal;
 mod round53_client;
 mod round55_client;
+mod round57_kept;
 mod round57_plans;
 mod saved_mtime;
 mod scratch_files;
