@@ -24,4 +24,6 @@ HerdFS carries these local changes required by its loopback NFSv3 adapter:
 - serialize WRITE, COMMIT and SETATTR per file handle without blocking reads or
   namespace calls for that handle or any other;
 - advertise AUTH_UNIX alone for the loopback export and the POSIX 255-byte
-  name limit used by HerdFS, and reject other RPC credential flavors.
+  name limit used by HerdFS, and reject other RPC credential flavors;
+- return the adapter's `getattr` error from ACCESS, FSSTAT and PATHCONF instead
+  of succeeding for stale handles.

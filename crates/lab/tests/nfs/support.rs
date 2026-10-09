@@ -225,7 +225,7 @@ impl Rpc {
         read_record(&mut stream)
     }
 
-    fn call(&mut self, procedure: u32, args: &[u8]) -> Result<Vec<u8>> {
+    pub(crate) fn call(&mut self, procedure: u32, args: &[u8]) -> Result<Vec<u8>> {
         let xid = self.next_xid();
         let mut call = rpc_header(xid, procedure, 1);
         call.extend_from_slice(args);
@@ -295,11 +295,11 @@ fn parse_write(reply: &[u8]) -> Result<WriteReply> {
     Ok(WriteReply { status, committed })
 }
 
-fn status(reply: &[u8]) -> Result<u32> {
+pub(crate) fn status(reply: &[u8]) -> Result<u32> {
     Reply::new(reply)?.u32()
 }
 
-fn opaque(out: &mut Vec<u8>, bytes: &[u8]) {
+pub(crate) fn opaque(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
     out.extend_from_slice(bytes);
     out.resize(out.len().next_multiple_of(4), 0);
