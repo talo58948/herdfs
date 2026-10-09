@@ -67,6 +67,9 @@ jobs:
       - name: NFS suites
         env:
           LAB_MOUNT: nfs
-        run: cargo nextest run -p herdfs-lab --test nfs -E 'test(round57)' --no-fail-fast
+        run: |
+          cargo nextest run -p herdfs-lab --test nfs \
+            -E 'test(round57) | test(handles_survive_restart_without_lookup_and_deleted_handles_are_stale)' \
+            --no-fail-fast
       - name: Round 57 client probes
         run: cargo nextest run -p herdfs-lab --test redteam -E 'test(round57)' --no-fail-fast
