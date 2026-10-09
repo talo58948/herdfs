@@ -14,10 +14,7 @@ use crate::{VISIBLE_AFTER, random_bytes, save};
 const WAIT: Duration = Duration::from_secs(30);
 
 fn command(lab: &Lab, op: &str, path: &Path) -> Result<Value> {
-    let output = herdfs_command()?
-        .args(["--json", op])
-        .arg(path)
-        .output()?;
+    let output = herdfs_command()?.args(["--json", op]).arg(path).output()?;
     ensure!(
         output.status.success(),
         "{op} failed: {}",
@@ -96,10 +93,7 @@ fn round57_kept_folder_follows_its_rename() -> Result<()> {
         let old = format!("kept-old-{trial}");
         let new = format!("kept-new-{trial}");
         pin_folder(&lab, &old)?;
-        fs::rename(
-            lab.mount_path("a").join(&old),
-            lab.mount_path("a").join(&new),
-        )?;
+        fs::rename(lab.mount_path("a").join(&old), lab.mount_path("a").join(&new))?;
         command(&lab, "pin", &lab.mount_path("b").join(&old))?;
         let old_state = wait_error(&lab, &lab.mount_path("b").join(&old))?;
         let new_state = command(&lab, "file", &lab.mount_path("b").join(&new))?;
