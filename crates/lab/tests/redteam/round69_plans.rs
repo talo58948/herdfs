@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 use herdfs_core::proto::Version;
-use herdfs_lab::{ADMIN, Lab, LabConfig, Profile, Strategy};
+use herdfs_lab::{ADMIN, JevMode, Lab, LabConfig, Profile, Strategy};
 
 use crate::{VISIBLE_AFTER, random_bytes, save};
 
@@ -137,5 +137,74 @@ fn round69_mp4_index_after_large_mdat_is_prefetched() -> Result<()> {
         failures += usize::from(fetched != wanted);
     }
     assert_eq!(failures, 0, "late MP4 indexes not fully prefetched, of 3");
+    Ok(())
+}
+
+fn wait_answers(lab: &Lab, wanted: u64) -> Result<()> {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if lab.stats("jev")?["jev_answers"]
+            .as_u64()
+            .is_some_and(|answers| answers >= wanted)
+        {
+            return Ok(());
+        }
+        ensure!(Instant::now() < deadline, "Jev answers did not reach {wanted}");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// In each of three matched pairs, the first open controls that a delayed Jev answer upgrades a
+/// live access. The simultaneous second access must receive the same additive upgrade.
+// contract: P1
+#[test]
+#[ignore = "ROUND69: an in-flight Jev answer upgrades only its first matching access"]
+fn round69_inflight_jev_answer_upgrades_every_matching_access() -> Result<()> {
+    if let Some(reason) = herdfs_lab::missing_binaries() {
+        eprintln!("skipped: {reason}");
+        return Ok(());
+    }
+    let lab = Lab::start(
+        LabConfig::default()
+            .client("writer", "alice", &[], Profile::Lan, Strategy::Stream)
+            .client("jev", "jev", &[], Profile::Lan, Strategy::Jev)
+            .on_tmpfs(),
+    )?;
+    lab.jev("jev").set(JevMode::Slow(Duration::from_millis(750)));
+
+    let mut failures = 0;
+    for trial in 0..3 {
+        let first = format!("matched-first-{trial}.pair{trial}");
+        let second = format!("matched-second-{trial}.pair{trial}");
+        save(&lab.mount_path("writer").join(&first), &random_bytes(64 << 20))?;
+        save(&lab.mount_path("writer").join(&second), &random_bytes(64 << 20))?;
+        lab.wait_committed("writer")?;
+        thread::sleep(VISIBLE_AFTER);
+
+        let first_open = File::open(lab.mount_path("jev").join(&first))?;
+        let second_open = File::open(lab.mount_path("jev").join(&second))?;
+        wait_answers(&lab, (trial + 1) * 3)?;
+        ensure!(
+            lab.jev("jev").requests() == trial as usize + 1,
+            "matched accesses did not share one Jev request"
+        );
+        let control = lab.plan("jev", first.as_ref())?;
+        let observed = lab.plan("jev", second.as_ref())?;
+        ensure!(
+            control["source"] == "jev" && control["plan"]["prefetch"] == "whole",
+            "first-access control was not upgraded: {control}"
+        );
+        let upgraded = observed["source"] == "jev" && observed["plan"]["prefetch"] == "whole";
+        eprintln!(
+            "trial {trial}: first source={}, second source={}, second prefetch={}",
+            control["source"], observed["source"], observed["plan"]["prefetch"]
+        );
+        failures += usize::from(!upgraded);
+        drop((first_open, second_open));
+    }
+    assert_eq!(
+        failures, 0,
+        "matching live accesses that missed the late answer, of 3"
+    );
     Ok(())
 }
