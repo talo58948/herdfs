@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use herdfs_core::SpacePath;
@@ -11,23 +11,60 @@ use crate::{Error, Result, lock};
 
 impl Kept {
     pub(super) async fn heads_changed(&self, space: &Space) -> bool {
-        let files: Vec<_> = lock(&self.saved)
-            .files
-            .iter()
-            .map(|(path, file)| (path.clone(), file.current.id))
-            .collect();
-        for (path, version) in files {
-            let asked = Instant::now();
-            match space.remote.stat(path).await {
-                Ok(entry) => {
-                    let changed = entry.head != Some(version);
-                    space.inodes.observe(&entry, asked, false);
-                    if changed {
+        let saved = lock(&self.saved).clone();
+        for root in saved.roots.keys() {
+            if let Some(entry) = saved.roots[root] {
+                let current = match space.remote.locate(entry).await {
+                    Ok(current) => current,
+                    Err(error) if error.is_offline() => return false,
+                    Err(_) => {
+                        lock(&self.pending).insert(root.clone());
                         return true;
                     }
+                };
+                let version = saved.files.get(root).map(|file| file.current.id);
+                if current.path != *root || current.kind == Kind::File && current.head != version {
+                    lock(&self.pending).insert(root.clone());
+                    return true;
                 }
-                Err(error) if error.is_offline() => return false,
-                Err(_) => continue,
+            }
+            let entries: Vec<_> = space
+                .inodes
+                .within(root)
+                .into_iter()
+                .filter_map(|id| space.inodes.with(id, |state| state.cached()).flatten())
+                .map(|(entry, _, _)| entry)
+                .collect();
+            let mut known: HashMap<_, HashSet<_>> = HashMap::new();
+            for entry in &entries {
+                if let Some(parent) = entry.path.parent() {
+                    known
+                        .entry(parent)
+                        .or_default()
+                        .insert((entry.id, entry.path.clone()));
+                }
+            }
+            for directory in entries.iter().filter(|entry| entry.kind == Kind::Dir) {
+                let listed = match space.remote.list(directory.id).await {
+                    Ok(listed) => listed,
+                    Err(error) if error.is_offline() => return false,
+                    Err(_) => {
+                        lock(&self.pending).insert(root.clone());
+                        return true;
+                    }
+                };
+                let listed_entries: HashSet<_> = listed
+                    .iter()
+                    .map(|entry| (entry.id, entry.path.clone()))
+                    .collect();
+                let heads_changed = listed.iter().any(|entry| {
+                    entry.kind == Kind::File
+                        && entry.head != saved.files.get(&entry.path).map(|file| file.current.id)
+                });
+                if known.remove(&directory.path).unwrap_or_default() != listed_entries || heads_changed {
+                    lock(&self.pending).insert(root.clone());
+                    return true;
+                }
             }
         }
         false

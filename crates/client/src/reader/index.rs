@@ -10,6 +10,9 @@ use crate::version::OpenVersion;
 
 use super::Reader;
 
+#[path = "parquet.rs"]
+mod parquet;
+
 /// The first-window prefetch and small read-ahead are two chunks (about 2 MiB at the average
 /// chunk size): enough to hide one round trip without dominating a short access.
 const FIRST_CHUNKS: usize = 2;
@@ -169,7 +172,9 @@ fn parquet(size: u64, tail: &[u8]) -> Option<Range<u64>> {
         return None;
     }
     let start = size.checked_sub(total)?;
-    Some(start..size)
+    let total = usize::try_from(total).ok()?;
+    let footer = tail.get(tail.len().checked_sub(total)?..tail.len().checked_sub(8)?)?;
+    parquet::valid_metadata(footer).then_some(start..size)
 }
 
 const ZIP_ENTRY_HEADER: u64 = 46;

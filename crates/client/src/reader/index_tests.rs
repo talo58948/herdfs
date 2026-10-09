@@ -3,8 +3,22 @@ use super::*;
 // contract: P3, C9
 #[test]
 fn parquet_footer_is_the_index() {
-    let file = [b"PAR1data".as_slice(), b"meta", &4u32.to_le_bytes(), b"PAR1"].concat();
-    assert_eq!(parquet(file.len() as u64, &file), Some(8..20));
+    let metadata = b"\x15\x02\x19\x0c\x16\0\x19\x0c\0";
+    let file = [
+        b"PAR1data".as_slice(),
+        metadata,
+        &(metadata.len() as u32).to_le_bytes(),
+        b"PAR1",
+    ]
+    .concat();
+    assert_eq!(parquet(file.len() as u64, &file), Some(8..25));
+}
+
+// contract: P3, C9
+#[test]
+fn invalid_parquet_metadata_is_not_an_index() {
+    let file = [b"PAR1data".as_slice(), b"\0", &1u32.to_le_bytes(), b"PAR1"].concat();
+    assert_eq!(parquet(file.len() as u64, &file), None);
 }
 
 // contract: P3, C9
