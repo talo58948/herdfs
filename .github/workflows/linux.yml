@@ -62,7 +62,7 @@ jobs:
       - name: Build lab binaries
         run: cargo build --workspace --bins
       - name: Round 59 default-mount probes
-        run: cargo nextest run -p herdfs-lab --test redteam -E 'test(round59_invalid_zip) | test(round59_paused_fsync)' --no-fail-fast
+        run: cargo nextest run -p herdfs-lab --test redteam -E 'test(round59_invalid_zip) | test(round59_paused_fsync)' --no-fail-fast --no-tests=pass
       - name: Round 59 NFS probes
         env:
           LAB_MOUNT: nfs
