@@ -45,8 +45,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Round 58 tests and controls
         run: |
+          cargo nextest run -p herdfs-agents \
+            --test round58_cancel --test sessions --test session_files --no-fail-fast
           cargo nextest run -p herdfs-authority \
             --test round58_history --test round56_history --test local_tokens \
             --test migration --test acl --test auth --no-fail-fast
-          cargo nextest run -p herdfs-agents \
-            --test round58_cancel --test sessions --test session_files --no-fail-fast
