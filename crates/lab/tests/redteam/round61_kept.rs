@@ -37,7 +37,10 @@ fn wait_ready(lab: &Lab) -> Result<()> {
         {
             return Ok(());
         }
-        ensure!(Instant::now() < deadline, "kept root did not become ready: {state}");
+        ensure!(
+            Instant::now() < deadline,
+            "kept root did not become ready: {state}"
+        );
         thread::sleep(Duration::from_millis(50));
     }
 }
@@ -73,7 +76,10 @@ fn round61_kept_ready_tracks_the_latest_committed_head() -> Result<()> {
     wait_ready(&lab)?;
 
     lab.cut("b", Links::Both)?;
-    ensure!(fs::read(&path_b)? == expected, "ready control was not readable offline");
+    ensure!(
+        fs::read(&path_b)? == expected,
+        "ready control was not readable offline"
+    );
     lab.restore("b", Links::Both)?;
 
     let mut stale = 0;

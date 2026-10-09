@@ -50,7 +50,10 @@ fn round61_nfs_first_offline_commit_returns_after_journaling() -> Result<()> {
     let mut rpc = Rpc::open(lab.client_dir("a"))?;
     let control_handle = rpc.handle(control.id);
     let write = rpc.write(&control_handle, b"online", 0)?;
-    ensure!(write.status == 0 && write.committed == 0, "online control WRITE failed");
+    ensure!(
+        write.status == 0 && write.committed == 0,
+        "online control WRITE failed"
+    );
     ensure!(rpc.commit(&control_handle)? == 0, "online control COMMIT failed");
     thread::sleep(VISIBLE_AFTER);
     ensure!(fs::read(lab.mount_path("b").join("offline-control"))? == b"online");
@@ -64,7 +67,10 @@ fn round61_nfs_first_offline_commit_returns_after_journaling() -> Result<()> {
         let handle = rpc.handle(item.id);
         let bytes = format!("journalled-{trial}").into_bytes();
         let write = rpc.write(&handle, &bytes, 0)?;
-        ensure!(write.status == 0 && write.committed == 0, "trial {trial} WRITE failed");
+        ensure!(
+            write.status == 0 && write.committed == 0,
+            "trial {trial} WRITE failed"
+        );
 
         lab.cut("a", Links::Authority)?;
         let status = rpc.commit(&handle)?;
