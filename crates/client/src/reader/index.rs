@@ -197,6 +197,7 @@ fn zip(size: u64, tail_start: u64, tail: &[u8]) -> Option<ZipDirectory> {
     (disk == 0
         && central_disk == 0
         && disk_entries == entries
+        && (entries != 0 || central_len == 0)
         && central_len >= headers_len
         && central_len <= MAX_INDEX_REGION
         && central_end == eocd_start
