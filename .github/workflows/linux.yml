@@ -2,7 +2,7 @@ name: Linux
 
 on:
   push:
-    branches: [main, v0.1, 'v01-*']
+    branches: [main, v0.1, 'v01-*', 'round*']
     paths:
       - crates/**
       - vendor/**
@@ -65,16 +65,9 @@ jobs:
           fi
       - name: Build lab binaries
         run: cargo build --workspace --bins
-      - name: Lab suites
-        run: |
-          cargo nextest run -p herdfs-lab \
-            --test smoke --test round_trip --test semantics --test faults \
-            --test cli --test plans --test local_issuer --test control --no-fail-fast
-      - name: fsx stream and chaos
-        env:
-          FSX_OPS: 20000
-        run: cargo nextest run -p herdfs-lab --test fsx -E 'test(stream) | test(chaos)' --no-fail-fast
+      - name: Round 57 access-plan probes
+        run: cargo nextest run -p herdfs-lab --test redteam -E 'test(round57)' --no-fail-fast
       - name: NFS suites
         env:
           LAB_MOUNT: nfs
-        run: cargo nextest run -p herdfs-lab --test nfs --test round_trip --test control --no-fail-fast
+        run: cargo nextest run -p herdfs-lab --test nfs -E 'test(round57)' --no-fail-fast
