@@ -99,6 +99,7 @@ use rustix::fs::{AtFlags, Dir, Mode, OFlags};
 
 use crate::helpers::*;
 
+#[allow(dead_code)]
 #[path = "../nfs/support.rs"]
 mod nfs_support;
 
