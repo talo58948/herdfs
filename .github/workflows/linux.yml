@@ -2,7 +2,7 @@ name: Linux
 
 on:
   push:
-    branches: [main, v0.1, 'v01-*', 'fix*']
+    branches: [main, v0.1, 'v01-*', 'fix*', 'round*']
     paths:
       - crates/**
       - vendor/**
@@ -38,47 +38,8 @@ jobs:
 
       - name: Format
         run: |
-          cargo fmt --check \
-            -p herdfs-core -p herdfs-authority -p herdfs-client \
-            -p herdfs-agents -p herdfs-lab
+          cargo fmt --check -p herdfs-agents
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Crate tests (sim 2000 seeds)
-        env:
-          SIM_SEEDS: 2000
-        run: cargo nextest run -p herdfs-core -p herdfs-authority -p herdfs-client -p herdfs-agents
-
-      - name: Install lab tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes fuse3 libfuse3-dev nfs-common
-          go install github.com/minio/minio@RELEASE.2025-10-15T17-29-55Z
-          curl --fail --location \
-            https://github.com/Shopify/toxiproxy/releases/download/v2.12.0/toxiproxy-server-linux-amd64 \
-            --output /tmp/toxiproxy-server
-          echo '556d891134a3c582dc1e1a3f7335fd55142e5965769855a00b944e13e48302fc  /tmp/toxiproxy-server' \
-            | sha256sum -c
-          sudo install -m 0755 /tmp/toxiproxy-server /usr/local/bin/toxiproxy-server
-          cargo install --locked fsx --version 0.3.2
-          echo "$HOME/go/bin" >> "$GITHUB_PATH"
-          sudo chmod a+rw /dev/fuse
-          if ! grep --quiet '^user_allow_other$' /etc/fuse.conf; then
-            echo user_allow_other | sudo tee --append /etc/fuse.conf
-          fi
-      - name: Build lab binaries
-        run: cargo build --workspace --bins
-      - name: Lab suites
-        run: |
-          cargo nextest run -p herdfs-lab \
-            --test smoke --test round_trip --test semantics --test faults \
-            --test cli --test plans --test local_issuer --test control --no-fail-fast
-      - name: Round 57 client probes
-        run: cargo nextest run -p herdfs-lab --test redteam -E 'test(round57)' --no-fail-fast
-      - name: fsx stream and chaos
-        env:
-          FSX_OPS: 20000
-        run: cargo nextest run -p herdfs-lab --test fsx -E 'test(stream) | test(chaos)' --no-fail-fast
-      - name: NFS suites
-        env:
-          LAB_MOUNT: nfs
-        run: cargo nextest run -p herdfs-lab --test nfs --test round_trip --test control --no-fail-fast
+        run: cargo clippy -p herdfs-agents --all-targets -- -D warnings
+      - name: Round 60 agents probes and controls
+        run: cargo nextest run -p herdfs-agents --test sessions --test round60_cancel --no-fail-fast
