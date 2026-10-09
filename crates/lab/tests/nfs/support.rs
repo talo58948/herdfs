@@ -147,6 +147,26 @@ impl Rpc {
         Ok(entries)
     }
 
+    #[allow(dead_code)]
+    pub fn readdir_reply(
+        &mut self,
+        directory: &[u8],
+        count: u32,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<u8>> {
+        let mut args = Vec::new();
+        opaque(&mut args, directory);
+        args.extend_from_slice(&0_u64.to_be_bytes());
+        args.extend_from_slice(&[0; 8]);
+        args.extend_from_slice(&count.to_be_bytes());
+        let mut call = rpc_header(self.next_xid(), 16, 1);
+        call.extend_from_slice(&args);
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port))?;
+        stream.set_read_timeout(Some(timeout))?;
+        send_record(&mut stream, &call)?;
+        read_record(&mut stream)
+    }
+
     pub fn remove_replayed(&mut self, directory: &[u8], name: &str, reconnect: bool) -> Result<[u32; 2]> {
         let xid = self.next_xid();
         let mut call = rpc_header(xid, 12, 1);
