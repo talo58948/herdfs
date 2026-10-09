@@ -106,9 +106,7 @@ fn v10_migration_keeps_overlapping_access_history() {
     let root = entry(
         &mut authority,
         &user("alice"),
-        Request::CreateSpace {
-            space: SPACE.into(),
-        },
+        Request::CreateSpace { space: SPACE.into() },
     );
     let mut attacks = Vec::new();
     for trial in 0..3 {
@@ -120,9 +118,19 @@ fn v10_migration_keeps_overlapping_access_history() {
         let file_path = format!("{child_path}/file");
         set_acl(&mut authority, &child_path, "user:bob", Some(Perm::Read));
         let visible = commit(&mut authority, file.id, format!("visible-{trial}"));
-        set_acl(&mut authority, &format!("p-{trial}"), "user:bob", Some(Perm::Read));
+        set_acl(
+            &mut authority,
+            &format!("p-{trial}"),
+            "user:bob",
+            Some(Perm::Read),
+        );
         set_acl(&mut authority, &child_path, "user:bob", None);
-        set_acl(&mut authority, &format!("p-{trial}"), "user:late", Some(Perm::Read));
+        set_acl(
+            &mut authority,
+            &format!("p-{trial}"),
+            "user:late",
+            Some(Perm::Read),
+        );
         attacks.push((file.id, file_path, visible.id));
     }
     drop(authority);
