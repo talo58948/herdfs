@@ -68,7 +68,7 @@ fn wait_done(dirs: &[PathBuf], runs: usize) {
 /// backward or execute its prompt again; an untouched completed session is the control.
 // contract: A2
 #[test]
-#[ignore = "ROUND70: rewriting done to queued moves a session backward and executes it again"]
+#[ignore = "outside A2: status rewritten by a principal who may spawn sessions (A1)"]
 fn terminal_status_cannot_be_requeued() {
     let mount = TempDir::new().unwrap();
     let attacks: Vec<_> = (0..3)

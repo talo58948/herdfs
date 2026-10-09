@@ -16,8 +16,10 @@ use crate::{Error, Result};
 
 const REFRESH_MARGIN: Duration = Duration::from_secs(30);
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct TokenFile {
+    #[serde(default)]
+    generation: u64,
     access_token: String,
     #[cfg_attr(target_os = "macos", serde(default, skip_serializing))]
     refresh_token: String,
@@ -49,13 +51,13 @@ impl Source {
 
     pub(crate) async fn access(&self, http: &Client, force_refresh: bool) -> Result<String> {
         let mut stored = self.stored.lock().await;
-        let cached_access = match &*stored {
+        let cached_generation = match &*stored {
             Stored::Legacy(_) if !force_refresh => return stored.access(),
-            Stored::Legacy(token) => token.clone(),
+            Stored::Legacy(_) => None,
             Stored::Login(token) if !force_refresh && !refresh_due(token) => {
                 return Ok(token.access_token.clone());
             }
-            Stored::Login(token) => token.access_token.clone(),
+            Stored::Login(token) => Some(token.generation),
         };
         let token_lock = self.path.with_extension("lock");
         let token_guard = lock(token_lock.clone()).await?;
@@ -63,7 +65,9 @@ impl Source {
         let Stored::Login(token) = &*stored else {
             return stored.access();
         };
-        if (!force_refresh && !refresh_due(token)) || (force_refresh && token.access_token != cached_access) {
+        if (!force_refresh && !refresh_due(token))
+            || (force_refresh && Some(token.generation) != cached_generation)
+        {
             return Ok(token.access_token.clone());
         }
         let form = [
@@ -71,7 +75,7 @@ impl Source {
             ("refresh_token", token.refresh_token.as_str()),
             ("client_id", token.client_id.as_str()),
         ];
-        let started_access = token.access_token.clone();
+        let started_generation = token.generation;
         let started_refresh = token.refresh_token.clone();
         let endpoint = token.token_endpoint.clone();
         let expires_at = token.expires_at;
@@ -82,17 +86,17 @@ impl Source {
         let Stored::Login(token) = &*stored else {
             return stored.access();
         };
-        if token.access_token != started_access || token.refresh_token != started_refresh {
+        if token.generation != started_generation {
             return Ok(token.access_token.clone());
         }
-        let refreshed = match refreshed {
+        let mut refreshed = match refreshed {
             Ok(refreshed) => refreshed,
             Err(_) if !force_refresh && now() < expires_at => {
                 return Ok(token.access_token.clone());
             }
             Err(error) => return Err(error),
         };
-        write(&self.path, &refreshed)?;
+        refreshed.generation = write(&self.path, &refreshed, started_generation)?;
         let access = refreshed.access_token.clone();
         *stored = Stored::Login(refreshed);
         Ok(access)
@@ -132,7 +136,11 @@ pub(crate) fn read_access_token(path: &Path) -> Result<String> {
     }
 }
 
-pub(crate) fn write(path: &Path, token: &TokenFile) -> Result<()> {
+fn write(path: &Path, token: &TokenFile, generation: u64) -> Result<u64> {
+    let mut token = token.clone();
+    token.generation = generation
+        .checked_add(1)
+        .ok_or_else(|| Error::Protocol("token generation exhausted".into()))?;
     store_refresh(path, &token.refresh_token)?;
     let parent = path
         .parent()
@@ -140,7 +148,7 @@ pub(crate) fn write(path: &Path, token: &TokenFile) -> Result<()> {
         .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    serde_json::to_writer(&mut temporary, token).map_err(std::io::Error::other)?;
+    serde_json::to_writer(&mut temporary, &token).map_err(std::io::Error::other)?;
     temporary.write_all(b"\n")?;
     temporary.flush()?;
     temporary.as_file().sync_all()?;
@@ -148,12 +156,17 @@ pub(crate) fn write(path: &Path, token: &TokenFile) -> Result<()> {
         .as_file()
         .set_permissions(fs::Permissions::from_mode(0o600))?;
     temporary.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    Ok(token.generation)
 }
 
 pub(crate) async fn save(path: &Path, token: &TokenFile) -> Result<()> {
     let _lock = lock(path.with_extension("lock")).await?;
-    write(path, token)
+    write(path, token, generation(path)).map(drop)
+}
+
+fn generation(path: &Path) -> u64 {
+    serde_json::from_slice::<TokenFile>(&fs::read(path).unwrap_or_default())
+        .map_or(0, |token| token.generation)
 }
 
 pub(crate) fn remove(path: &Path) -> Result<()> {
@@ -170,7 +183,7 @@ fn load_refresh(path: &Path, token: &mut TokenFile) -> Result<()> {
     use security_framework::passwords::get_generic_password;
 
     if !token.refresh_token.is_empty() {
-        write(path, token)?;
+        token.generation = write(path, token, token.generation)?;
         return Ok(());
     }
     let bytes = get_generic_password("herdfs", &path.to_string_lossy())
@@ -274,6 +287,7 @@ pub(crate) async fn exchange(
         .find_map(|(name, value)| (*name == "client_id").then(|| (*value).to_owned()))
         .ok_or_else(|| Error::Protocol("token exchange omitted client_id".into()))?;
     Ok(TokenFile {
+        generation: 0,
         access_token: response.access_token,
         refresh_token,
         expires_at: expiry(response.expires_in),

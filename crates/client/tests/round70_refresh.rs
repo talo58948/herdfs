@@ -136,7 +136,6 @@ fn saved(path: &Path) -> Value {
 /// token strings; an older refresh must not replace its client and endpoint metadata.
 // contract: U1
 #[tokio::test]
-#[ignore = "ROUND70: an older refresh overwrites a login when both opaque token strings are reused"]
 async fn completed_login_with_reused_tokens_wins_over_an_older_refresh() {
     let mut overwritten = 0;
     for trial in 0..3 {
