@@ -163,6 +163,7 @@ impl Rpc {
         Ok([first, second])
     }
 
+    #[allow(dead_code)]
     pub fn remove_xid(&self, directory: &[u8], name: &str, xid: u32) -> Result<u32> {
         let mut call = rpc_header(xid, 12, 1);
         opaque(&mut call, directory);
@@ -170,6 +171,7 @@ impl Rpc {
         status(&self.send(&call)?)
     }
 
+    #[allow(dead_code)]
     pub fn create_exclusive_xid(
         &self,
         directory: &[u8],
