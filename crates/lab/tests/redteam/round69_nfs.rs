@@ -29,7 +29,6 @@ fn entry(lab: &Lab, name: &str) -> Result<Entry> {
 /// stale directory objects, not live directories that happen to contain no entries.
 // contract: M1, C7
 #[test]
-#[ignore = "ROUND69: READDIR through a deleted directory handle returns NOENT"]
 fn round69_readdir_through_deleted_directory_handles_is_stale() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
         eprintln!("skipped: set LAB_MOUNT=nfs for the NFS suite");

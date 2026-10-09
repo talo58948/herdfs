@@ -104,14 +104,17 @@ impl NFSFileSystem for Nfs {
         to_dirid: u64,
         to_filename: &nfs::filename3,
     ) -> Result<(), nfsstat3> {
-        self.space
+        let renamed = self
+            .space
             .clone()
             .rename(
                 (self.ino(from_dirid), Self::name(from_filename)?),
                 (self.ino(to_dirid), Self::name(to_filename)?),
             )
-            .await
-            .map(drop)?;
+            .await;
+        if let Err(error) = renamed {
+            return Err(self.name_error(&[from_dirid, to_dirid], error).await);
+        }
         Ok(())
     }
 

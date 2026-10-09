@@ -55,12 +55,15 @@ fn zip_directory_size_must_match_its_entry_count() {
 
 // contract: P3, C9
 #[test]
-fn oversized_format_indexes_are_rejected() {
+fn format_index_limit_excludes_mp4_payloads() {
     let parquet_tail = [((MAX_INDEX_REGION - 7) as u32).to_le_bytes().as_slice(), b"PAR1"].concat();
     assert_eq!(parquet(MAX_INDEX_REGION + 8, &parquet_tail), None);
 
     let mp4 = [((MAX_INDEX_REGION + 1) as u32).to_be_bytes().as_slice(), b"moov"].concat();
     assert_eq!(mp4_box(0, MAX_INDEX_REGION + 1, &mp4), None);
+
+    let mdat = [((MAX_INDEX_REGION + 1) as u32).to_be_bytes().as_slice(), b"mdat"].concat();
+    assert!(mp4_box(0, MAX_INDEX_REGION + 1, &mdat).is_some());
 }
 
 // contract: P3, C9

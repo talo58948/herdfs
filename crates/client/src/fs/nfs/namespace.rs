@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
 use super::{Nfs, nfs_unix_ms};
+use crate::Error;
 use crate::fs::{FileKind, OpenMode, namespace::AttrChange};
 use nfsserve::nfs::{self, nfsstat3};
 use nfsserve::vfs::{DirEntry, ReadDirResult};
@@ -14,12 +15,7 @@ impl Nfs {
         let (attr, _) = match found {
             Ok(found) => found,
             Err(error) if error.errno() == libc::ENOENT => {
-                self.space
-                    .remote
-                    .locate(herdfs_core::proto::EntryId(dir))
-                    .await
-                    .map_err(Self::stale)?;
-                return Err(nfsstat3::NFS3ERR_NOENT);
+                return Err(self.name_error(&[dir], error).await);
             }
             Err(error) => return Err(error.into()),
         };
@@ -120,7 +116,8 @@ impl Nfs {
                 OpenMode::Write,
                 "nfs",
             )
-            .await?;
+            .await
+            .map_err(Self::stale)?;
         let id = self.space.entry_id(made.ino).0;
         let changes = without_mode(attr);
         if !changes_attr(changes) {
@@ -153,7 +150,8 @@ impl Nfs {
             .space
             .clone()
             .create((self.ino(dir), name), 0o666, true, OpenMode::Write, "nfs")
-            .await?;
+            .await
+            .map_err(Self::stale)?;
         self.space.clone().release(handle).await?;
         let entry = self.space.entry_id(attr.ino);
         self.identity
@@ -176,7 +174,8 @@ impl Nfs {
             .space
             .clone()
             .mkdir(self.ino(dir), Self::name(name)?, mode)
-            .await?;
+            .await
+            .map_err(Self::stale)?;
         Ok((self.space.entry_id(attr.ino).0, self.attr(&attr)))
     }
 
@@ -192,7 +191,8 @@ impl Nfs {
             .space
             .clone()
             .symlink(self.ino(dir), Self::name(name)?, PathBuf::from(target))
-            .await?;
+            .await
+            .map_err(Self::stale)?;
         let id = self.space.entry_id(attr.ino).0;
         Ok((id, self.change_attr(id, changes, None).await?))
     }
@@ -204,14 +204,20 @@ impl Nfs {
         directory: bool,
     ) -> Result<(), nfsstat3> {
         let name = Self::name(name)?;
-        let (attr, _) = self.space.clone().lookup(self.ino(dir), name.clone()).await?;
+        let found = self.space.clone().lookup(self.ino(dir), name.clone()).await;
+        let (attr, _) = match found {
+            Ok(found) => found,
+            Err(error) => return Err(self.name_error(&[dir], error).await),
+        };
         self.space.forget(attr.ino, 1);
         match (directory, attr.kind) {
             (true, FileKind::Directory) | (false, FileKind::File | FileKind::Symlink) => {}
             (true, _) => return Err(nfsstat3::NFS3ERR_NOTDIR),
             (false, _) => return Err(nfsstat3::NFS3ERR_ISDIR),
         }
-        self.space.clone().remove(self.ino(dir), name).await?;
+        if let Err(error) = self.space.clone().remove(self.ino(dir), name).await {
+            return Err(self.name_error(&[dir], error).await);
+        }
         Ok(())
     }
 
@@ -226,7 +232,8 @@ impl Nfs {
             .space
             .remote
             .list(herdfs_core::proto::EntryId(dir))
-            .await?;
+            .await
+            .map_err(Self::stale)?;
         let start = entries
             .iter()
             .position(|entry| entry.id.0 == cookie)
@@ -253,6 +260,23 @@ impl Nfs {
             entries: listed,
             end: end == total,
         })
+    }
+
+    pub(super) async fn name_error(&self, dirs: &[u64], error: Error) -> nfsstat3 {
+        if error.errno() != libc::ENOENT {
+            return error.into();
+        }
+        for dir in dirs {
+            if let Err(error) = self
+                .space
+                .remote
+                .locate(herdfs_core::proto::EntryId(*dir))
+                .await
+            {
+                return Self::stale(error);
+            }
+        }
+        nfsstat3::NFS3ERR_NOENT
     }
 }
 

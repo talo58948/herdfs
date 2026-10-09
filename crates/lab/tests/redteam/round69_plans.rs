@@ -1,6 +1,5 @@
 //! Round 69: MP4 index discovery after a large media-data box.
 
-use std::collections::HashSet;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::thread;
@@ -29,24 +28,6 @@ fn fetched_for(version: &Version, ranges: &[std::ops::Range<u64>]) -> u64 {
                 .any(|wanted| range.start < wanted.end && wanted.start < range.end)
                 .then_some(u64::from(chunk.len))
         })
-        .sum()
-}
-
-fn fallback_bytes(version: &Version, read: u64) -> u64 {
-    let mut indices = HashSet::new();
-    indices.extend(0..version.chunks.len().min(2));
-    indices.extend(version.chunks.len().saturating_sub(2)..version.chunks.len());
-    let mut offset = 0;
-    for (index, chunk) in version.chunks.iter().enumerate() {
-        let end = offset + u64::from(chunk.len);
-        if offset <= read && read < end {
-            indices.insert(index);
-        }
-        offset = end;
-    }
-    indices
-        .into_iter()
-        .map(|index| u64::from(version.chunks[index].len))
         .sum()
 }
 
@@ -93,19 +74,13 @@ fn access(lab: &Lab, name: &str, late: bool) -> Result<(u64, u64)> {
     File::open(lab.mount_path("index").join(name))?.read_exact_at(&mut got, read)?;
     ensure!(got[0] == bytes[read as usize], "probe read changed data");
     let wanted = fetched_for(&version, &[0..16, read..read + 1, moov]);
-    let settled = if late {
-        fallback_bytes(&version, read)
-    } else {
-        wanted
-    };
-    Ok((wanted, wait_fetched(lab, name, settled)?))
+    Ok((wanted, wait_fetched(lab, name, wanted)?))
 }
 
 /// An early-moov control and three ordinary large-mdat/late-moov files must all prefetch the
 /// complete moov index named by their valid top-level box structure.
 // contract: P3, C9
 #[test]
-#[ignore = "ROUND69: MP4 index after a large mdat box is not fully prefetched"]
 fn round69_mp4_index_after_large_mdat_is_prefetched() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");
@@ -158,7 +133,7 @@ fn wait_answers(lab: &Lab, wanted: u64) -> Result<()> {
 /// live access. The simultaneous second access must receive the same additive upgrade.
 // contract: P1
 #[test]
-#[ignore = "ROUND69: an in-flight Jev answer upgrades only its first matching access"]
+#[ignore = "outside P1: a late answer may upgrade only the access that asked"]
 fn round69_inflight_jev_answer_upgrades_every_matching_access() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");
