@@ -44,6 +44,7 @@ jobs:
       - name: Round 60 authority probes and controls
         run: |
           cargo nextest run -p herdfs-authority \
-            --test round60_history --test local_tokens --test migration --test acl --no-fail-fast
+            --test round60_history --test local_tokens --test auth --test migration --test acl \
+            --test round56_history --test round58_history --no-fail-fast
       - name: Round 60 agents probes and controls
         run: cargo nextest run -p herdfs-agents --test sessions --test round60_cancel --no-fail-fast
