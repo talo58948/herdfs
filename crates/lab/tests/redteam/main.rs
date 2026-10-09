@@ -85,6 +85,7 @@ mod round65_nfs;
 mod round65_plans;
 mod round67_kept;
 mod round67_plans;
+mod round69_kept;
 mod round69_plans;
 mod saved_mtime;
 mod scratch_files;
