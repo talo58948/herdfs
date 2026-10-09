@@ -60,7 +60,6 @@ fn entry(lab: &Lab, name: &str) -> Result<Entry> {
 /// REMOVE calls. One caller's successful reply must not suppress the other caller's mutation.
 // contract: M1, C7
 #[test]
-#[ignore = "ROUND59: independent callers collide in the shared XID replay cache"]
 fn round59_independent_loopback_callers_do_not_share_xid_replays() -> Result<()> {
     let Some(lab) = lab()? else { return Ok(()) };
     let root = entry(&lab, "")?;
@@ -129,7 +128,6 @@ fn round59_remove_through_deleted_directory_handles_is_stale() -> Result<()> {
 /// must also durably record its verifier instead of failing on a shared identity-state temp file.
 // contract: M1, C4a
 #[test]
-#[ignore = "ROUND59: concurrent exclusive creates collide while persisting verifiers"]
 fn round59_concurrent_exclusive_creates_persist_without_colliding() -> Result<()> {
     let Some(lab) = lab()? else { return Ok(()) };
     let root = entry(&lab, "")?;

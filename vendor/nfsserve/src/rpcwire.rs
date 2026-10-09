@@ -1,4 +1,6 @@
-use std::io::{Cursor, Read};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::io::Cursor;
 
 use anyhow::anyhow;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
@@ -7,7 +9,7 @@ use tracing::{debug, error, trace, warn};
 
 use crate::context::{HandleTicket, RPCContext};
 use crate::rpc::*;
-use crate::transaction_tracker::Begin;
+use crate::transaction_tracker::{Begin, RequestChecksum};
 use crate::xdr::*;
 use crate::{mount, mount_handlers, nfs, nfs_handlers, portmap, portmap_handlers};
 
@@ -19,7 +21,7 @@ const NFS_ID_MAP_PROGRAM: u32 = 100270;
 const NFS_METADATA_PROGRAM: u32 = 200024;
 
 async fn handle_rpc(
-    input: &mut impl Read,
+    input: &mut Cursor<Vec<u8>>,
     output: &mut Vec<u8>,
     mut context: RPCContext,
 ) -> Result<bool, anyhow::Error> {
@@ -46,8 +48,13 @@ async fn handle_rpc(
         }
 
         let tracked = call.prog == nfs::PROGRAM && nfs_handlers::caches_reply(&call);
+        let checksum = request_checksum(&call, &input.get_ref()[input.position() as usize..]);
         if tracked {
-            match context.transaction_tracker.begin(xid, context.client_addr).await {
+            match context
+                .transaction_tracker
+                .begin(xid, checksum, context.client_addr)
+                .await
+            {
                 Begin::New => {}
                 Begin::Replay(reply) => {
                     debug!(
@@ -86,9 +93,11 @@ async fn handle_rpc(
             if res.is_ok() {
                 context
                     .transaction_tracker
-                    .mark_processed(xid, context.client_addr, output.clone());
+                    .mark_processed(xid, checksum, context.client_addr, output.clone());
             } else {
-                context.transaction_tracker.mark_failed(xid, context.client_addr);
+                context
+                    .transaction_tracker
+                    .mark_failed(xid, checksum, context.client_addr);
             }
         }
         res
@@ -96,6 +105,12 @@ async fn handle_rpc(
         error!("Unexpectedly received a Reply instead of a Call");
         Err(anyhow!("Bad RPC Call format"))
     }
+}
+
+fn request_checksum(call: &call_body, arguments: &[u8]) -> RequestChecksum {
+    let mut checksum = DefaultHasher::new();
+    (call.prog, call.vers, call.proc, arguments).hash(&mut checksum);
+    RequestChecksum(checksum.finish())
 }
 
 /// RFC 1057 Section 10

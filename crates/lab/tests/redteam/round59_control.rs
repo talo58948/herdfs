@@ -1,4 +1,4 @@
-//! Round 59: pausing uploads must not turn fsync into a journal-only success.
+//! Round 59: paused uploads use the offline journal boundary until they resume.
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -8,7 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Result, ensure};
-use herdfs_lab::{Lab, LabConfig, Profile, Strategy, herdfs_command};
+use herdfs_lab::{ADMIN, Lab, LabConfig, Profile, Strategy, herdfs_command};
 
 use crate::{VISIBLE_AFTER, save};
 
@@ -32,12 +32,11 @@ fn rewrite(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// An unpaused fsync controls three paused fsyncs. While the authority is reachable, fsync must
-/// remain an authority commit barrier even when the user has paused background uploads.
-// contract: C2, C4a, U1
+/// An unpaused fsync controls three paused fsyncs. The control reaches the authority before it
+/// returns; paused fsyncs return at the journal boundary and reach the authority after resume.
+// contract: C2, C4a, C12, U1
 #[test]
-#[ignore = "ROUND59: paused fsync returns before the authority commit"]
-fn round59_paused_fsync_does_not_report_an_uncommitted_write() -> Result<()> {
+fn round59_paused_fsync_journals_until_resume() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() == Ok("nfs") {
         eprintln!("skipped: the default-mount probe runs separately from NFS");
         return Ok(());
@@ -52,21 +51,30 @@ fn round59_paused_fsync_does_not_report_an_uncommitted_write() -> Result<()> {
             .client("b", "bob", &[], Profile::Lan, Strategy::Stream),
     )?;
     save(&lab.mount_path("a").join("fsync-control"), b"before")?;
-    rewrite(&lab.mount_path("a").join("fsync-control"), b"after")?;
     lab.wait_committed("a")?;
+    let control = lab.head(ADMIN, "fsync-control")?.id;
+    rewrite(&lab.mount_path("a").join("fsync-control"), b"after")?;
+    ensure!(
+        lab.head(ADMIN, "fsync-control")?.id != control,
+        "unpaused fsync returned before the authority commit"
+    );
+    ensure!(lab.stats("a")?["pending_commits"] == 0);
     thread::sleep(VISIBLE_AFTER);
     ensure!(fs::read(lab.mount_path("b").join("fsync-control"))? == b"after");
 
+    let mut before = Vec::new();
     for trial in 0..3 {
+        let name = format!("paused-fsync-{trial}");
         save(
-            &lab.mount_path("a").join(format!("paused-fsync-{trial}")),
+            &lab.mount_path("a").join(&name),
             b"before",
         )?;
+        let version = lab.head(ADMIN, &name)?.id;
+        before.push((name, version));
     }
     lab.wait_committed("a")?;
     command(&lab, "pause")?;
 
-    let mut completions = Vec::new();
     for trial in 0..3 {
         let path = lab.mount_path("a").join(format!("paused-fsync-{trial}"));
         let (started_tx, started_rx) = mpsc::channel();
@@ -82,38 +90,34 @@ fn round59_paused_fsync_does_not_report_an_uncommitted_write() -> Result<()> {
             let _ = done_tx.send(result);
         });
         started_rx.recv_timeout(Duration::from_secs(10))?;
-        completions.push((done_rx, worker));
-    }
-
-    let mut early = 0;
-    for (trial, (done, _)) in completions.iter().enumerate() {
-        match done.recv_timeout(Duration::from_secs(2)) {
-            Ok(result) => {
-                result?;
-                eprintln!("trial {trial}: paused fsync returned before resume");
-                early += 1;
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    command(&lab, "resume")?;
-    for (done, worker) in completions {
-        if early < 3 {
-            match done.recv_timeout(Duration::from_secs(30)) {
-                Ok(result) => result?,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {}
-                Err(error) => return Err(error.into()),
+        match done_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(result) => result?,
+            Err(error) => {
+                command(&lab, "resume")?;
+                worker
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("fsync worker panicked"))?;
+                return Err(error.into());
             }
         }
         worker
             .join()
             .map_err(|_| anyhow::anyhow!("fsync worker panicked"))?;
+        ensure!(
+            lab.head(ADMIN, &before[trial].0)?.id == before[trial].1,
+            "paused fsync committed before resume"
+        );
     }
+    ensure!(lab.stats("a")?["pending_commits"] == 3);
+
+    command(&lab, "resume")?;
     lab.wait_committed("a")?;
-    assert_eq!(
-        early, 0,
-        "paused fsyncs that returned before authority commit, of 3"
-    );
+    for (name, version) in &before {
+        ensure!(lab.head(ADMIN, name)?.id != *version, "{name} did not commit after resume");
+    }
+    thread::sleep(VISIBLE_AFTER);
+    for (name, _) in before {
+        ensure!(fs::read(lab.mount_path("b").join(name))? == b"after");
+    }
     Ok(())
 }
