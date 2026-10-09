@@ -9,6 +9,8 @@ use herdfs_core::{
     proto::{Entry, EntryId, ErrorCode, Kind, Perm, Request, Version, VersionId},
 };
 
+use crate::access::Access;
+
 #[derive(Default)]
 pub struct Model {
     pub spaces: BTreeMap<String, Space>,
@@ -25,6 +27,8 @@ pub struct Model {
     pub acked: BTreeMap<VersionId, (String, EntryId)>,
     /// Successful guarded commits per `(entry, base)`.
     pub guarded_wins: BTreeMap<(EntryId, Option<VersionId>), usize>,
+    /// Total order of ACL grants and revocations.
+    pub acl_seq: u64,
 }
 
 #[derive(Clone, Default)]
@@ -32,6 +36,8 @@ pub struct Space {
     pub nodes: BTreeMap<SpacePath, Node>,
     /// Each row's perm and the commit sequence when it was first granted.
     pub acl: BTreeMap<(SpacePath, String), (Perm, u64)>,
+    /// ACL access intervals, including revoked rows.
+    pub access: Vec<Access>,
 }
 
 #[derive(Clone)]

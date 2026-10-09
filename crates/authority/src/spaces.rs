@@ -13,7 +13,7 @@ use crate::{Call, Result, acl::perm_from_name, refuse};
 const ROOT_MODE: u32 = 0o755;
 
 /// Copies the entries, head versions and ACL rows of space `?1` into the new space `?2`.
-const FORK: [&str; 4] = [
+const FORK: [&str; 5] = [
     "INSERT INTO entries (space, path, kind, mode, mtime_ms, target)
      SELECT ?2, path, kind, mode, mtime_ms, target FROM entries WHERE space = ?1",
     "INSERT INTO versions (entry, size, author, created_ms, manifest)
@@ -25,6 +25,9 @@ const FORK: [&str; 4] = [
      WHERE space = ?2",
     "INSERT INTO acl (space, path, principal, perm, granted_seq)
      SELECT ?2, path, principal, perm, granted_seq FROM acl WHERE space = ?1",
+    "INSERT INTO acl_history (space, path, principal, granted_version)
+     SELECT space, path, principal, coalesce((SELECT max(id) FROM versions), 0)
+     FROM acl WHERE space = ?2",
 ];
 
 /// `[a-z0-9][a-z0-9._-]{0,62}`
@@ -97,6 +100,9 @@ impl Call<'_> {
             .execute([space])?;
         self.db
             .prepare_cached("DELETE FROM acl WHERE space = ?1")?
+            .execute([space])?;
+        self.db
+            .prepare_cached("DELETE FROM acl_history WHERE space = ?1")?
             .execute([space])?;
         Ok(Response::Done)
     }

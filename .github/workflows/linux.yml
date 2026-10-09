@@ -2,7 +2,7 @@ name: Linux
 
 on:
   push:
-    branches: [main, v0.1, 'v01-*']
+    branches: [main, v0.1, 'v01-*', 'fix*']
     paths:
       - crates/**
       - vendor/**
@@ -43,7 +43,9 @@ jobs:
             -p herdfs-agents -p herdfs-lab
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Crate tests
+      - name: Crate tests (sim 2000 seeds)
+        env:
+          SIM_SEEDS: 2000
         run: cargo nextest run -p herdfs-core -p herdfs-authority -p herdfs-client -p herdfs-agents
 
       - name: Install lab tools

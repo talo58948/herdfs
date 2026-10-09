@@ -46,16 +46,15 @@ impl Model {
                 assert_eq!(*reply, Response::Spaces { spaces });
             }
             Request::CreateSpace { space } => {
-                let granted_seq = self.versions.keys().next_back().map_or(0, |id| id.0);
-                let acl =
-                    BTreeMap::from([((SpacePath::root(), who.user.clone()), (Perm::Admin, granted_seq))]);
                 self.spaces.insert(
                     space.clone(),
                     Space {
                         nodes: BTreeMap::new(),
-                        acl,
+                        acl: BTreeMap::new(),
+                        access: Vec::new(),
                     },
                 );
+                self.change_acl(space, &SpacePath::root(), &who.user, Some(Perm::Admin));
                 self.add(
                     space,
                     &SpacePath::root(),
@@ -240,21 +239,7 @@ impl Model {
                 perm,
             } => {
                 assert_eq!(*reply, Response::Done);
-                let latest_seq = self.versions.keys().next_back().map_or(0, |id| id.0);
-                // contract: S8 — an overlap continues the old access interval.
-                let granted_seq = self.spaces[space]
-                    .acl
-                    .iter()
-                    .filter(|((at, row_principal), _)| row_principal == principal && path.is_within(at))
-                    .map(|(_, (_, granted_seq))| *granted_seq)
-                    .min()
-                    .unwrap_or(latest_seq);
-                let acl = &mut self.spaces.get_mut(space).expect("space exists").acl;
-                let key = (path.clone(), principal.clone());
-                match perm {
-                    Some(perm) => acl.entry(key).or_insert((*perm, granted_seq)).0 = *perm,
-                    None => drop(acl.remove(&key)),
-                };
+                self.change_acl(space, path, principal, *perm);
             }
             Request::Access { space, path } => {
                 let mut grants: Vec<AclRow> = self.spaces[space]
