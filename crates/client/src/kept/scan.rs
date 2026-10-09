@@ -25,6 +25,7 @@ impl Kept {
                     }
                     self.set_error(&root, error);
                     self.drop_unseen(space, &root, &seen);
+                    lock(&self.pending).remove(&root);
                     entries.extend(found);
                 }
                 Err(error) => {

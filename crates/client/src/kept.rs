@@ -22,6 +22,7 @@ use state::{Loaded, Saved, SavedFile};
 pub(crate) struct Kept {
     path: PathBuf,
     saved: Mutex<Saved>,
+    pending: Mutex<BTreeSet<SpacePath>>,
     errors: Mutex<BTreeMap<SpacePath, String>>,
     write: Mutex<()>,
     wake: Notify,
@@ -29,9 +30,11 @@ pub(crate) struct Kept {
 
 impl Kept {
     pub fn new(path: PathBuf, loaded: Loaded) -> Self {
+        let pending = loaded.saved.roots.clone();
         Self {
             path,
             saved: Mutex::new(loaded.saved),
+            pending: Mutex::new(pending),
             errors: Mutex::default(),
             write: Mutex::default(),
             wake: Notify::new(),
@@ -46,8 +49,13 @@ impl Kept {
     }
 
     pub fn pin(&self, path: &SpacePath) -> std::io::Result<()> {
-        self.update(|saved| saved.roots.insert(path.clone()).then_some(()))?;
-        lock(&self.errors).remove(path);
+        let added = self
+            .update(|saved| saved.roots.insert(path.clone()).then_some(()))?
+            .is_some();
+        let retry = lock(&self.errors).remove(path).is_some();
+        if added || retry {
+            lock(&self.pending).insert(path.clone());
+        }
         self.wake.notify_one();
         Ok(())
     }
@@ -73,6 +81,7 @@ impl Kept {
                 )
             })?
             .unwrap_or_default();
+        lock(&self.pending).remove(path);
         lock(&self.errors).remove(path);
         removed.iter().for_each(|file| unpin_file(space, file));
         self.wake.notify_one();
@@ -81,6 +90,7 @@ impl Kept {
 
     pub fn status(&self, space: &Space) -> (u64, Vec<(String, bool)>) {
         let saved = lock(&self.saved);
+        let pending = lock(&self.pending);
         let errors = lock(&self.errors);
         let mut ids = HashSet::new();
         let bytes = saved
@@ -94,7 +104,8 @@ impl Kept {
             .roots
             .iter()
             .map(|root| {
-                let ready = !errors.contains_key(root)
+                let ready = !pending.contains(root)
+                    && !errors.contains_key(root)
                     && saved
                         .files
                         .iter()

@@ -69,12 +69,12 @@ jobs:
         run: |
           cargo nextest run -p herdfs-lab \
             --test smoke --test round_trip --test semantics --test faults \
-            --test cli --test plans --test local_issuer --test control
+            --test cli --test plans --test local_issuer --test control --no-fail-fast
       - name: fsx stream and chaos
         env:
           FSX_OPS: 20000
-        run: cargo nextest run -p herdfs-lab --test fsx -E 'test(stream) | test(chaos)'
+        run: cargo nextest run -p herdfs-lab --test fsx -E 'test(stream) | test(chaos)' --no-fail-fast
       - name: NFS suites
         env:
           LAB_MOUNT: nfs
-        run: cargo nextest run -p herdfs-lab --test nfs --test round_trip --test control
+        run: cargo nextest run -p herdfs-lab --test nfs --test round_trip --test control --no-fail-fast
