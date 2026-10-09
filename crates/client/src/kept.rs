@@ -77,9 +77,7 @@ impl Kept {
     pub fn unpin(&self, space: &Space, path: &SpacePath) -> std::io::Result<()> {
         let removed = self
             .update(|saved| {
-                if saved.roots.remove(path).is_none() {
-                    return None;
-                }
+                saved.roots.remove(path)?;
                 let roots: Vec<_> = saved.roots.keys().cloned().collect();
                 let paths: Vec<_> = saved
                     .files
