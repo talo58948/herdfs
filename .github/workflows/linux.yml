@@ -71,7 +71,7 @@ jobs:
         run: |
           cargo nextest run -p herdfs-lab \
             --test smoke --test round_trip --test semantics --test faults \
-            --test cli --test plans --test local_issuer --test control --no-fail-fast
+            --test cli --test plans --test local_issuer --test control --test redteam --no-fail-fast
       - name: fsx stream and chaos
         env:
           FSX_OPS: 20000
