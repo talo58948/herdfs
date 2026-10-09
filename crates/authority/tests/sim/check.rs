@@ -233,11 +233,17 @@ impl Model {
             snapshot.keys().eq(parent.nodes.keys()),
             "fork {name} differs from {source}: {snapshot:?}"
         );
-        let mut fork = Space {
-            nodes: BTreeMap::new(),
-            acl: BTreeMap::new(),
-            access: Vec::new(),
-        };
+        self.spaces.insert(
+            name.to_owned(),
+            Space {
+                nodes: BTreeMap::new(),
+                acl: BTreeMap::new(),
+                access: Vec::new(),
+            },
+        );
+        for ((path, principal), (perm, _)) in &parent.acl {
+            self.change_acl(name, path, principal, Some(*perm));
+        }
         for (path, node) in parent.nodes {
             let (entry, copies) = &snapshot[&path];
             assert!(
@@ -265,18 +271,18 @@ impl Model {
                 }
                 (head, copies) => panic!("{path}: fork copied {copies:?} for head {head:?}"),
             };
-            fork.nodes.insert(
-                path,
-                Node {
-                    id: entry.id,
-                    history,
-                    ..node
-                },
-            );
-        }
-        self.spaces.insert(name.to_owned(), fork);
-        for ((path, principal), (perm, _)) in parent.acl {
-            self.change_acl(name, &path, &principal, Some(perm));
+            self.spaces
+                .get_mut(name)
+                .expect("fork exists")
+                .nodes
+                .insert(
+                    path,
+                    Node {
+                        id: entry.id,
+                        history,
+                        ..node
+                    },
+                );
         }
         for (path, (entry, _)) in snapshot {
             assert_eq!(*entry, self.entry(name, path));

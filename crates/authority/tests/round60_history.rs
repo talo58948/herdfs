@@ -150,7 +150,6 @@ fn inherited_fork_history(trial: usize) -> (bool, bool) {
 /// after a new head; a principal granted only after the fork is the strict-after control.
 // contract: C13, C14, S8
 #[test]
-#[ignore = "ROUND60: inherited access loses a fork's initial version"]
 fn copied_access_keeps_the_forks_initial_version_visible() {
     let mut hidden = 0;
     for trial in 0..3 {
