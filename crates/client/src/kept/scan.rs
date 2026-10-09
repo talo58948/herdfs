@@ -100,7 +100,8 @@ impl Kept {
                 replaced.extend(saved.files.insert(rebased, file));
             }
             Some(replaced)
-        })? else {
+        })?
+        else {
             return Ok(());
         };
         if lock(&self.pending).remove(from) {

@@ -10,11 +10,7 @@ use nfsserve::vfs::{DirEntry, ReadDirResult};
 
 impl Nfs {
     pub(super) async fn lookup_entry(&self, dir: u64, name: &nfs::filename3) -> Result<u64, nfsstat3> {
-        let found = self
-            .space
-            .clone()
-            .lookup(self.ino(dir), Self::name(name)?)
-            .await;
+        let found = self.space.clone().lookup(self.ino(dir), Self::name(name)?).await;
         let (attr, _) = match found {
             Ok(found) => found,
             Err(error) if error.errno() == libc::ENOENT => {

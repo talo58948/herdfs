@@ -152,10 +152,7 @@ fn zip(size: u64, tail_start: u64, tail: &[u8]) -> Option<Range<u64>> {
     let central_end = central_start.checked_add(central_len)?;
     let eocd_start = tail_start + eocd as u64;
     let index_len = size.checked_sub(central_start)?;
-    (central_len >= 4
-        && index_len <= MAX_INDEX_REGION
-        && central_end <= eocd_start
-        && eocd_start < size)
+    (central_len >= 4 && index_len <= MAX_INDEX_REGION && central_end <= eocd_start && eocd_start < size)
         .then_some(central_start..size)
 }
 
@@ -173,8 +170,7 @@ fn mp4_box(offset: u64, file_size: u64, header: &[u8]) -> Option<([u8; 4], Range
     };
     let header_len = if short == 1 { 16 } else { 8 };
     let end = offset.checked_add(len)?;
-    (len >= header_len && len <= MAX_INDEX_REGION && end <= file_size)
-        .then_some((kind, offset..end))
+    (len >= header_len && len <= MAX_INDEX_REGION && end <= file_size).then_some((kind, offset..end))
 }
 
 #[cfg(test)]
@@ -204,18 +200,10 @@ mod tests {
     // contract: P3, C9
     #[test]
     fn oversized_format_indexes_are_rejected() {
-        let parquet_tail = [
-            ((MAX_INDEX_REGION - 7) as u32).to_le_bytes().as_slice(),
-            b"PAR1",
-        ]
-        .concat();
+        let parquet_tail = [((MAX_INDEX_REGION - 7) as u32).to_le_bytes().as_slice(), b"PAR1"].concat();
         assert_eq!(parquet(MAX_INDEX_REGION + 8, &parquet_tail), None);
 
-        let mp4 = [
-            ((MAX_INDEX_REGION + 1) as u32).to_be_bytes().as_slice(),
-            b"moov",
-        ]
-        .concat();
+        let mp4 = [((MAX_INDEX_REGION + 1) as u32).to_be_bytes().as_slice(), b"moov"].concat();
         assert_eq!(mp4_box(0, MAX_INDEX_REGION + 1, &mp4), None);
     }
 

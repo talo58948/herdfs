@@ -133,11 +133,7 @@ impl Kept {
 
     pub fn file(&self, path: &SpacePath) -> (bool, bool, Option<String>) {
         let saved = lock(&self.saved);
-        let roots: Vec<_> = saved
-            .roots
-            .keys()
-            .filter(|root| path.is_within(root))
-            .collect();
+        let roots: Vec<_> = saved.roots.keys().filter(|root| path.is_within(root)).collect();
         let downloading = saved.files.get(path).is_some_and(|file| !file.ready);
         let errors = lock(&self.errors);
         let error = roots.iter().find_map(|root| errors.get(*root).cloned());
