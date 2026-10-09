@@ -185,6 +185,10 @@ impl Kept {
         version: Option<Version>,
     ) -> Result<()> {
         let Some(version) = version else {
+            let switched = space.inodes.with(entry.id, |state| state.switch((None, true)));
+            if switched == Some(true) {
+                space.kernel.invalidate_attrs(entry.id);
+            }
             return Ok(());
         };
         let Some(downloading) = self.prepare(space, &path, &version)? else {

@@ -65,7 +65,7 @@ impl Reader {
         let first = self.read(file, 0, BOX_HEADER.min(size), Some(fetched)).await?;
         let parquet_file = first.starts_with(b"PAR1");
         if mp4_header(&first)
-            && let Some(range) = self.mp4(file, first)
+            && let Some(range) = self.mp4(file, first, fetched).await?
         {
             return self.prefetch_range(file, range, fetched).await;
         }
@@ -116,21 +116,35 @@ impl Reader {
         Ok(offset == directory.range.end)
     }
 
-    fn mp4(&self, file: &OpenVersion, first: Vec<u8>) -> Option<Range<u64>> {
+    async fn mp4(
+        &self,
+        file: &OpenVersion,
+        first: Vec<u8>,
+        fetched: &AtomicU64,
+    ) -> Result<Option<Range<u64>>> {
         let (mut offset, size, mut header) = (0, file.version.size, first);
         for remaining in (0..BOX_PROBES).rev() {
-            let (kind, range) = mp4_box(offset, size, &header)?;
+            let Some((kind, range)) = mp4_box(offset, size, &header) else {
+                return Ok(None);
+            };
             if kind == *b"moov" {
-                return Some(range);
+                return Ok(Some(range));
             }
             offset = range.end;
             if offset >= size || remaining == 0 {
-                return None;
+                return Ok(None);
             }
-            // An untrusted box length must not widen the fallback just to find the next header.
-            header = self.cached_range(file, offset, BOX_HEADER.min(size - offset))?;
+            // Only media payload may be skipped to a remote header; other box lengths must not
+            // widen the fallback.
+            let len = BOX_HEADER.min(size - offset);
+            let cached = self.cached_range(file, offset, len);
+            header = match (cached, kind) {
+                (Some(header), _) => header,
+                (None, kind) if kind == *b"mdat" => self.read(file, offset, len, Some(fetched)).await?,
+                (None, _) => return Ok(None),
+            };
         }
-        None
+        Ok(None)
     }
 
     fn cached_range(&self, file: &OpenVersion, off: u64, len: u64) -> Option<Vec<u8>> {
@@ -233,7 +247,8 @@ fn mp4_box(offset: u64, parent_end: u64, header: &[u8]) -> Option<([u8; 4], Rang
     };
     let header_len = if short == 1 { 16 } else { 8 };
     let end = offset.checked_add(len)?;
-    (len >= header_len && len <= MAX_INDEX_REGION && end <= parent_end).then_some((kind, offset..end))
+    (len >= header_len && (kind != *b"moov" || len <= MAX_INDEX_REGION) && end <= parent_end)
+        .then_some((kind, offset..end))
 }
 
 #[cfg(test)]

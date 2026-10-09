@@ -130,7 +130,8 @@ impl Kept {
         let bytes = saved
             .files
             .values()
-            .flat_map(|file| &file.current.chunks)
+            .flat_map(|file| std::iter::once(&file.current).chain(&file.retired))
+            .flat_map(|version| &version.chunks)
             .filter(|chunk| ids.insert(chunk.id) && space.cache.contains(&chunk.id))
             .map(|chunk| u64::from(chunk.len))
             .sum();

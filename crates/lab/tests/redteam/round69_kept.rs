@@ -73,7 +73,6 @@ fn observe_refresh(lab: &Lab) -> Result<(bool, Value)> {
 /// still agree because no unkept data was accessed and both retained versions are pinned.
 // contract: P4, U1
 #[test]
-#[ignore = "ROUND69: kept use omits the retired version during replacement download"]
 fn round69_kept_use_counts_the_retired_download_version() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() == Ok("nfs") {
         eprintln!("skipped: the default-mount probe runs separately from NFS");
@@ -126,7 +125,6 @@ fn round69_kept_use_counts_the_retired_download_version() -> Result<()> {
 /// are known and readable without consulting the authority, including files with no first commit.
 // contract: P4, C12
 #[test]
-#[ignore = "ROUND69: ready pins cannot read never-written empty files offline"]
 fn round69_ready_pin_reads_never_written_empty_files_offline() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() == Ok("nfs") {
         eprintln!("skipped: the default-mount probe runs separately from NFS");
