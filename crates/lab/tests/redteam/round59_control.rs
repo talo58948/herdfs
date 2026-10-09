@@ -65,10 +65,7 @@ fn round59_paused_fsync_journals_until_resume() -> Result<()> {
     let mut before = Vec::new();
     for trial in 0..3 {
         let name = format!("paused-fsync-{trial}");
-        save(
-            &lab.mount_path("a").join(&name),
-            b"before",
-        )?;
+        save(&lab.mount_path("a").join(&name), b"before")?;
         let version = lab.head(ADMIN, &name)?.id;
         before.push((name, version));
     }
@@ -113,7 +110,10 @@ fn round59_paused_fsync_journals_until_resume() -> Result<()> {
     command(&lab, "resume")?;
     lab.wait_committed("a")?;
     for (name, version) in &before {
-        ensure!(lab.head(ADMIN, name)?.id != *version, "{name} did not commit after resume");
+        ensure!(
+            lab.head(ADMIN, name)?.id != *version,
+            "{name} did not commit after resume"
+        );
     }
     thread::sleep(VISIBLE_AFTER);
     for (name, _) in before {
