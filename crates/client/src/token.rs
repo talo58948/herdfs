@@ -57,7 +57,8 @@ impl Source {
             }
             Stored::Login(token) => token.access_token.clone(),
         };
-        let _lock = lock(self.path.with_extension("lock")).await?;
+        let token_lock = self.path.with_extension("lock");
+        let token_guard = lock(token_lock.clone()).await?;
         *stored = read(&self.path)?;
         let Stored::Login(token) = &*stored else {
             return stored.access();
@@ -70,10 +71,23 @@ impl Source {
             ("refresh_token", token.refresh_token.as_str()),
             ("client_id", token.client_id.as_str()),
         ];
-        let refreshed = exchange(http, &token.token_endpoint, &form, Some(&token.refresh_token)).await;
+        let started_access = token.access_token.clone();
+        let started_refresh = token.refresh_token.clone();
+        let endpoint = token.token_endpoint.clone();
+        let expires_at = token.expires_at;
+        drop(token_guard);
+        let refreshed = exchange(http, &endpoint, &form, Some(&started_refresh)).await;
+        let _lock = lock(token_lock).await?;
+        *stored = read(&self.path)?;
+        let Stored::Login(token) = &*stored else {
+            return stored.access();
+        };
+        if token.access_token != started_access || token.refresh_token != started_refresh {
+            return Ok(token.access_token.clone());
+        }
         let refreshed = match refreshed {
             Ok(refreshed) => refreshed,
-            Err(_) if !force_refresh && now() < token.expires_at => {
+            Err(_) if !force_refresh && now() < expires_at => {
                 return Ok(token.access_token.clone());
             }
             Err(error) => return Err(error),
@@ -135,6 +149,11 @@ pub(crate) fn write(path: &Path, token: &TokenFile) -> Result<()> {
         .set_permissions(fs::Permissions::from_mode(0o600))?;
     temporary.persist(path).map_err(|error| error.error)?;
     Ok(())
+}
+
+pub(crate) async fn save(path: &Path, token: &TokenFile) -> Result<()> {
+    let _lock = lock(path.with_extension("lock")).await?;
+    write(path, token)
 }
 
 pub(crate) fn remove(path: &Path) -> Result<()> {

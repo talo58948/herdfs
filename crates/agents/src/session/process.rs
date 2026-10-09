@@ -13,6 +13,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::task::JoinSet;
 
+use super::running::Running;
 use super::{Agent, Session, open, write};
 
 const CANCEL_POLL: Duration = Duration::from_millis(100);
@@ -44,6 +45,17 @@ impl Agent {
         child_context(&mut command, cwd.as_raw_fd());
         let mut child = command.spawn().context("spawn")?;
         let group = child.id().context("child has no pid")?;
+        let running = match Running::record(session, group) {
+            Ok(running) => running,
+            Err(err) => {
+                kill_group(group).context("kill after process-group record failure")?;
+                child
+                    .wait()
+                    .await
+                    .context("wait after process-group record failure")?;
+                return Err(err).context("record process group");
+            }
+        };
         drop(cwd);
 
         let child_stdout = child.stdout.take().context("stdout pipe")?;
@@ -52,6 +64,7 @@ impl Agent {
         captures.spawn(capture(child_stdout, stdout, output.try_clone().await?));
         captures.spawn(capture(child_stderr, stderr, output.try_clone().await?));
         let (exit, cancelled) = wait(session, &mut child, group).await?;
+        running.finish()?;
         let capture_result = finish_captures(&mut captures).await;
         // On herdfs, fsync means committed: terminal status must not precede its results.
         stdout_sync.sync_all().await.context("sync stdout")?;
@@ -173,7 +186,7 @@ fn child_context(command: &mut Command, cwd: RawFd) {
     unsafe_code,
     reason = "libc is the portable Unix process-group signalling API"
 )]
-fn kill_group(group: u32) -> io::Result<()> {
+pub(super) fn kill_group(group: u32) -> io::Result<()> {
     let result = unsafe { libc::kill(-(group as libc::pid_t), libc::SIGKILL) };
     if result == 0 {
         return Ok(());

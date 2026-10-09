@@ -4,6 +4,7 @@
 //! regular files and never through a symlink, which could point at the runner host's own files.
 
 mod process;
+mod running;
 
 use std::ffi::OsStr;
 use std::io::{self, ErrorKind};
@@ -138,6 +139,7 @@ pub(crate) async fn recover(mount: &Path, dir: &Path) -> io::Result<()> {
     };
     let status = status.trim();
     if status == "running" || !valid_status(status) {
+        running::stop_previous(&session)?;
         transition(&session, Some(status), "failed: runner restarted").await?;
     }
     Ok(())
