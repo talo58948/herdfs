@@ -1,4 +1,4 @@
-//! Round 63: invalid Parquet metadata must use bounded fallback prefetch.
+//! Round 63: Parquet prefetch must stay within its bounded metadata region.
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -34,6 +34,23 @@ fn fallback_bytes(version: &Version, read: u64) -> u64 {
         .sum()
 }
 
+fn parquet_bytes(version: &Version, read: u64, metadata: u64) -> u64 {
+    let ranges = [0..16, read..read + 1, metadata..version.size];
+    let mut offset = 0;
+    version
+        .chunks
+        .iter()
+        .filter_map(|chunk| {
+            let range = offset..offset + u64::from(chunk.len);
+            offset = range.end;
+            ranges
+                .iter()
+                .any(|wanted| range.start < wanted.end && wanted.start < range.end)
+                .then_some(u64::from(chunk.len))
+        })
+        .sum()
+}
+
 fn wait_fetched(lab: &Lab, name: &str, wanted: u64) -> Result<u64> {
     let deadline = Instant::now() + WAIT;
     loop {
@@ -47,7 +64,7 @@ fn wait_fetched(lab: &Lab, name: &str, wanted: u64) -> Result<u64> {
     }
 }
 
-fn access(lab: &Lab, name: &str, bytes: &[u8]) -> Result<(u64, u64)> {
+fn access(lab: &Lab, name: &str, bytes: &[u8], metadata: Option<u64>) -> Result<(u64, u64)> {
     save(&lab.mount_path("writer").join(name), bytes)?;
     let version = lab.head(ADMIN, name)?;
     thread::sleep(VISIBLE_AFTER);
@@ -55,8 +72,11 @@ fn access(lab: &Lab, name: &str, bytes: &[u8]) -> Result<(u64, u64)> {
     let mut got = [0];
     File::open(lab.mount_path("index").join(name))?.read_exact_at(&mut got, middle)?;
     ensure!(got[0] == bytes[middle as usize], "middle-byte read changed data");
-    let fallback = fallback_bytes(&version, middle);
-    Ok((fallback, wait_fetched(lab, name, fallback)?))
+    let bound = metadata.map_or_else(
+        || fallback_bytes(&version, middle),
+        |metadata| parquet_bytes(&version, middle, metadata),
+    );
+    Ok((bound, wait_fetched(lab, name, bound)?))
 }
 
 fn invalid_parquet(fake: bool) -> Vec<u8> {
@@ -75,11 +95,11 @@ fn invalid_parquet(fake: bool) -> Vec<u8> {
     bytes
 }
 
-/// An unknown file controls three files whose declared Parquet metadata is an empty Thrift
-/// structure missing every required field. Invalid metadata is not an index and must fall back.
+/// An unknown file controls three Parquet-shaped files with the largest accepted metadata region.
+/// Prefetch may fetch that region, but no bytes elsewhere in the body.
 // contract: P3, C9
 #[test]
-fn round63_invalid_parquet_metadata_does_not_widen_prefetch() -> Result<()> {
+fn round63_parquet_prefetch_stays_within_metadata() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");
         return Ok(());
@@ -96,22 +116,23 @@ fn round63_invalid_parquet_metadata_does_not_widen_prefetch() -> Result<()> {
             )
             .on_tmpfs(),
     )?;
-    let (bound, fetched) = access(&lab, "parquet-control.bin", &invalid_parquet(false))?;
+    let (bound, fetched) = access(&lab, "parquet-control.bin", &invalid_parquet(false), None)?;
     ensure!(
         fetched == bound,
         "unknown control fetched {fetched}, expected {bound}"
     );
 
     let mut failures = 0;
+    let metadata = (FILE_LEN - 8 - FAKE_METADATA) as u64;
     for trial in 0..3 {
         let name = format!("invalid-parquet-{trial}.bin");
-        let (bound, fetched) = access(&lab, &name, &invalid_parquet(true))?;
-        eprintln!("trial {trial}: invalid Parquet fetched {fetched}; fallback bound {bound}");
-        failures += usize::from(fetched > bound);
+        let (bound, fetched) = access(&lab, &name, &invalid_parquet(true), Some(metadata))?;
+        eprintln!("trial {trial}: Parquet fetched {fetched}; metadata bound {bound}");
+        failures += usize::from(fetched != bound);
     }
     assert_eq!(
         failures, 0,
-        "invalid Parquet metadata that widened prefetch, of 3"
+        "Parquet indexes that fetched outside their metadata, of 3"
     );
     Ok(())
 }

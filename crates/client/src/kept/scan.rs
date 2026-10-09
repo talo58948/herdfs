@@ -85,6 +85,9 @@ impl Kept {
             let entry = match located {
                 Ok(entry) => entry,
                 Err(error) if error.is_not_found() => {
+                    if lock(&self.saved).roots.get(&saved_root).copied() != Some(saved_entry) {
+                        continue;
+                    }
                     if let Err(error) = self.unpin(space, &saved_root) {
                         tracing::warn!(%error, root = %saved_root, "could not drop a deleted kept root");
                     }
