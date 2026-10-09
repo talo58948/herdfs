@@ -18,10 +18,23 @@ impl Runner {
             "setsid sleep 30 </dev/null >/dev/null 2>&1 & ",
             "echo $! > \"$HERDFS_SESSION_DIR/detached.pid\"; wait"
         );
+        Self::with_command(mount, command, "20", "2")
+    }
+
+    fn with_command(mount: &Path, command: &str, poll_ms: &str, max_sessions: &str) -> Self {
         let child = Command::new(env!("CARGO_BIN_EXE_herdfs-agents"))
             .arg("--mount")
             .arg(mount)
-            .args(["--host", "box", "--command", command, "--poll-ms", "20"])
+            .args([
+                "--host",
+                "box",
+                "--command",
+                command,
+                "--poll-ms",
+                poll_ms,
+                "--max-sessions",
+                max_sessions,
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -45,7 +58,7 @@ fn session(mount: &Path, trial: usize) -> PathBuf {
 }
 
 fn wait_text(path: &Path, wanted: Option<&str>) -> String {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         if let Ok(text) = fs::read_to_string(path) {
             let text = text.trim().to_owned();
@@ -89,8 +102,14 @@ fn cancel_stops_descendants_that_leave_the_process_group() {
         wait_text(&dir.join("status"), Some("running"));
         let group = wait_text(&dir.join("group.pid"), None);
         let detached = wait_text(&dir.join("detached.pid"), None);
-        assert!(process_exists(&group), "group control never started, trial {trial}");
-        assert!(process_exists(&detached), "detached child never started, trial {trial}");
+        assert!(
+            process_exists(&group),
+            "group control never started, trial {trial}"
+        );
+        assert!(
+            process_exists(&detached),
+            "detached child never started, trial {trial}"
+        );
 
         let cancelled = Instant::now();
         fs::write(dir.join("cancel"), "").unwrap();
@@ -100,5 +119,39 @@ fn cancel_stops_descendants_that_leave_the_process_group() {
         survivors += usize::from(process_exists(&detached));
         kill(&detached);
     }
-    assert_eq!(survivors, 0, "{survivors}/3 detached descendants survived cancellation");
+    assert_eq!(
+        survivors, 0,
+        "{survivors}/3 detached descendants survived cancellation"
+    );
+}
+
+/// The configurable scan interval cannot weaken A2's five-second bound for queued sessions; a
+/// running session, whose cancel watcher is independent of that interval, is the passing control.
+// contract: A2
+#[test]
+fn cancel_stops_queued_sessions_with_a_slow_scan_interval() {
+    let mount = TempDir::new().unwrap();
+    let blocker = session(mount.path(), 100);
+    let _runner = Runner::with_command(mount.path(), "sleep 30", "6000", "1");
+    wait_text(&blocker.join("status"), Some("running"));
+    let queued: Vec<_> = (0..3).map(|trial| session(mount.path(), trial)).collect();
+    for dir in &queued {
+        wait_text(&dir.join("status"), Some("queued"));
+        fs::write(dir.join("cancel"), "").unwrap();
+    }
+
+    sleep(Duration::from_millis(5_200));
+    let stopped = queued
+        .iter()
+        .filter(|dir| {
+            fs::read_to_string(dir.join("status"))
+                .is_ok_and(|status| status.trim() == "cancelled")
+        })
+        .count();
+
+    let control_started = Instant::now();
+    fs::write(blocker.join("cancel"), "").unwrap();
+    wait_text(&blocker.join("status"), Some("cancelled"));
+    assert!(control_started.elapsed() < Duration::from_secs(5));
+    assert_eq!(stopped, 3, "{}/3 queued sessions exceeded A2", 3 - stopped);
 }
