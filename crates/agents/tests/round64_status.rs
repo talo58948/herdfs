@@ -60,31 +60,24 @@ fn wait_status(dir: &Path, wanted: &str) {
     }
 }
 
-fn valid(status: &str) -> bool {
-    matches!(status, "queued" | "running" | "done" | "cancelled") || status.starts_with("failed: ")
-}
-
 /// An interrupted in-place status transition can leave the file empty. Restart recovery must
 /// resume or fail those sessions instead of leaving a state outside A2 forever.
 // contract: A2
 #[test]
-#[ignore = "ROUND64: an empty crash-residue status is ignored forever after restart"]
 fn interrupted_status_writes_recover_to_a_valid_state() {
     let mount = TempDir::new().unwrap();
     let clean = session(mount.path(), "clean-control", None);
     let running = session(mount.path(), "running-control", Some("running\n"));
-    let attacks: Vec<_> = (0..3)
-        .map(|trial| session(mount.path(), &format!("attack-{trial}"), Some("")))
+    let attacks: Vec<_> = ["", "invalid", "failed: "]
+        .into_iter()
+        .enumerate()
+        .map(|(trial, status)| session(mount.path(), &format!("attack-{trial}"), Some(status)))
         .collect();
     let _runner = Runner::start(mount.path());
 
     wait_status(&clean, "done");
     wait_status(&running, "failed: runner restarted");
-    sleep(Duration::from_millis(500));
-
-    let stuck = attacks
-        .iter()
-        .filter(|dir| status(dir).is_some_and(|status| !valid(&status)))
-        .count();
-    assert_eq!(stuck, 0, "{stuck}/3 interrupted statuses stayed invalid");
+    for dir in &attacks {
+        wait_status(dir, "failed: runner restarted");
+    }
 }
