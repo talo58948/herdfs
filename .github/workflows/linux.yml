@@ -54,7 +54,6 @@ jobs:
           echo '556d891134a3c582dc1e1a3f7335fd55142e5965769855a00b944e13e48302fc  /tmp/toxiproxy-server' \
             | sha256sum -c
           sudo install -m 0755 /tmp/toxiproxy-server /usr/local/bin/toxiproxy-server
-          cargo install --locked fsx --version 0.3.2
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
           sudo chmod a+rw /dev/fuse
           if ! grep --quiet '^user_allow_other$' /etc/fuse.conf; then
