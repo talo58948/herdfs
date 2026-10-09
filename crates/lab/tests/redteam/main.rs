@@ -72,6 +72,9 @@ mod round53_client;
 mod round55_client;
 mod round57_kept;
 mod round57_plans;
+mod round59_control;
+mod round59_nfs;
+mod round59_plans;
 mod saved_mtime;
 mod scratch_files;
 mod shared_appends;
@@ -95,6 +98,10 @@ use std::time::Duration;
 use rustix::fs::{AtFlags, Dir, Mode, OFlags};
 
 use crate::helpers::*;
+
+#[allow(dead_code, unused_imports)]
+#[path = "../nfs/support.rs"]
+mod nfs_support;
 
 /// T_vis plus a margin for the test's own scheduling.
 const VISIBLE_AFTER: Duration = Duration::from_millis(1_200);
