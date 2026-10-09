@@ -148,6 +148,16 @@ impl Rpc {
     }
 
     #[allow(dead_code)]
+    pub fn readdir_status(&mut self, directory: &[u8], count: u32) -> Result<u32> {
+        let mut args = Vec::new();
+        opaque(&mut args, directory);
+        args.extend_from_slice(&0_u64.to_be_bytes());
+        args.extend_from_slice(&[0; 8]);
+        args.extend_from_slice(&count.to_be_bytes());
+        status(&self.call(16, &args)?)
+    }
+
+    #[allow(dead_code)]
     pub fn readdir_reply(
         &mut self,
         directory: &[u8],

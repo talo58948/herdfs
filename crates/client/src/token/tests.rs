@@ -39,7 +39,7 @@ async fn a_failed_early_refresh_uses_the_still_valid_token() -> anyhow::Result<(
     let (dir, path) = token_file(10)?;
     let mut token = read_login(&path)?;
     token.token_endpoint = endpoint;
-    write(&path, &token)?;
+    write(&path, &token, token.generation)?;
     let http = Client::builder().timeout(Duration::from_millis(10)).build()?;
     assert_eq!(Source::new(path)?.access(&http, false).await?, "access");
     drop(dir);
@@ -67,12 +67,14 @@ fn token_file(expires_in: u64) -> anyhow::Result<(tempfile::TempDir, PathBuf)> {
     write(
         &path,
         &TokenFile {
+            generation: 0,
             access_token: "access".into(),
             refresh_token: "refresh".into(),
             expires_at: expiry(expires_in),
             client_id: "client".into(),
             token_endpoint: "http://unused".into(),
         },
+        0,
     )?;
     Ok((dir, path))
 }
