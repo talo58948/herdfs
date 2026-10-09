@@ -206,9 +206,12 @@ impl<T: NFSFileSystem + Send + Sync + 'static> NFSTcp for NFSTcpListener<T> {
                     continue;
                 }
             };
+            let client_addr = socket.peer_addr()?.ip();
             let context = RPCContext {
                 local_port: self.port,
-                client_addr: socket.peer_addr().unwrap().to_string(),
+                // HerdFS exposes this only on loopback to one kernel client, so removing its
+                // ephemeral port cannot merge distinct clients and preserves replays on reconnect.
+                client_addr,
                 auth: crate::rpc::auth_unix::default(),
                 vfs: self.arcfs.clone(),
                 mount_signal: self.mount_signal.clone(),

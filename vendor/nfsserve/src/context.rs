@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::net::IpAddr;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -13,7 +14,7 @@ use crate::vfs::NFSFileSystem;
 #[derive(Clone)]
 pub struct RPCContext {
     pub local_port: u16,
-    pub client_addr: String,
+    pub client_addr: IpAddr,
     pub auth: crate::rpc::auth_unix,
     pub vfs: Arc<dyn NFSFileSystem + Send + Sync>,
     pub mount_signal: Option<mpsc::Sender<bool>>,

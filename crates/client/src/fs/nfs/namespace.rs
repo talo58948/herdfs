@@ -10,11 +10,23 @@ use nfsserve::vfs::{DirEntry, ReadDirResult};
 
 impl Nfs {
     pub(super) async fn lookup_entry(&self, dir: u64, name: &nfs::filename3) -> Result<u64, nfsstat3> {
-        let (attr, _) = self
+        let found = self
             .space
             .clone()
             .lookup(self.ino(dir), Self::name(name)?)
-            .await?;
+            .await;
+        let (attr, _) = match found {
+            Ok(found) => found,
+            Err(error) if error.errno() == libc::ENOENT => {
+                self.space
+                    .remote
+                    .locate(herdfs_core::proto::EntryId(dir))
+                    .await
+                    .map_err(Self::stale)?;
+                return Err(nfsstat3::NFS3ERR_NOENT);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let id = self.space.entry_id(attr.ino).0;
         self.space.forget(attr.ino, 1);
         Ok(id)

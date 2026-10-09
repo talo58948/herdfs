@@ -47,7 +47,7 @@ async fn handle_rpc(
 
         let tracked = call.prog == nfs::PROGRAM && nfs_handlers::caches_reply(&call);
         if tracked {
-            match context.transaction_tracker.begin(xid, &context.client_addr).await {
+            match context.transaction_tracker.begin(xid, context.client_addr).await {
                 Begin::New => {}
                 Begin::Replay(reply) => {
                     debug!(
@@ -86,9 +86,9 @@ async fn handle_rpc(
             if res.is_ok() {
                 context
                     .transaction_tracker
-                    .mark_processed(xid, &context.client_addr, output.clone());
+                    .mark_processed(xid, context.client_addr, output.clone());
             } else {
-                context.transaction_tracker.mark_failed(xid, &context.client_addr);
+                context.transaction_tracker.mark_failed(xid, context.client_addr);
             }
         }
         res

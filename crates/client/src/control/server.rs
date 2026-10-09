@@ -135,7 +135,7 @@ async fn answer(space: &Space, mount: &Registration, request: Request) -> anyhow
             with_ok(serde_json::from_slice(&value)?)
         }
         Request::Pin { path } => {
-            space.kept.pin(&relative(mount, &path)?)?;
+            space.kept.pin(space, &relative(mount, &path)?).await?;
             Ok(json!({"ok":true}))
         }
         Request::Unpin { path } => {

@@ -43,14 +43,18 @@ fn wait_ready(lab: &Lab, root: &str) -> Result<()> {
     }
 }
 
-fn wait_error(path: &Path) -> Result<Value> {
+fn wait_rename(lab: &Lab, old: &str, new: &str) -> Result<(Value, Value)> {
     let deadline = Instant::now() + WAIT;
     loop {
-        let state = command("file", path)?;
-        if !state["error"].is_null() {
-            return Ok(state);
+        let old = command("file", &lab.mount_path("b").join(old))?;
+        let new = command("file", &lab.mount_path("b").join(new))?;
+        if !old["error"].is_null() || new["kept"] == true {
+            return Ok((old, new));
         }
-        ensure!(Instant::now() < deadline, "renamed pin did not settle: {state}");
+        ensure!(
+            Instant::now() < deadline,
+            "renamed pin did not settle: old={old}, new={new}"
+        );
         thread::sleep(Duration::from_millis(50));
     }
 }
@@ -69,7 +73,6 @@ fn pin_folder(lab: &Lab, name: &str) -> Result<()> {
 /// turn a kept folder into an errored old-path pin while the same entry at its new path is unkept.
 // contract: P4, C7
 #[test]
-#[ignore = "ROUND57: kept folder remains pinned at its deleted path after rename"]
 fn round57_kept_folder_follows_its_rename() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");
@@ -96,10 +99,14 @@ fn round57_kept_folder_follows_its_rename() -> Result<()> {
         pin_folder(&lab, &old)?;
         fs::rename(lab.mount_path("a").join(&old), lab.mount_path("a").join(&new))?;
         command("pin", &lab.mount_path("b").join(&old))?;
-        let old_state = wait_error(&lab.mount_path("b").join(&old))?;
-        let new_state = command("file", &lab.mount_path("b").join(&new))?;
+        let (old_state, new_state) = wait_rename(&lab, &old, &new)?;
         eprintln!("trial {trial}: old={old_state}, new={new_state}");
-        failures += usize::from(new_state["kept"] != true || !new_state["error"].is_null());
+        failures += usize::from(
+            old_state["kept"] != false
+                || !old_state["error"].is_null()
+                || new_state["kept"] != true
+                || !new_state["error"].is_null(),
+        );
     }
     assert_eq!(failures, 0, "renamed kept roots that lost their pin, of 3");
     Ok(())

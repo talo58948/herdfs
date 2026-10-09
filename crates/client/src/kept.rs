@@ -10,7 +10,7 @@ use herdfs_core::proto::Version;
 use tokio::sync::Notify;
 
 use crate::fs::Space;
-use crate::lock;
+use crate::{Result, lock};
 
 const REFRESH: Duration = Duration::from_secs(60);
 
@@ -30,7 +30,7 @@ pub(crate) struct Kept {
 
 impl Kept {
     pub fn new(path: PathBuf, loaded: Loaded) -> Self {
-        let pending = loaded.saved.roots.clone();
+        let pending = loaded.saved.roots.keys().cloned().collect();
         Self {
             path,
             saved: Mutex::new(loaded.saved),
@@ -48,9 +48,23 @@ impl Kept {
         }
     }
 
-    pub fn pin(&self, path: &SpacePath) -> std::io::Result<()> {
+    pub async fn pin(&self, space: &Space, path: &SpacePath) -> Result<()> {
+        if lock(&self.saved).roots.contains_key(path) {
+            if lock(&self.errors).remove(path).is_some() {
+                lock(&self.pending).insert(path.clone());
+            }
+            self.wake.notify_one();
+            return Ok(());
+        }
+        let entry = space.remote.stat(path.clone()).await?;
         let added = self
-            .update(|saved| saved.roots.insert(path.clone()).then_some(()))?
+            .update(|saved| {
+                saved
+                    .roots
+                    .insert(path.clone(), Some(entry.id))
+                    .is_none()
+                    .then_some(())
+            })?
             .is_some();
         let retry = lock(&self.errors).remove(path).is_some();
         if added || retry {
@@ -63,10 +77,10 @@ impl Kept {
     pub fn unpin(&self, space: &Space, path: &SpacePath) -> std::io::Result<()> {
         let removed = self
             .update(|saved| {
-                if !saved.roots.remove(path) {
+                if saved.roots.remove(path).is_none() {
                     return None;
                 }
-                let roots = saved.roots.clone();
+                let roots: Vec<_> = saved.roots.keys().cloned().collect();
                 let paths: Vec<_> = saved
                     .files
                     .keys()
@@ -102,7 +116,7 @@ impl Kept {
             .sum();
         let pins = saved
             .roots
-            .iter()
+            .keys()
             .map(|root| {
                 let ready = !pending.contains(root)
                     && !errors.contains_key(root)
@@ -119,7 +133,11 @@ impl Kept {
 
     pub fn file(&self, path: &SpacePath) -> (bool, bool, Option<String>) {
         let saved = lock(&self.saved);
-        let roots: Vec<_> = saved.roots.iter().filter(|root| path.is_within(root)).collect();
+        let roots: Vec<_> = saved
+            .roots
+            .keys()
+            .filter(|root| path.is_within(root))
+            .collect();
         let downloading = saved.files.get(path).is_some_and(|file| !file.ready);
         let errors = lock(&self.errors);
         let error = roots.iter().find_map(|root| errors.get(*root).cloned());
@@ -130,7 +148,7 @@ impl Kept {
         let cached = version.chunks.iter().all(|chunk| space.cache.contains(&chunk.id));
         let _write = lock(&self.write);
         let mut saved = lock(&self.saved).clone();
-        if !saved.roots.iter().any(|root| path.is_within(root)) {
+        if !saved.roots.keys().any(|root| path.is_within(root)) {
             return Ok(None);
         }
         let Some(file) = saved.files.get_mut(path) else {

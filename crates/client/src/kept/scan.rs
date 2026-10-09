@@ -4,17 +4,47 @@ use std::time::Instant;
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{Entry, EntryId, Kind, Version};
 
-use super::Kept;
+use super::{Kept, unpin_file};
 use crate::fs::Space;
 use crate::version::OpenVersion;
 use crate::{Error, Result, lock};
 
 impl Kept {
     pub(super) async fn refresh(&self, space: &Space) {
-        let roots: Vec<_> = lock(&self.saved).roots.iter().cloned().collect();
+        let roots: Vec<_> = lock(&self.saved)
+            .roots
+            .iter()
+            .map(|(path, entry)| (path.clone(), *entry))
+            .collect();
         let mut entries = HashSet::new();
-        for root in roots {
-            match self.scan(space, &root).await {
+        for (saved_root, saved_entry) in roots {
+            let located = match saved_entry {
+                Some(entry) => space.remote.locate(entry).await,
+                None => space.remote.stat(saved_root.clone()).await,
+            };
+            let entry = match located {
+                Ok(entry) => entry,
+                Err(error) if error.is_not_found() => {
+                    if let Err(error) = self.unpin(space, &saved_root) {
+                        tracing::warn!(%error, root = %saved_root, "could not drop a deleted kept root");
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    entries.extend(space.inodes.within(&saved_root));
+                    if !error.is_offline() {
+                        self.set_error(&saved_root, Some(error.to_string()));
+                    }
+                    continue;
+                }
+            };
+            let root = entry.path.clone();
+            if let Err(error) = self.relocate(space, &saved_root, &root, entry.id) {
+                self.set_error(&saved_root, Some(error.to_string()));
+                entries.extend(space.inodes.within(&saved_root));
+                continue;
+            }
+            match self.scan(space, entry).await {
                 Ok((files, found)) => {
                     let seen = files.iter().map(|(path, _, _)| path.clone()).collect();
                     let mut error = None;
@@ -37,6 +67,50 @@ impl Kept {
             }
         }
         space.inodes.keep(entries);
+    }
+
+    fn relocate(
+        &self,
+        space: &Space,
+        from: &SpacePath,
+        to: &SpacePath,
+        entry: EntryId,
+    ) -> std::io::Result<()> {
+        let Some(replaced) = self.update(|saved| {
+            let known = saved.roots.get(from).copied()?;
+            if known.is_some_and(|known| known != entry) || from == to && known == Some(entry) {
+                return None;
+            }
+            saved.roots.remove(from);
+            saved.roots.insert(to.clone(), Some(entry));
+            let paths: Vec<_> = saved
+                .files
+                .keys()
+                .filter(|path| path.is_within(from))
+                .cloned()
+                .collect();
+            let mut replaced = Vec::new();
+            for path in paths {
+                let Some(rebased) = path.rebase(from, to) else {
+                    continue;
+                };
+                let Some(file) = saved.files.remove(&path) else {
+                    continue;
+                };
+                replaced.extend(saved.files.insert(rebased, file));
+            }
+            Some(replaced)
+        })? else {
+            return Ok(());
+        };
+        if lock(&self.pending).remove(from) {
+            lock(&self.pending).insert(to.clone());
+        }
+        if let Some(error) = lock(&self.errors).remove(from) {
+            lock(&self.errors).insert(to.clone(), error);
+        }
+        replaced.iter().for_each(|file| unpin_file(space, file));
+        Ok(())
     }
 
     async fn fetch(
@@ -75,10 +149,9 @@ impl Kept {
     async fn scan(
         &self,
         space: &Space,
-        root: &SpacePath,
+        entry: Entry,
     ) -> Result<(Vec<(SpacePath, Entry, Option<Version>)>, Vec<EntryId>)> {
         let asked = Instant::now();
-        let entry = space.remote.stat(root.clone()).await?;
         space.inodes.observe(&entry, asked, false);
         let mut stack = vec![entry];
         let mut files = Vec::new();

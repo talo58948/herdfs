@@ -74,7 +74,6 @@ fn non_zip(fake_eocd: bool) -> Vec<u8> {
 /// empty EOCD. They must use the first/last-window fallback instead of fetching the whole file.
 // contract: P3, C9
 #[test]
-#[ignore = "ROUND57: fake ZIP footer widens index prefetch to the whole file"]
 fn round57_fake_zip_footer_does_not_trigger_whole_file_prefetch() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");
