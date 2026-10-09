@@ -65,16 +65,38 @@ jobs:
           fi
       - name: Build lab binaries
         run: cargo build --workspace --bins
+      - name: Control restart diagnostic
+        env:
+          LAB_KEEP: 1
+          RUST_BACKTRACE: 1
+        run: |
+          status=0
+          cargo nextest run -p herdfs-lab --test control \
+            -E 'test(kept_folder_survives_restart_follows_heads_and_becomes_evictable)' \
+            --no-fail-fast || status=$?
+          if (( status != 0 )); then
+            find /tmp/herdfs-lab-* -maxdepth 4 -type f ! -name token -printf '%p\n'
+            while IFS= read -r -d '' log; do
+              echo "===== $log ====="
+              tail -n 200 "$log"
+            done < <(find /tmp/herdfs-lab-* -type f -name '*.log' -print0)
+            exit "$status"
+          fi
       - name: Lab suites
         run: |
           cargo nextest run -p herdfs-lab \
             --test smoke --test round_trip --test semantics --test faults \
-            --test cli --test plans --test local_issuer --test control
+            --test cli --test plans --test local_issuer --test control \
+            --no-fail-fast
       - name: fsx stream and chaos
         env:
           FSX_OPS: 20000
-        run: cargo nextest run -p herdfs-lab --test fsx -E 'test(stream) | test(chaos)'
+        run: |
+          cargo nextest run -p herdfs-lab --test fsx \
+            -E 'test(stream) | test(chaos)' --no-fail-fast
       - name: NFS suites
         env:
           LAB_MOUNT: nfs
-        run: cargo nextest run -p herdfs-lab --test nfs --test round_trip --test control
+        run: |
+          cargo nextest run -p herdfs-lab --test nfs --test round_trip --test control \
+            --no-fail-fast
