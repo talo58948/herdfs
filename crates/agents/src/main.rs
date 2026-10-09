@@ -70,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
         seen: HashMap::new(),
     };
     runner.recover().await?;
-    let interval = Duration::from_millis(args.poll_ms);
+    let interval = Duration::from_millis(args.poll_ms.min(1000));
     loop {
         tokio::select! {
             _ = terminate.recv() => break,

@@ -12,10 +12,15 @@ use crate::{Call, Result, acl::perm_from_name, refuse};
 
 const ROOT_MODE: u32 = 0o755;
 
-/// Copies the entries, head versions and ACL rows of space `?1` into the new space `?2`.
+/// Copies space `?1` into `?2`; ACL intervals precede heads so inherited access includes them.
 const FORK: [&str; 5] = [
     "INSERT INTO entries (space, path, kind, mode, mtime_ms, target)
      SELECT ?2, path, kind, mode, mtime_ms, target FROM entries WHERE space = ?1",
+    "INSERT INTO acl (space, path, principal, perm, granted_seq)
+     SELECT ?2, path, principal, perm, granted_seq FROM acl WHERE space = ?1",
+    "INSERT INTO acl_history (space, path, principal, granted_version)
+     SELECT space, path, principal, coalesce((SELECT max(id) FROM versions), 0)
+     FROM acl WHERE space = ?2",
     "INSERT INTO versions (entry, size, author, created_ms, manifest)
      SELECT copy.id, head.size, head.author, head.created_ms, head.manifest
      FROM entries source JOIN versions head ON head.id = source.head
@@ -23,11 +28,6 @@ const FORK: [&str; 5] = [
      WHERE source.space = ?1",
     "UPDATE entries SET head = (SELECT id FROM versions WHERE entry = entries.id)
      WHERE space = ?2",
-    "INSERT INTO acl (space, path, principal, perm, granted_seq)
-     SELECT ?2, path, principal, perm, granted_seq FROM acl WHERE space = ?1",
-    "INSERT INTO acl_history (space, path, principal, granted_version)
-     SELECT space, path, principal, coalesce((SELECT max(id) FROM versions), 0)
-     FROM acl WHERE space = ?2",
 ];
 
 /// `[a-z0-9][a-z0-9._-]{0,62}`
