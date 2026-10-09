@@ -10,6 +10,29 @@ use crate::version::OpenVersion;
 use crate::{Error, Result, lock};
 
 impl Kept {
+    pub(super) async fn heads_changed(&self, space: &Space) -> bool {
+        let files: Vec<_> = lock(&self.saved)
+            .files
+            .iter()
+            .map(|(path, file)| (path.clone(), file.current.id))
+            .collect();
+        for (path, version) in files {
+            let asked = Instant::now();
+            match space.remote.stat(path).await {
+                Ok(entry) => {
+                    let changed = entry.head != Some(version);
+                    space.inodes.observe(&entry, asked, false);
+                    if changed {
+                        return true;
+                    }
+                }
+                Err(error) if error.is_offline() => return false,
+                Err(_) => continue,
+            }
+        }
+        false
+    }
+
     pub(super) async fn refresh(&self, space: &Space) {
         let roots: Vec<_> = lock(&self.saved)
             .roots
@@ -69,7 +92,7 @@ impl Kept {
         space.inodes.keep(entries);
     }
 
-    fn relocate(
+    pub(super) fn relocate(
         &self,
         space: &Space,
         from: &SpacePath,
