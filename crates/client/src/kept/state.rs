@@ -2,14 +2,31 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
-use herdfs_core::proto::Version;
+use herdfs_core::proto::{EntryId, Version};
 use herdfs_core::{ChunkId, SpacePath};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(super) struct Saved {
-    pub roots: BTreeSet<SpacePath>,
+    #[serde(default, deserialize_with = "roots")]
+    pub roots: BTreeMap<SpacePath, Option<EntryId>>,
     pub files: BTreeMap<SpacePath, SavedFile>,
+}
+
+fn roots<'de, D>(deserializer: D) -> Result<BTreeMap<SpacePath, Option<EntryId>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Roots {
+        Current(BTreeMap<SpacePath, Option<EntryId>>),
+        Legacy(BTreeSet<SpacePath>),
+    }
+    Ok(match Roots::deserialize(deserializer)? {
+        Roots::Current(roots) => roots,
+        Roots::Legacy(roots) => roots.into_iter().map(|path| (path, None)).collect(),
+    })
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -50,4 +67,22 @@ pub(super) fn persist(path: &Path, saved: &Saved) -> std::io::Result<()> {
     temp.as_file().sync_all()?;
     temp.persist(path).map_err(|error| error.error)?;
     fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // contract: P4, C7
+    #[test]
+    fn path_only_pins_migrate_and_entry_ids_round_trip() {
+        let mut saved: Saved = serde_json::from_str(r#"{"roots":["kept"],"files":{}}"#).unwrap();
+        let path = SpacePath::try_from("kept").unwrap();
+        assert_eq!(saved.roots.get(&path), Some(&None));
+
+        saved.roots.insert(path.clone(), Some(EntryId(7)));
+        let encoded = serde_json::to_vec(&saved).unwrap();
+        let restored: Saved = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(restored.roots.get(&path), Some(&Some(EntryId(7))));
+    }
 }

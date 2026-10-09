@@ -56,6 +56,13 @@ impl Rpc {
         Ok((status, size))
     }
 
+    pub fn lookup(&mut self, directory: &[u8], name: &str) -> Result<u32> {
+        let mut args = Vec::new();
+        opaque(&mut args, directory);
+        opaque(&mut args, name.as_bytes());
+        status(&self.call(3, &args)?)
+    }
+
     pub fn read(&mut self, handle: &[u8], offset: u64, count: u32) -> Result<(u32, Vec<u8>)> {
         let mut args = Vec::new();
         opaque(&mut args, handle);
@@ -138,6 +145,22 @@ impl Rpc {
         }
         let _eof = input.u32()?;
         Ok(entries)
+    }
+
+    pub fn remove_replayed(&mut self, directory: &[u8], name: &str, reconnect: bool) -> Result<[u32; 2]> {
+        let xid = self.next_xid();
+        let mut call = rpc_header(xid, 12, 1);
+        opaque(&mut call, directory);
+        opaque(&mut call, name.as_bytes());
+        if reconnect {
+            return Ok([status(&self.send(&call)?)?, status(&self.send(&call)?)?]);
+        }
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port))?;
+        send_record(&mut stream, &call)?;
+        let first = status(&read_record(&mut stream)?)?;
+        send_record(&mut stream, &call)?;
+        let second = status(&read_record(&mut stream)?)?;
+        Ok([first, second])
     }
 
     pub fn auth_null(&mut self) -> Result<Vec<u8>> {

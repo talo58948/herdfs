@@ -1,4 +1,5 @@
 use std::collections::{hash_map, HashMap};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -7,7 +8,7 @@ use tokio::sync::Notify;
 /// `TransactionTracker` tracks the state of transactions to detect retransmissions.
 pub struct TransactionTracker {
     retention_period: Duration,
-    transactions: Mutex<HashMap<(u32, String), TransactionState>>,
+    transactions: Mutex<HashMap<(u32, IpAddr), TransactionState>>,
 }
 
 impl TransactionTracker {
@@ -21,15 +22,15 @@ impl TransactionTracker {
     /// Checks if the transaction is a retransmission.
     /// If it's a new transaction, it is marked as `InProgress`.
     ///
-    pub async fn begin(&self, xid: u32, client_addr: &str) -> Begin {
-        let key = (xid, client_addr.to_string());
+    pub async fn begin(&self, xid: u32, client_addr: IpAddr) -> Begin {
+        let key = (xid, client_addr);
         loop {
             let (notified, wait) = {
                 let mut transactions = self
                     .transactions
                     .lock()
                     .expect("unable to unlock transactions mutex");
-                let finished = match transactions.entry(key.clone()) {
+                let finished = match transactions.entry(key) {
                     hash_map::Entry::Vacant(entry) => {
                         entry.insert(TransactionState::InProgress {
                             started: Instant::now(),
@@ -58,16 +59,16 @@ impl TransactionTracker {
     }
 
     /// Marks the transaction as processed.
-    pub fn mark_processed(&self, xid: u32, client_addr: &str, reply: Vec<u8>) {
+    pub fn mark_processed(&self, xid: u32, client_addr: IpAddr, reply: Vec<u8>) {
         self.finish(xid, client_addr, Some(reply));
     }
 
-    pub fn mark_failed(&self, xid: u32, client_addr: &str) {
+    pub fn mark_failed(&self, xid: u32, client_addr: IpAddr) {
         self.finish(xid, client_addr, None);
     }
 
-    fn finish(&self, xid: u32, client_addr: &str, reply: Option<Vec<u8>>) {
-        let key = (xid, client_addr.to_string());
+    fn finish(&self, xid: u32, client_addr: IpAddr, reply: Option<Vec<u8>>) {
+        let key = (xid, client_addr);
         let mut transactions = self
             .transactions
             .lock()
@@ -116,14 +117,18 @@ pub enum TransactionState {
 mod tests {
     use super::*;
 
+    fn client() -> IpAddr {
+        "127.0.0.1".parse().unwrap()
+    }
+
     // contract: M1
     #[tokio::test]
     async fn duplicate_xid_replays_the_first_encoded_reply() {
         let tracker = TransactionTracker::new(Duration::from_secs(60));
-        assert!(matches!(tracker.begin(7, "client").await, Begin::New));
-        tracker.mark_processed(7, "client", vec![1, 2, 3]);
+        assert!(matches!(tracker.begin(7, client()).await, Begin::New));
+        tracker.mark_processed(7, client(), vec![1, 2, 3]);
         assert!(matches!(
-            tracker.begin(7, "client").await,
+            tracker.begin(7, client()).await,
             Begin::Replay(reply) if reply == vec![1, 2, 3]
         ));
     }
@@ -132,14 +137,14 @@ mod tests {
     #[tokio::test]
     async fn duplicate_in_progress_waits_for_the_reply() {
         let tracker = Arc::new(TransactionTracker::new(Duration::from_secs(60)));
-        assert!(matches!(tracker.begin(9, "client").await, Begin::New));
+        assert!(matches!(tracker.begin(9, client()).await, Begin::New));
         let duplicate = tokio::spawn({
             let tracker = tracker.clone();
-            async move { tracker.begin(9, "client").await }
+            async move { tracker.begin(9, client()).await }
         });
         tokio::task::yield_now().await;
         assert!(!duplicate.is_finished());
-        tracker.mark_processed(9, "client", vec![4, 5]);
+        tracker.mark_processed(9, client(), vec![4, 5]);
         assert!(matches!(
             duplicate.await.unwrap(),
             Begin::Replay(reply) if reply == vec![4, 5]
@@ -150,17 +155,17 @@ mod tests {
     #[tokio::test]
     async fn an_old_in_progress_request_is_not_run_again() {
         let tracker = TransactionTracker::new(Duration::from_millis(1));
-        assert!(matches!(tracker.begin(11, "client").await, Begin::New));
+        assert!(matches!(tracker.begin(11, client()).await, Begin::New));
         tokio::time::sleep(Duration::from_millis(2)).await;
-        assert!(matches!(tracker.begin(11, "client").await, Begin::Drop));
+        assert!(matches!(tracker.begin(11, client()).await, Begin::Drop));
     }
 
     // contract: M1
     #[tokio::test]
     async fn a_failed_request_is_not_cached() {
         let tracker = TransactionTracker::new(Duration::from_secs(60));
-        assert!(matches!(tracker.begin(13, "client").await, Begin::New));
-        tracker.mark_failed(13, "client");
-        assert!(matches!(tracker.begin(13, "client").await, Begin::New));
+        assert!(matches!(tracker.begin(13, client()).await, Begin::New));
+        tracker.mark_failed(13, client());
+        assert!(matches!(tracker.begin(13, client()).await, Begin::New));
     }
 }

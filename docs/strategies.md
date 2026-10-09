@@ -51,7 +51,10 @@ The default `rule` uses `whole/none/no` for files smaller than 64 MiB and `none/
 - MP4 uses a `moov` box found among the first four top-level boxes, beginning with an `ftyp` box.
 - Unknown or malformed input falls back to the first and last two chunks.
 
-The probe reads bounded headers and tails. The resulting chunks use the ordinary grant, hash verification and cache path.
+Declared index regions larger than 8 MiB are treated as malformed. ZIP central directories must
+also begin with their expected signature. Including format probes, chunk boundaries and the
+first/last-window fallback, `index` prefetch can fetch at most 36 MiB. The resulting chunks use the
+ordinary grant, hash verification and cache path.
 
 ## Jev
 

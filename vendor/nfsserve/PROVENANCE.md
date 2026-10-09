@@ -17,7 +17,8 @@ HerdFS carries these local changes required by its loopback NFSv3 adapter:
 - use the existing adapter-defined `id_to_fh`/`fh_to_id` hooks for stable
   handles instead of the default process-generation handles;
 - retain and replay successful duplicate-XID replies for non-idempotent calls,
-  while duplicate requests already in progress wait for that first reply;
+  while duplicate requests already in progress wait for that first reply; key
+  them by client IP rather than its ephemeral TCP port so reconnects replay;
 - serialize WRITE, COMMIT and SETATTR per file handle without blocking reads or
   namespace calls for that handle or any other;
 - advertise AUTH_UNIX alone for the loopback export and the POSIX 255-byte
