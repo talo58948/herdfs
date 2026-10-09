@@ -163,6 +163,28 @@ impl Rpc {
         Ok([first, second])
     }
 
+    pub fn remove_xid(&self, directory: &[u8], name: &str, xid: u32) -> Result<u32> {
+        let mut call = rpc_header(xid, 12, 1);
+        opaque(&mut call, directory);
+        opaque(&mut call, name.as_bytes());
+        status(&self.send(&call)?)
+    }
+
+    pub fn create_exclusive_xid(
+        &self,
+        directory: &[u8],
+        name: &str,
+        verifier: [u8; 8],
+        xid: u32,
+    ) -> Result<u32> {
+        let mut call = rpc_header(xid, 8, 1);
+        opaque(&mut call, directory);
+        opaque(&mut call, name.as_bytes());
+        call.extend_from_slice(&2_u32.to_be_bytes());
+        call.extend_from_slice(&verifier);
+        status(&self.send(&call)?)
+    }
+
     pub fn auth_null(&mut self) -> Result<Vec<u8>> {
         let xid = self.next_xid();
         let call = rpc_header(xid, 1, 0);
