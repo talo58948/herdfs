@@ -1,19 +1,7 @@
 name: Linux
 
 on:
-  push:
-    branches: [main, v0.1, 'v01-*', 'fix*']
-    paths:
-      - crates/**
-      - vendor/**
-      - Cargo.*
-      - .github/workflows/linux.yml
-  pull_request:
-    paths:
-      - crates/**
-      - vendor/**
-      - Cargo.*
-      - .github/workflows/linux.yml
+  # Manual only: builds and tests run on the CI host (CI); this is a fallback.
   workflow_dispatch:
 
 permissions:
