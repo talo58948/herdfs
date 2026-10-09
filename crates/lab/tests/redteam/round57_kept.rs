@@ -43,7 +43,7 @@ fn wait_ready(lab: &Lab, root: &str) -> Result<()> {
     }
 }
 
-fn wait_error(lab: &Lab, path: &Path) -> Result<Value> {
+fn wait_error(path: &Path) -> Result<Value> {
     let deadline = Instant::now() + WAIT;
     loop {
         let state = command("file", path)?;
@@ -95,7 +95,7 @@ fn round57_kept_folder_follows_its_rename() -> Result<()> {
         pin_folder(&lab, &old)?;
         fs::rename(lab.mount_path("a").join(&old), lab.mount_path("a").join(&new))?;
         command("pin", &lab.mount_path("b").join(&old))?;
-        let old_state = wait_error(&lab, &lab.mount_path("b").join(&old))?;
+        let old_state = wait_error(&lab.mount_path("b").join(&old))?;
         let new_state = command("file", &lab.mount_path("b").join(&new))?;
         eprintln!("trial {trial}: old={old_state}, new={new_state}");
         failures += usize::from(new_state["kept"] != true || !new_state["error"].is_null());
