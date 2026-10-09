@@ -1,11 +1,12 @@
 //! Round 69: kept-downloaded accounting while a newer version downloads.
 
+use std::fs::{self, File};
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, ensure};
-use herdfs_lab::{Lab, LabConfig, Profile, Strategy, herdfs_command};
+use herdfs_lab::{Lab, LabConfig, Links, Profile, Strategy, herdfs_command};
 use serde_json::Value;
 
 use crate::{VISIBLE_AFTER, random_bytes, save};
@@ -118,5 +119,59 @@ fn round69_kept_use_counts_the_retired_download_version() -> Result<()> {
         failures += usize::from(differed);
     }
     assert_eq!(failures, 0, "refreshes that under-reported kept use, of 3");
+    Ok(())
+}
+
+/// An empty committed-version file controls three untouched empty files. Ready means all four
+/// are known and readable without consulting the authority, including files with no first commit.
+// contract: P4, C12
+#[test]
+#[ignore = "ROUND69: ready pins cannot read never-written empty files offline"]
+fn round69_ready_pin_reads_never_written_empty_files_offline() -> Result<()> {
+    if std::env::var("LAB_MOUNT").as_deref() == Ok("nfs") {
+        eprintln!("skipped: the default-mount probe runs separately from NFS");
+        return Ok(());
+    }
+    if let Some(reason) = herdfs_lab::missing_binaries() {
+        eprintln!("skipped: {reason}");
+        return Ok(());
+    }
+    let lab = Lab::start(
+        LabConfig::default()
+            .client("a", "alice", &[], Profile::Lan, Strategy::Stream)
+            .client("b", "bob", &[], Profile::Lan, Strategy::Stream),
+    )?;
+    let root_a = lab.mount_path("a").join("kept-empty");
+    let root_b = lab.mount_path("b").join("kept-empty");
+    fs::create_dir(&root_a)?;
+    let control = root_a.join("committed-empty");
+    save(&control, b"first")?;
+    let control = File::create(control)?;
+    control.sync_all()?;
+    drop(control);
+    for trial in 0..3 {
+        drop(File::create(root_a.join(format!("never-written-{trial}")))?);
+    }
+    lab.wait_committed("a")?;
+    thread::sleep(VISIBLE_AFTER);
+    command("pin", &root_b)?;
+    wait_ready(&lab)?;
+
+    lab.cut("b", Links::Both)?;
+    ensure!(
+        fs::read(root_b.join("committed-empty"))?.is_empty(),
+        "committed empty-file control was not readable offline"
+    );
+    let mut failures = 0;
+    for trial in 0..3 {
+        let result = fs::read(root_b.join(format!("never-written-{trial}")));
+        let empty = result.as_ref().is_ok_and(Vec::is_empty);
+        eprintln!(
+            "trial {trial}: never-written empty file offline={empty}, result={:?}",
+            result.as_ref().map(Vec::len)
+        );
+        failures += usize::from(!empty);
+    }
+    assert_eq!(failures, 0, "ready empty files unreadable offline, of 3");
     Ok(())
 }
