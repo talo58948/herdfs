@@ -157,5 +157,8 @@ fn copied_access_keeps_the_forks_initial_version_visible() {
         hidden += usize::from(!visible);
         assert!(late_hidden, "late-grant control {trial}");
     }
-    assert_eq!(hidden, 0, "{hidden}/3 inherited grants lost the fork's first version");
+    assert_eq!(
+        hidden, 0,
+        "{hidden}/3 inherited grants lost the fork's first version"
+    );
 }
