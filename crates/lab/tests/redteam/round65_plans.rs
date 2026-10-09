@@ -82,7 +82,6 @@ fn invalid_mp4() -> Vec<u8> {
 /// four-byte child box. Invalid candidates must use the fallback instead of prefetching that box.
 // contract: P3, C9
 #[test]
-#[ignore = "ROUND65: malformed MP4 moov boxes widen index prefetch"]
 fn round65_invalid_mp4_index_does_not_widen_prefetch() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");

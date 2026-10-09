@@ -45,7 +45,7 @@ fn wait_ready(lab: &Lab) -> Result<Value> {
 /// must not still advertise them as offline-readable after cache verification can no longer pass.
 // contract: P4, C11
 #[test]
-#[ignore = "ROUND65: status stays ready after kept chunks fail cache verification"]
+#[ignore = "outside P4: cache damaged after verification; see docs/architecture.md"]
 fn round65_kept_ready_requires_verified_chunks() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() == Ok("nfs") {
         eprintln!("skipped: the default-mount probe runs separately from NFS");

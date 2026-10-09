@@ -127,21 +127,65 @@ impl Reader {
     ) -> Result<Option<Range<u64>>> {
         let (mut offset, size, mut header) = (0, file.version.size, first);
         for remaining in (0..BOX_PROBES).rev() {
-            let Some((kind, range)) = mp4_box(offset, size, &header) else {
+            let Some((kind, range, header_len)) = mp4_box(offset, size, &header) else {
                 return Ok(None);
             };
             if kind == *b"moov" {
-                return Ok(Some(range));
+                return Ok(self
+                    .valid_moov(file, &range, header_len, fetched)
+                    .await?
+                    .then_some(range));
             }
             offset = range.end;
             if offset >= size || remaining == 0 {
                 return Ok(None);
             }
-            header = self
-                .read(file, offset, BOX_HEADER.min(size - offset), Some(fetched))
-                .await?;
+            // An untrusted box length must not widen the fallback just to find the next header.
+            let Some(next) = self.cached_range(file, offset, BOX_HEADER.min(size - offset)) else {
+                return Ok(None);
+            };
+            header = next;
         }
         Ok(None)
+    }
+
+    async fn valid_moov(
+        &self,
+        file: &OpenVersion,
+        range: &Range<u64>,
+        header_len: u64,
+        fetched: &AtomicU64,
+    ) -> Result<bool> {
+        let Some(mut offset) = range.start.checked_add(header_len) else {
+            return Ok(false);
+        };
+        let mut has_mvhd = false;
+        while offset < range.end {
+            let Some(remaining) = range.end.checked_sub(offset) else {
+                return Ok(false);
+            };
+            if remaining < 8 {
+                return Ok(false);
+            }
+            let header = self
+                .read(file, offset, BOX_HEADER.min(remaining), Some(fetched))
+                .await?;
+            let Some((kind, child, _)) = mp4_box(offset, range.end, &header) else {
+                return Ok(false);
+            };
+            has_mvhd |= kind == *b"mvhd";
+            offset = child.end;
+        }
+        Ok(has_mvhd)
+    }
+
+    fn cached_range(&self, file: &OpenVersion, off: u64, len: u64) -> Option<Vec<u8>> {
+        let mut bytes = Vec::new();
+        for index in file.overlapping(off, len) {
+            let chunk = self.cached(&file.id(index))?;
+            bytes.extend_from_slice(chunk.get(file.within(index, off, len))?);
+        }
+        Some(bytes)
     }
 
     async fn prefetch_range(&self, file: &OpenVersion, range: Range<u64>, fetched: &AtomicU64) -> Result<()> {
@@ -227,17 +271,21 @@ fn mp4_header(header: &[u8]) -> bool {
     header.get(4..8) == Some(b"ftyp")
 }
 
-fn mp4_box(offset: u64, file_size: u64, header: &[u8]) -> Option<([u8; 4], Range<u64>)> {
+fn mp4_box(offset: u64, parent_end: u64, header: &[u8]) -> Option<([u8; 4], Range<u64>, u64)> {
     let kind = header.get(4..8)?.try_into().ok()?;
     let short = u32::from_be_bytes(header.get(..4)?.try_into().ok()?);
     let len = match short {
-        0 => file_size.checked_sub(offset)?,
+        0 => parent_end.checked_sub(offset)?,
         1 => u64::from_be_bytes(header.get(8..16)?.try_into().ok()?),
         len => u64::from(len),
     };
     let header_len = if short == 1 { 16 } else { 8 };
     let end = offset.checked_add(len)?;
-    (len >= header_len && len <= MAX_INDEX_REGION && end <= file_size).then_some((kind, offset..end))
+    (len >= header_len && len <= MAX_INDEX_REGION && end <= parent_end).then_some((
+        kind,
+        offset..end,
+        header_len,
+    ))
 }
 
 #[cfg(test)]

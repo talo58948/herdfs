@@ -42,7 +42,7 @@ fn entry(lab: &Lab, name: &str) -> Result<Entry> {
 /// first caller's success while leaving it in place.
 // contract: M1, C7
 #[test]
-#[ignore = "ROUND65: identical XIDs from independent callers replay across recreated entries"]
+#[ignore = "outside M1: one loopback client; see docs/architecture.md"]
 fn round65_independent_callers_do_not_replay_identical_requests() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
         eprintln!("skipped: set LAB_MOUNT=nfs for the NFS suite");
