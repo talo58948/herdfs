@@ -59,8 +59,7 @@ impl Source {
             }
             Stored::Login(token) => Some(token.generation),
         };
-        let token_lock = self.path.with_extension("lock");
-        let token_guard = lock(token_lock.clone()).await?;
+        let _lock = lock(self.path.with_extension("lock")).await?;
         *stored = read(&self.path)?;
         let Stored::Login(token) = &*stored else {
             return stored.access();
@@ -75,20 +74,9 @@ impl Source {
             ("refresh_token", token.refresh_token.as_str()),
             ("client_id", token.client_id.as_str()),
         ];
-        let started_generation = token.generation;
-        let started_refresh = token.refresh_token.clone();
-        let endpoint = token.token_endpoint.clone();
         let expires_at = token.expires_at;
-        drop(token_guard);
-        let refreshed = exchange(http, &endpoint, &form, Some(&started_refresh)).await;
-        let _lock = lock(token_lock).await?;
-        *stored = read(&self.path)?;
-        let Stored::Login(token) = &*stored else {
-            return stored.access();
-        };
-        if token.generation != started_generation {
-            return Ok(token.access_token.clone());
-        }
+        let generation = token.generation;
+        let refreshed = exchange(http, &token.token_endpoint, &form, Some(&token.refresh_token)).await;
         let mut refreshed = match refreshed {
             Ok(refreshed) => refreshed,
             Err(_) if !force_refresh && now() < expires_at => {
@@ -96,7 +84,7 @@ impl Source {
             }
             Err(error) => return Err(error),
         };
-        refreshed.generation = write(&self.path, &refreshed, started_generation)?;
+        refreshed.generation = write(&self.path, &refreshed, generation)?;
         let access = refreshed.access_token.clone();
         *stored = Stored::Login(refreshed);
         Ok(access)

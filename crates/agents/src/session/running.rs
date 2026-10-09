@@ -1,7 +1,6 @@
 //! Host-local identity for process groups that outlive a crashed runner.
 
 use std::fs::{self, OpenOptions};
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -98,20 +97,13 @@ pub(super) fn stop_previous(session: &Session) -> io::Result<()> {
 
 fn state_path(session: &Session) -> io::Result<PathBuf> {
     let metadata = session.file.metadata()?;
-    let mut path_hash = DefaultHasher::new();
-    session.dir.hash(&mut path_hash);
     let root = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(
         || std::env::temp_dir().join(format!("herdfs-agents-{}", metadata.uid())),
         |dir| PathBuf::from(dir).join("herdfs-agents"),
     );
     fs::create_dir_all(&root)?;
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
-    Ok(root.join(format!(
-        "{:016x}-{}-{}",
-        path_hash.finish(),
-        metadata.dev(),
-        metadata.ino()
-    )))
+    Ok(root.join(format!("{}-{}", metadata.dev(), metadata.ino())))
 }
 
 fn remove(path: &Path) -> io::Result<()> {
