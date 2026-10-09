@@ -16,21 +16,16 @@ use axum::{
 };
 use serde_json::json;
 use tokio::process::Command;
-use tokio::sync::Barrier;
 
 async fn services() -> (String, String, Arc<AtomicUsize>) {
     let refreshes = Arc::new(AtomicUsize::new(0));
-    let barrier = Arc::new(Barrier::new(3));
     let token_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let token_endpoint = format!("http://{}/token", token_listener.local_addr().unwrap());
     let token = post({
         let refreshes = Arc::clone(&refreshes);
-        let barrier = Arc::clone(&barrier);
         move || {
             let request = refreshes.fetch_add(1, Ordering::SeqCst);
-            let barrier = Arc::clone(&barrier);
             async move {
-                barrier.wait().await;
                 if request == 0 {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     return (
@@ -117,7 +112,6 @@ async fn race(authority: &str, token: &Path) -> Vec<Output> {
 /// refresh supplies every concurrent caller instead of exposing the issuer's single-use race.
 // contract: U1
 #[tokio::test]
-#[ignore = "ROUND72: concurrent processes submit the same rotating refresh token"]
 async fn concurrent_commands_share_one_rotating_refresh() {
     let mut failed_waves = 0;
     for trial in 0..3 {
@@ -131,7 +125,7 @@ async fn concurrent_commands_share_one_rotating_refresh() {
         failed_waves += usize::from(succeeded != 3);
         assert_eq!(
             refreshes.load(Ordering::SeqCst),
-            3,
+            1,
             "refresh attempts in trial {trial}"
         );
 
@@ -142,7 +136,7 @@ async fn concurrent_commands_share_one_rotating_refresh() {
         );
         assert_eq!(
             refreshes.load(Ordering::SeqCst),
-            3,
+            1,
             "control refreshed in trial {trial}"
         );
         eprintln!("trial {trial}: {succeeded}/3 concurrent commands succeeded");

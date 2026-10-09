@@ -91,7 +91,6 @@ fn kill(pid: &str) {
 /// strand its live process group behind the replacement runner's terminal failure status.
 // contract: A2
 #[test]
-#[ignore = "ROUND72: renamed sessions evade crash recovery and strand their process groups"]
 fn renamed_running_sessions_remain_contained_across_restart() {
     let mount = TempDir::new().unwrap();
     let control = session(mount.path(), "control");
