@@ -79,13 +79,41 @@ impl Reader {
                 None => self.prefetch_edges(file, fetched).await,
             };
         }
-        if let Some(range) = zip(size, tail_start, &tail) {
-            let signature = self.read(file, range.start, 4, Some(fetched)).await?;
-            if signature == b"PK\x01\x02" {
-                return self.prefetch_range(file, range, fetched).await;
-            }
+        if let Some(directory) = zip(size, tail_start, &tail)
+            && self.zip_directory(file, &directory, fetched).await?
+        {
+            return self.prefetch_range(file, directory.range, fetched).await;
         }
         self.prefetch_edges(file, fetched).await
+    }
+
+    async fn zip_directory(
+        &self,
+        file: &OpenVersion,
+        directory: &ZipDirectory,
+        fetched: &AtomicU64,
+    ) -> Result<bool> {
+        let mut offset = directory.range.start;
+        for _ in 0..directory.entries {
+            let Some(remaining) = directory.range.end.checked_sub(offset) else {
+                return Ok(false);
+            };
+            if remaining < ZIP_ENTRY_HEADER {
+                return Ok(false);
+            }
+            let header = self.read(file, offset, ZIP_ENTRY_HEADER, Some(fetched)).await?;
+            let Some(len) = zip_entry_len(&header) else {
+                return Ok(false);
+            };
+            let Some(end) = offset.checked_add(len) else {
+                return Ok(false);
+            };
+            if end > directory.range.end {
+                return Ok(false);
+            }
+            offset = end;
+        }
+        Ok(offset == directory.range.end)
     }
 
     async fn mp4(
@@ -144,16 +172,50 @@ fn parquet(size: u64, tail: &[u8]) -> Option<Range<u64>> {
     Some(start..size)
 }
 
-fn zip(size: u64, tail_start: u64, tail: &[u8]) -> Option<Range<u64>> {
+const ZIP_ENTRY_HEADER: u64 = 46;
+
+#[derive(Debug, PartialEq, Eq)]
+struct ZipDirectory {
+    range: Range<u64>,
+    entries: u16,
+}
+
+fn zip(size: u64, tail_start: u64, tail: &[u8]) -> Option<ZipDirectory> {
     let eocd = tail.windows(4).rposition(|bytes| bytes == b"PK\x05\x06")?;
     let record = tail.get(eocd..eocd + 22)?;
+    let disk = u16::from_le_bytes(record.get(4..6)?.try_into().ok()?);
+    let central_disk = u16::from_le_bytes(record.get(6..8)?.try_into().ok()?);
+    let disk_entries = u16::from_le_bytes(record.get(8..10)?.try_into().ok()?);
+    let entries = u16::from_le_bytes(record.get(10..12)?.try_into().ok()?);
     let central_len = u32::from_le_bytes(record.get(12..16)?.try_into().ok()?) as u64;
     let central_start = u32::from_le_bytes(record.get(16..20)?.try_into().ok()?) as u64;
+    let comment_len = u16::from_le_bytes(record.get(20..22)?.try_into().ok()?) as u64;
     let central_end = central_start.checked_add(central_len)?;
     let eocd_start = tail_start + eocd as u64;
-    let index_len = size.checked_sub(central_start)?;
-    (central_len >= 4 && index_len <= MAX_INDEX_REGION && central_end <= eocd_start && eocd_start < size)
-        .then_some(central_start..size)
+    let eocd_end = eocd_start.checked_add(22)?.checked_add(comment_len)?;
+    let headers_len = u64::from(entries).checked_mul(ZIP_ENTRY_HEADER)?;
+    (disk == 0
+        && central_disk == 0
+        && disk_entries == entries
+        && (entries != 0 || central_len == 0)
+        && central_len >= headers_len
+        && central_len <= MAX_INDEX_REGION
+        && central_end == eocd_start
+        && eocd_end == size)
+        .then_some(ZipDirectory {
+            range: central_start..central_end,
+            entries,
+        })
+}
+
+fn zip_entry_len(header: &[u8]) -> Option<u64> {
+    if header.get(..4)? != b"PK\x01\x02" {
+        return None;
+    }
+    let name = u16::from_le_bytes(header.get(28..30)?.try_into().ok()?);
+    let extra = u16::from_le_bytes(header.get(30..32)?.try_into().ok()?);
+    let comment = u16::from_le_bytes(header.get(32..34)?.try_into().ok()?);
+    Some(ZIP_ENTRY_HEADER + u64::from(name) + u64::from(extra) + u64::from(comment))
 }
 
 fn mp4_header(header: &[u8]) -> bool {
@@ -174,62 +236,5 @@ fn mp4_box(offset: u64, file_size: u64, header: &[u8]) -> Option<([u8; 4], Range
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // contract: P3, C9
-    #[test]
-    fn parquet_footer_is_the_index() {
-        let file = [b"PAR1data".as_slice(), b"meta", &4u32.to_le_bytes(), b"PAR1"].concat();
-        assert_eq!(parquet(file.len() as u64, &file), Some(8..20));
-    }
-
-    // contract: P3, C9
-    #[test]
-    fn zip_central_directory_through_eocd_is_the_index() {
-        let mut file = b"payloadPK\x01\x02RAL".to_vec();
-        let central = 7u32;
-        let len = 7u32;
-        file.extend_from_slice(b"PK\x05\x06\0\0\0\0\0\0\0\0");
-        file.extend_from_slice(&len.to_le_bytes());
-        file.extend_from_slice(&central.to_le_bytes());
-        file.extend_from_slice(&[0, 0]);
-        assert_eq!(zip(file.len() as u64, 0, &file), Some(7..file.len() as u64));
-    }
-
-    // contract: P3, C9
-    #[test]
-    fn oversized_format_indexes_are_rejected() {
-        let parquet_tail = [((MAX_INDEX_REGION - 7) as u32).to_le_bytes().as_slice(), b"PAR1"].concat();
-        assert_eq!(parquet(MAX_INDEX_REGION + 8, &parquet_tail), None);
-
-        let mp4 = [((MAX_INDEX_REGION + 1) as u32).to_be_bytes().as_slice(), b"moov"].concat();
-        assert_eq!(mp4_box(0, MAX_INDEX_REGION + 1, &mp4), None);
-    }
-
-    // contract: P3, C9
-    #[test]
-    fn mp4_walk_finds_moov() {
-        let file = [
-            12u32.to_be_bytes().as_slice(),
-            b"ftyp",
-            b"test",
-            16u32.to_be_bytes().as_slice(),
-            b"moov",
-            b"metadata",
-        ]
-        .concat();
-        let (_, first) = mp4_box(0, file.len() as u64, &file).unwrap();
-        let (kind, second) = mp4_box(first.end, file.len() as u64, &file[first.end as usize..]).unwrap();
-        assert_eq!((&kind, second), (b"moov", 12..28));
-    }
-
-    // contract: P3, C9
-    #[test]
-    fn unexpected_bytes_match_no_format() {
-        let file = b"not an indexed format";
-        assert_eq!(parquet(file.len() as u64, file), None);
-        assert_eq!(zip(file.len() as u64, 0, file), None);
-        assert!(!mp4_header(file));
-    }
-}
+#[path = "index_tests.rs"]
+mod tests;

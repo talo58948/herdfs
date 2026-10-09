@@ -71,8 +71,9 @@ impl Identity {
     }
 
     pub(crate) fn set_port(&self, port: u16) -> io::Result<()> {
-        lock(&self.state).port = port;
-        self.persist()
+        let mut state = lock(&self.state);
+        state.port = port;
+        self.persist_state(&state)
     }
 
     pub(crate) fn replay(&self, parent: EntryId, name: &str, verifier: [u8; 8]) -> Option<EntryId> {
@@ -105,18 +106,23 @@ impl Identity {
             entry,
             created: unix_seconds(),
         });
-        drop(state);
-        self.persist()
+        self.persist_state(&state)
     }
 
     fn persist(&self) -> io::Result<()> {
-        let temp = self.path.with_extension("json.tmp");
-        let bytes = serde_json::to_vec(&*lock(&self.state))?;
-        let mut file = File::create(&temp)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        fs::rename(temp, &self.path)?;
-        File::open(self.path.parent().unwrap_or(Path::new(".")))?.sync_all()
+        self.persist_state(&lock(&self.state))
+    }
+
+    fn persist_state(&self, state: &State) -> io::Result<()> {
+        let parent = self.path.parent().unwrap_or(Path::new("."));
+        let mut temp = tempfile::Builder::new()
+            .prefix(".nfs-identity.")
+            .suffix(".tmp")
+            .tempfile_in(parent)?;
+        temp.write_all(&serde_json::to_vec(state)?)?;
+        temp.as_file().sync_all()?;
+        temp.persist(&self.path).map_err(|error| error.error)?;
+        File::open(parent)?.sync_all()
     }
 }
 

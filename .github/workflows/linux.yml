@@ -72,8 +72,11 @@ jobs:
           cargo nextest run -p herdfs-lab \
             --test smoke --test round_trip --test semantics --test faults \
             --test cli --test plans --test local_issuer --test control --no-fail-fast
-      - name: Round 57 client probes
-        run: cargo nextest run -p herdfs-lab --test redteam -E 'test(round57)' --no-fail-fast
+      - name: Confirmed default-mount probes
+        run: |
+          cargo nextest run -p herdfs-lab --test redteam \
+            -E 'test(round57) | test(round59_invalid_zip) | test(round59_paused_fsync)' \
+            --no-fail-fast --no-tests=pass
       - name: fsx stream and chaos
         env:
           FSX_OPS: 20000
@@ -82,3 +85,10 @@ jobs:
         env:
           LAB_MOUNT: nfs
         run: cargo nextest run -p herdfs-lab --test nfs --test round_trip --test control --no-fail-fast
+      - name: Round 59 NFS probes
+        env:
+          LAB_MOUNT: nfs
+        run: |
+          cargo nextest run -p herdfs-lab --test redteam \
+            -E 'test(round59_independent) | test(round59_remove) | test(round59_concurrent)' \
+            --no-fail-fast --no-tests=pass

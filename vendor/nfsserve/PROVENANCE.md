@@ -18,7 +18,8 @@ HerdFS carries these local changes required by its loopback NFSv3 adapter:
   handles instead of the default process-generation handles;
 - retain and replay successful duplicate-XID replies for non-idempotent calls,
   while duplicate requests already in progress wait for that first reply; key
-  them by client IP rather than its ephemeral TCP port so reconnects replay;
+  them by XID, request checksum and client IP so exact reconnects replay without
+  conflating independent callers that reuse an XID;
 - serialize WRITE, COMMIT and SETATTR per file handle without blocking reads or
   namespace calls for that handle or any other;
 - advertise AUTH_UNIX alone for the loopback export and the POSIX 255-byte
