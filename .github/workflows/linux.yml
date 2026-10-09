@@ -42,5 +42,5 @@ jobs:
         run: cargo clippy -p herdfs-authority -p herdfs-agents --all-targets -- -D warnings
       - name: Round 62 probes
         run: |
-          cargo nextest run -p herdfs-authority --test round62_migration --no-fail-fast
+          cargo nextest run -p herdfs-authority --test round62_migration --no-fail-fast --no-tests=pass
           cargo nextest run -p herdfs-agents --test round62_output --no-fail-fast
