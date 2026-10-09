@@ -49,7 +49,6 @@ fn wait_ready(lab: &Lab) -> Result<()> {
 /// new commit is visible, ready may not remain true unless that child is also readable offline.
 // contract: P4, C2, C12
 #[test]
-#[ignore = "ROUND63: a ready kept folder omits children created after its last full scan"]
 fn round63_kept_ready_includes_new_descendants() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() == Ok("nfs") {
         eprintln!("skipped: the default-mount probe runs separately from NFS");

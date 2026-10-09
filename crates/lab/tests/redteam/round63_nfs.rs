@@ -25,7 +25,6 @@ fn entry(lab: &Lab, name: &str) -> Result<Entry> {
 /// return TOOSMALL or an empty page, but it must send an NFS reply instead of dropping the RPC.
 // contract: M1
 #[test]
-#[ignore = "ROUND63: a small READDIR count drops the RPC reply"]
 fn round63_nfs_small_readdir_gets_a_protocol_reply() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
         eprintln!("skipped: set LAB_MOUNT=nfs for the NFS suite");

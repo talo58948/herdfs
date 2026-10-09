@@ -79,7 +79,6 @@ fn invalid_parquet(fake: bool) -> Vec<u8> {
 /// structure missing every required field. Invalid metadata is not an index and must fall back.
 // contract: P3, C9
 #[test]
-#[ignore = "ROUND63: invalid Parquet metadata widens index prefetch"]
 fn round63_invalid_parquet_metadata_does_not_widen_prefetch() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");

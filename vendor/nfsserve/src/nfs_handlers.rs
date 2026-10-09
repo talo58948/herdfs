@@ -898,11 +898,23 @@ pub async fn nfsproc3_readdirplus(
         return Ok(());
     }*/
     // subtract off the final entryplus* field (which must be false) and the eof
-    let max_bytes_allowed = args.maxcount as usize - 128;
+    let limits = (args.dircount as usize)
+        .checked_sub(128)
+        .filter(|remaining| *remaining > 0)
+        .zip(
+            (args.maxcount as usize)
+                .checked_sub(128)
+                .filter(|remaining| *remaining > 0),
+        );
+    let Some((max_dircount_bytes, max_bytes_allowed)) = limits else {
+        make_success_reply(xid).serialize(output)?;
+        nfs::nfsstat3::NFS3ERR_TOOSMALL.serialize(output)?;
+        dir_attr.serialize(output)?;
+        return Ok(());
+    };
     // args.dircount is bytes of just fileid, name, cookie.
     // This is hard to ballpark, so we just divide it by 16
     let estimated_max_results = args.dircount / 16;
-    let max_dircount_bytes = args.dircount as usize;
     let mut ctr = 0;
     match context.vfs.readdir(dirid, args.cookie, estimated_max_results as usize).await {
         Ok(result) => {
@@ -1023,7 +1035,15 @@ pub async fn nfsproc3_readdir(
     debug!(" -- Dir version {:?}", dirversion);
     let has_version = args.cookieverf != nfs::cookieverf3::default();
     // subtract off the final entryplus* field (which must be false) and the eof
-    let max_bytes_allowed = args.dircount as usize - 128;
+    let Some(max_bytes_allowed) = (args.dircount as usize)
+        .checked_sub(128)
+        .filter(|remaining| *remaining > 0)
+    else {
+        make_success_reply(xid).serialize(output)?;
+        nfs::nfsstat3::NFS3ERR_TOOSMALL.serialize(output)?;
+        dir_attr.serialize(output)?;
+        return Ok(());
+    };
     // args.dircount is bytes of just fileid, name, cookie.
     // This is hard to ballpark, so we just divide it by 16
     let estimated_max_results = args.dircount / 16;

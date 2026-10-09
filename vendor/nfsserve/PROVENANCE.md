@@ -11,6 +11,7 @@ HerdFS carries these local changes required by its loopback NFSv3 adapter:
 - dispatch COMMIT, return an adapter-owned per-incarnation WRITE verifier, and
   allow the adapter to seal and wait for a whole-file generation;
 - pass READDIR cookies through both directory APIs;
+- return `NFS3ERR_TOOSMALL` for READDIR limits too small to hold an entry;
 - deserialize and pass the EXCLUSIVE CREATE verifier, preserve GUARDED create,
   and pass MKDIR attributes;
 - distinguish REMOVE from RMDIR;
