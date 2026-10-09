@@ -271,18 +271,14 @@ impl Model {
                 }
                 (head, copies) => panic!("{path}: fork copied {copies:?} for head {head:?}"),
             };
-            self.spaces
-                .get_mut(name)
-                .expect("fork exists")
-                .nodes
-                .insert(
-                    path,
-                    Node {
-                        id: entry.id,
-                        history,
-                        ..node
-                    },
-                );
+            self.spaces.get_mut(name).expect("fork exists").nodes.insert(
+                path,
+                Node {
+                    id: entry.id,
+                    history,
+                    ..node
+                },
+            );
         }
         for (path, (entry, _)) in snapshot {
             assert_eq!(*entry, self.entry(name, path));
