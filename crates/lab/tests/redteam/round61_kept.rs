@@ -5,7 +5,7 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use herdfs_lab::{Lab, LabConfig, Links, Profile, Strategy, herdfs_command};
 use serde_json::Value;
 
@@ -67,12 +67,13 @@ fn round61_kept_ready_tracks_the_latest_committed_head() -> Result<()> {
     let folder = lab.mount_path("a").join("kept-latest");
     fs::create_dir(&folder)?;
     let path_a = folder.join("file");
-    let path_b = lab.mount_path("b").join("kept-latest/file");
+    let root_b = lab.mount_path("b").join("kept-latest");
+    let path_b = root_b.join("file");
     let expected = random_bytes(512 << 10);
     save(&path_a, &expected)?;
     lab.wait_committed("a")?;
     thread::sleep(VISIBLE_AFTER);
-    command("pin", path_b.parent().context("kept file has no parent")?)?;
+    command("pin", &root_b)?;
     wait_ready(&lab)?;
 
     lab.cut("b", Links::Both)?;
@@ -103,7 +104,8 @@ fn round61_kept_ready_tracks_the_latest_committed_head() -> Result<()> {
         stale += usize::from(got != newer);
         lab.restore("b", Links::Both)?;
 
-        command("pin", path_b.parent().context("kept file has no parent")?)?;
+        command("unpin", &root_b)?;
+        command("pin", &root_b)?;
         wait_ready(&lab)?;
         lab.cut("b", Links::Both)?;
         ensure!(
