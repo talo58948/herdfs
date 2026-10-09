@@ -546,7 +546,12 @@ pub async fn nfsproc3_access(
 
     let obj_attr = match context.vfs.getattr(id).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
-        Err(_) => nfs::post_op_attr::Void,
+        Err(stat) => {
+            make_success_reply(xid).serialize(output)?;
+            stat.serialize(output)?;
+            nfs::post_op_attr::Void.serialize(output)?;
+            return Ok(());
+        },
     };
     // TODO better checks here
     if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
@@ -632,7 +637,12 @@ pub async fn nfsproc3_pathconf(
 
     let obj_attr = match context.vfs.getattr(id).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
-        Err(_) => nfs::post_op_attr::Void,
+        Err(stat) => {
+            make_success_reply(xid).serialize(output)?;
+            stat.serialize(output)?;
+            nfs::post_op_attr::Void.serialize(output)?;
+            return Ok(());
+        },
     };
     let res = PATHCONF3resok {
         obj_attributes: obj_attr,
@@ -716,7 +726,12 @@ pub async fn nfsproc3_fsstat(
 
     let obj_attr = match context.vfs.getattr(id).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
-        Err(_) => nfs::post_op_attr::Void,
+        Err(stat) => {
+            make_success_reply(xid).serialize(output)?;
+            stat.serialize(output)?;
+            nfs::post_op_attr::Void.serialize(output)?;
+            return Ok(());
+        },
     };
     let res = FSSTAT3resok {
         obj_attributes: obj_attr,

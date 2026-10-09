@@ -36,7 +36,7 @@ fn zip_central_directory_is_the_index() {
     file.extend_from_slice(&len.to_le_bytes());
     file.extend_from_slice(&central.to_le_bytes());
     file.extend_from_slice(&[0, 0]);
-    let directory = zip(file.len() as u64, 0, &file).unwrap();
+    let directory = zip(file.len() as u64, 0, &file).next().unwrap();
     assert_eq!(directory.range, 7..57);
     assert_eq!(directory.entries, 1);
     assert_eq!(zip_entry_len(&file[7..53]), Some(50));
@@ -50,7 +50,7 @@ fn zip_directory_size_must_match_its_entry_count() {
     file.extend_from_slice(&4u32.to_le_bytes());
     file.extend_from_slice(&0u32.to_le_bytes());
     file.extend_from_slice(&[0, 0]);
-    assert_eq!(zip(file.len() as u64, 0, &file), None);
+    assert_eq!(zip(file.len() as u64, 0, &file).next(), None);
 }
 
 // contract: P3, C9
@@ -88,6 +88,6 @@ fn mp4_walk_finds_moov() {
 fn unexpected_bytes_match_no_format() {
     let file = b"not an indexed format";
     assert_eq!(parquet(file.len() as u64, file), None);
-    assert_eq!(zip(file.len() as u64, 0, file), None);
+    assert_eq!(zip(file.len() as u64, 0, file).next(), None);
     assert!(!mp4_header(file));
 }

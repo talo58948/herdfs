@@ -23,8 +23,8 @@ const MAX_INDEX_REGION: u64 = 8 * 1024 * 1024;
 const ZIP_TAIL: u64 = 65_557;
 /// Enough for an MP4 box's 64-bit `largesize` header.
 const BOX_HEADER: u64 = 16;
-/// Bounded box walking finds the common early `moov` without scanning the file.
-const BOX_PROBES: usize = 4;
+/// Bounded box walking finds a top-level `moov` without scanning the file.
+const BOX_PROBES: usize = 32;
 
 impl Reader {
     pub async fn prefetch(&self, file: &OpenVersion, plan: Prefetch, fetched: &AtomicU64) -> Result<()> {
@@ -79,10 +79,10 @@ impl Reader {
                 None => self.prefetch_edges(file, fetched).await,
             };
         }
-        if let Some(directory) = zip(size, tail_start, &tail)
-            && self.zip_directory(file, &directory, fetched).await?
-        {
-            return self.prefetch_range(file, directory.range, fetched).await;
+        for directory in zip(size, tail_start, &tail) {
+            if self.zip_directory(file, &directory, fetched).await? {
+                return self.prefetch_range(file, directory.range, fetched).await;
+            }
         }
         self.prefetch_edges(file, fetched).await
     }
@@ -195,8 +195,16 @@ struct ZipDirectory {
     entries: u16,
 }
 
-fn zip(size: u64, tail_start: u64, tail: &[u8]) -> Option<ZipDirectory> {
-    let eocd = tail.windows(4).rposition(|bytes| bytes == b"PK\x05\x06")?;
+fn zip(size: u64, tail_start: u64, tail: &[u8]) -> impl Iterator<Item = ZipDirectory> + '_ {
+    tail.windows(4)
+        .enumerate()
+        .rev()
+        .filter_map(move |(eocd, marker)| {
+            (marker == b"PK\x05\x06").then(|| zip_at(size, tail_start, tail, eocd))?
+        })
+}
+
+fn zip_at(size: u64, tail_start: u64, tail: &[u8], eocd: usize) -> Option<ZipDirectory> {
     let record = tail.get(eocd..eocd + 22)?;
     let disk = u16::from_le_bytes(record.get(4..6)?.try_into().ok()?);
     let central_disk = u16::from_le_bytes(record.get(6..8)?.try_into().ok()?);

@@ -131,7 +131,6 @@ fn zip_bytes(version: &Version) -> u64 {
 /// last signature in a comment must not hide the real central directory from index discovery.
 // contract: P3, C9
 #[test]
-#[ignore = "ROUND71: an EOCD signature inside a valid ZIP comment hides the central directory"]
 fn round71_zip_comment_signature_does_not_hide_the_index() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");
@@ -147,9 +146,9 @@ fn round71_zip_comment_signature_does_not_hide_the_index() -> Result<()> {
     let mut failures = 0;
     for trial in 0..3 {
         let name = format!("comment-signature-{trial}.zip");
-        let (wanted, fetched) = access(&lab, &name, &zip(true), fallback_bytes)?;
-        let index = zip_bytes(&lab.head(ADMIN, &name)?);
-        eprintln!("trial {trial}: ZIP fetched {fetched}; fallback {wanted}; index requires {index}");
+        let (index, fetched) = access(&lab, &name, &zip(true), zip_bytes)?;
+        let fallback = fallback_bytes(&lab.head(ADMIN, &name)?);
+        eprintln!("trial {trial}: ZIP fetched {fetched}; fallback {fallback}; index requires {index}");
         failures += usize::from(fetched < index);
     }
     assert_eq!(failures, 0, "valid ZIP indexes missed, of 3");
@@ -185,7 +184,6 @@ fn mp4(extra_box: bool) -> (Vec<u8>, std::ops::Range<u64>) {
 /// a bounded `moov` after `mdat`, so index discovery must not depend on a four-box probe limit.
 // contract: P3, C9
 #[test]
-#[ignore = "ROUND71: a fifth top-level MP4 box prevents discovery of a valid late moov"]
 fn round71_mp4_fifth_box_does_not_hide_the_index() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");
@@ -205,8 +203,10 @@ fn round71_mp4_fifth_box_does_not_hide_the_index() -> Result<()> {
     for trial in 0..3 {
         let name = format!("fifth-box-{trial}.mp4");
         let (bytes, moov) = mp4(true);
-        let (fallback, fetched) = access(&lab, &name, &bytes, fallback_bytes)?;
-        let index = fetched_for(&lab.head(ADMIN, &name)?, &[0..16, READ_AT..READ_AT + 1, moov]);
+        let (index, fetched) = access(&lab, &name, &bytes, |version| {
+            fetched_for(version, &[0..16, READ_AT..READ_AT + 1, moov])
+        })?;
+        let fallback = fallback_bytes(&lab.head(ADMIN, &name)?);
         eprintln!("trial {trial}: MP4 fetched {fetched}; fallback {fallback}; index requires {index}");
         failures += usize::from(fetched < index);
     }

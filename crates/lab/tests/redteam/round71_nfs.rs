@@ -47,7 +47,6 @@ fn statuses(rpc: &mut Rpc, handle: &[u8]) -> Result<[u32; 3]> {
 /// object named by the handle, so deletion must make each return STALE rather than success.
 // contract: M1, C7
 #[test]
-#[ignore = "ROUND71: ACCESS, FSSTAT and PATHCONF succeed through deleted filehandles"]
 fn round71_nfs_metadata_ops_reject_deleted_handles() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
         eprintln!("skipped: set LAB_MOUNT=nfs for the NFS suite");
