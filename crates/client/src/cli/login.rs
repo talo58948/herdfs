@@ -79,7 +79,7 @@ pub(super) async fn login(args: &LoginArgs, json: bool) -> anyhow::Result<()> {
     ];
     let http = reqwest::Client::new();
     let token = token::exchange(&http, &discovery.token_endpoint, &form, None).await?;
-    token::write(&token_file, &token)?;
+    token::save(&token_file, &token).await?;
     reply(&mut callback, "200 OK", "herdfs signed in\n").await?;
     if json {
         super::output::json(&serde_json::json!({"token_file": token_file}))?;
