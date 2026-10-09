@@ -13,7 +13,7 @@ struct Runner(Child);
 
 impl Runner {
     fn start(mount: &Path) -> Self {
-        let command = concat!("while [ ! -f \"$HERDFS_SESSION_DIR/release\" ]; do sleep 0.05; done");
+        let command = "while [ ! -f \"$HERDFS_SESSION_DIR/release\" ]; do sleep 0.05; done";
         let child = Command::new(env!("CARGO_BIN_EXE_herdfs-agents"))
             .arg("--mount")
             .arg(mount)
