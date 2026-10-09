@@ -118,6 +118,7 @@ CREATE TABLE IF NOT EXISTS local_tokens (
 );
 ";
 
+// V10 floors are taken as recorded; that schema did not retain overlapping-grant continuity.
 pub(crate) const MIGRATE_ACL_HISTORY: &str = "
 INSERT INTO acl_history (space, path, principal, granted_version)
 SELECT space, path, principal, granted_seq FROM acl AS current_acl

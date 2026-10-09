@@ -43,6 +43,7 @@ impl Agent {
             .stderr(Stdio::piped());
         child_context(&mut command, cwd.as_raw_fd());
         let mut child = command.spawn().context("spawn")?;
+        let group = child.id().context("child has no pid")?;
         drop(cwd);
 
         let child_stdout = child.stdout.take().context("stdout pipe")?;
@@ -50,14 +51,14 @@ impl Agent {
         let mut captures = JoinSet::new();
         captures.spawn(capture(child_stdout, stdout, output.try_clone().await?));
         captures.spawn(capture(child_stderr, stderr, output.try_clone().await?));
-        let (exit, cancelled) = wait(session, &mut child).await?;
+        let (exit, cancelled) = wait(session, &mut child, group).await?;
         let capture_result = finish_captures(&mut captures).await;
         // On herdfs, fsync means committed: terminal status must not precede its results.
         stdout_sync.sync_all().await.context("sync stdout")?;
         stderr_sync.sync_all().await.context("sync stderr")?;
         output.sync_all().await.context("sync output")?;
-        write(session, "exit_code", &exit_code(exit)).await?;
         capture_result?;
+        write(session, "exit_code", &exit_code(exit)).await?;
 
         if cancelled {
             return Ok(Outcome::Cancelled);
@@ -116,11 +117,15 @@ async fn capture(
     }
 }
 
-async fn wait(session: &Session, child: &mut Child) -> anyhow::Result<(ExitStatus, bool)> {
+async fn wait(session: &Session, child: &mut Child, group: u32) -> anyhow::Result<(ExitStatus, bool)> {
     tokio::select! {
-        exit = child.wait() => Ok((exit.context("wait")?, false)),
+        exit = child.wait() => {
+            let exit = exit.context("wait")?;
+            kill_group(group)?;
+            Ok((exit, false))
+        },
         cancelled = cancellation(session) => {
-            kill_group(child)?;
+            kill_group(group)?;
             let exit = child.wait().await.context("wait after cancel")?;
             cancelled.context("watch cancel")?;
             Ok((exit, true))
@@ -168,9 +173,8 @@ fn child_context(command: &mut Command, cwd: RawFd) {
     unsafe_code,
     reason = "libc is the portable Unix process-group signalling API"
 )]
-fn kill_group(child: &Child) -> io::Result<()> {
-    let pid = child.id().ok_or_else(|| io::Error::other("child has no pid"))?;
-    let result = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+fn kill_group(group: u32) -> io::Result<()> {
+    let result = unsafe { libc::kill(-(group as libc::pid_t), libc::SIGKILL) };
     if result == 0 {
         return Ok(());
     }

@@ -104,8 +104,25 @@ async fn callback(
     loop {
         let (mut stream, _) = listener.accept().await?;
         let mut request = vec![0; 8192];
-        let read = stream.read(&mut request).await?;
-        let request = std::str::from_utf8(&request[..read])?;
+        let mut len = 0;
+        let header_end = loop {
+            if let Some(end) = request[..len].windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                break Some(end + 4);
+            }
+            if len == request.len() {
+                break None;
+            }
+            let read = stream.read(&mut request[len..]).await?;
+            if read == 0 {
+                break None;
+            }
+            len += read;
+        };
+        let Some(header_end) = header_end else {
+            reply(&mut stream, "400 Bad Request", "bad callback request\n").await?;
+            continue;
+        };
+        let request = std::str::from_utf8(&request[..header_end])?;
         let Some(target) = request
             .lines()
             .next()
