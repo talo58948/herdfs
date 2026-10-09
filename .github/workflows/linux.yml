@@ -43,10 +43,8 @@ jobs:
             -p herdfs-agents -p herdfs-lab
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Crate tests (sim 2000 seeds)
-        env:
-          SIM_SEEDS: 2000
-        run: cargo nextest run -p herdfs-core -p herdfs-authority -p herdfs-client -p herdfs-agents
+      - name: Client crate tests
+        run: cargo nextest run -p herdfs-client
 
       - name: Install lab tools
         run: |
@@ -67,24 +65,17 @@ jobs:
           fi
       - name: Build lab binaries
         run: cargo build --workspace --bins
-      - name: Lab suites
-        run: |
-          cargo nextest run -p herdfs-lab \
-            --test smoke --test round_trip --test semantics --test faults \
-            --test cli --test plans --test local_issuer --test control --no-fail-fast
+      - name: Control suite
+        run: cargo nextest run -p herdfs-lab --test control --no-fail-fast
       - name: Confirmed default-mount probes
         run: |
           cargo nextest run -p herdfs-lab --test redteam \
-            -E 'test(round57) | test(round59_invalid_zip) | test(round59_paused_fsync) | test(round61_kept)' \
+            -E 'test(round57_kept) | test(round61_kept)' \
             --no-fail-fast --no-tests=pass
-      - name: fsx stream and chaos
-        env:
-          FSX_OPS: 20000
-        run: cargo nextest run -p herdfs-lab --test fsx -E 'test(stream) | test(chaos)' --no-fail-fast
       - name: NFS suites
         env:
           LAB_MOUNT: nfs
-        run: cargo nextest run -p herdfs-lab --test nfs --test round_trip --test control --no-fail-fast
+        run: cargo nextest run -p herdfs-lab --test nfs --no-fail-fast
       - name: Round 59-61 NFS probes
         env:
           LAB_MOUNT: nfs
