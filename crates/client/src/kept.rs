@@ -49,9 +49,13 @@ impl Kept {
     }
 
     pub fn pin(&self, path: &SpacePath) -> std::io::Result<()> {
-        self.update(|saved| saved.roots.insert(path.clone()).then_some(()))?;
-        lock(&self.pending).insert(path.clone());
-        lock(&self.errors).remove(path);
+        let added = self
+            .update(|saved| saved.roots.insert(path.clone()).then_some(()))?
+            .is_some();
+        let retry = lock(&self.errors).remove(path).is_some();
+        if added || retry {
+            lock(&self.pending).insert(path.clone());
+        }
         self.wake.notify_one();
         Ok(())
     }
