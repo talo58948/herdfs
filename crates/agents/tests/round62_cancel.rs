@@ -13,10 +13,11 @@ struct Runner(Child);
 
 impl Runner {
     fn start(mount: &Path, redirect_detached: bool) -> Self {
-        let redirect = redirect_detached.then_some("</dev/null >/dev/null 2>&1").unwrap_or("");
-        let command = format!(
-            "setsid sleep 30 {redirect} & echo $! > \"$HERDFS_SESSION_DIR/detached.pid\"; wait"
-        );
+        let redirect = redirect_detached
+            .then_some("</dev/null >/dev/null 2>&1")
+            .unwrap_or("");
+        let command =
+            format!("setsid sleep 30 {redirect} & echo $! > \"$HERDFS_SESSION_DIR/detached.pid\"; wait");
         let child = Command::new(env!("CARGO_BIN_EXE_herdfs-agents"))
             .arg("--mount")
             .arg(mount)
