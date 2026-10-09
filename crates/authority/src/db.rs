@@ -125,7 +125,8 @@ WHERE NOT EXISTS (
     SELECT 1 FROM acl_history AS past
     WHERE past.space = current_acl.space AND past.path = current_acl.path
       AND past.principal = current_acl.principal AND past.revoked_seq IS NULL
-);
+)
+ORDER BY granted_seq, space, principal, path;
 ";
 
 const ENTRY: &str = "SELECT e.id, e.path, e.kind, e.mode, e.mtime_ms, e.head, coalesce(v.size, 0), e.target

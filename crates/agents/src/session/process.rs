@@ -11,10 +11,12 @@ use rustix::fs::OFlags;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
+use tokio::task::JoinSet;
 
 use super::{Agent, Session, open, write};
 
 const CANCEL_POLL: Duration = Duration::from_millis(100);
+const CAPTURE_DRAIN: Duration = Duration::from_secs(1);
 
 pub(super) enum Outcome {
     Done,
@@ -25,14 +27,11 @@ impl Agent {
     pub(super) async fn execute(&self, session: &Session) -> anyhow::Result<Outcome> {
         let cwd = self.cwd(session).await?;
         let prompt = open(session, "prompt", OFlags::RDONLY).await?;
-        let output = open(
-            session,
-            "output",
-            OFlags::WRONLY | OFlags::CREATE | OFlags::APPEND,
-        )
-        .await?;
+        let output = result_file(session, "output").await?;
         let stdout = result_file(session, "stdout").await?;
         let stderr = result_file(session, "stderr").await?;
+        let stdout_sync = stdout.try_clone().await?;
+        let stderr_sync = stderr.try_clone().await?;
         let mut command = Command::new("sh");
         command
             .arg("-c")
@@ -48,15 +47,17 @@ impl Agent {
 
         let child_stdout = child.stdout.take().context("stdout pipe")?;
         let child_stderr = child.stderr.take().context("stderr pipe")?;
-        let stdout_copy = tokio::spawn(capture(child_stdout, stdout, output.try_clone().await?));
-        let stderr_copy = tokio::spawn(capture(child_stderr, stderr, output.try_clone().await?));
+        let mut captures = JoinSet::new();
+        captures.spawn(capture(child_stdout, stdout, output.try_clone().await?));
+        captures.spawn(capture(child_stderr, stderr, output.try_clone().await?));
         let (exit, cancelled) = wait(session, &mut child).await?;
-        let (stdout_result, stderr_result) = tokio::join!(stdout_copy, stderr_copy);
-        stdout_result.context("capture stdout task")??;
-        stderr_result.context("capture stderr task")??;
+        let capture_result = finish_captures(&mut captures).await;
         // On herdfs, fsync means committed: terminal status must not precede its results.
+        stdout_sync.sync_all().await.context("sync stdout")?;
+        stderr_sync.sync_all().await.context("sync stderr")?;
         output.sync_all().await.context("sync output")?;
         write(session, "exit_code", &exit_code(exit)).await?;
+        capture_result?;
 
         if cancelled {
             return Ok(Outcome::Cancelled);
@@ -65,6 +66,23 @@ impl Agent {
         ensure!(code == 0, "exit {code}");
         Ok(Outcome::Done)
     }
+}
+
+async fn finish_captures(captures: &mut JoinSet<io::Result<()>>) -> anyhow::Result<()> {
+    let finished = tokio::time::timeout(CAPTURE_DRAIN, async {
+        while let Some(result) = captures.join_next().await {
+            result.context("capture task")??;
+        }
+        Ok(())
+    })
+    .await;
+    let result = match finished {
+        Ok(result) => result,
+        Err(_) => Ok(()),
+    };
+    captures.abort_all();
+    while captures.join_next().await.is_some() {}
+    result
 }
 
 async fn result_file(session: &Session, name: &str) -> io::Result<File> {
