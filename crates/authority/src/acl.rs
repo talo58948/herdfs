@@ -156,6 +156,7 @@ impl Call<'_> {
         }
         match perm {
             Some(perm) => {
+                // Keep v10's overlap floor in the ACL row; the v11 interval starts at this grant.
                 let inserted = self
                     .db
                     .prepare_cached(
@@ -178,8 +179,7 @@ impl Call<'_> {
                     self.db
                         .prepare_cached(
                             "INSERT INTO acl_history (space, path, principal, granted_version)
-                             SELECT space, path, principal, granted_seq FROM acl
-                             WHERE space = ?1 AND path = ?2 AND principal = ?3",
+                             VALUES (?1, ?2, ?3, coalesce((SELECT max(id) FROM versions), 0))",
                         )?
                         .execute(params![space, path.as_str(), principal])?;
                 }
