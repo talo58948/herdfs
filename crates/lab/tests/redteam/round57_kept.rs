@@ -13,7 +13,7 @@ use crate::{VISIBLE_AFTER, random_bytes, save};
 
 const WAIT: Duration = Duration::from_secs(30);
 
-fn command(lab: &Lab, op: &str, path: &Path) -> Result<Value> {
+fn command(op: &str, path: &Path) -> Result<Value> {
     let output = herdfs_command()?.args(["--json", op]).arg(path).output()?;
     ensure!(
         output.status.success(),
@@ -24,7 +24,7 @@ fn command(lab: &Lab, op: &str, path: &Path) -> Result<Value> {
 }
 
 fn status(lab: &Lab) -> Result<Value> {
-    command(lab, "status", lab.mount_path("b"))
+    command("status", lab.mount_path("b"))
 }
 
 fn wait_ready(lab: &Lab, root: &str) -> Result<()> {
@@ -46,7 +46,7 @@ fn wait_ready(lab: &Lab, root: &str) -> Result<()> {
 fn wait_error(lab: &Lab, path: &Path) -> Result<Value> {
     let deadline = Instant::now() + WAIT;
     loop {
-        let state = command(lab, "file", path)?;
+        let state = command("file", path)?;
         if !state["error"].is_null() {
             return Ok(state);
         }
@@ -61,7 +61,7 @@ fn pin_folder(lab: &Lab, name: &str) -> Result<()> {
     save(&folder.join("file"), &random_bytes(256 << 10))?;
     lab.wait_committed("a")?;
     thread::sleep(VISIBLE_AFTER);
-    command(lab, "pin", &lab.mount_path("b").join(name))?;
+    command("pin", &lab.mount_path("b").join(name))?;
     wait_ready(lab, name)
 }
 
@@ -82,7 +82,7 @@ fn round57_kept_folder_follows_its_rename() -> Result<()> {
     )?;
 
     pin_folder(&lab, "kept-control")?;
-    let control = command(&lab, "file", &lab.mount_path("b").join("kept-control"))?;
+    let control = command("file", &lab.mount_path("b").join("kept-control"))?;
     ensure!(
         control["kept"] == true && control["error"].is_null(),
         "control pin failed: {control}"
@@ -94,9 +94,9 @@ fn round57_kept_folder_follows_its_rename() -> Result<()> {
         let new = format!("kept-new-{trial}");
         pin_folder(&lab, &old)?;
         fs::rename(lab.mount_path("a").join(&old), lab.mount_path("a").join(&new))?;
-        command(&lab, "pin", &lab.mount_path("b").join(&old))?;
+        command("pin", &lab.mount_path("b").join(&old))?;
         let old_state = wait_error(&lab, &lab.mount_path("b").join(&old))?;
-        let new_state = command(&lab, "file", &lab.mount_path("b").join(&new))?;
+        let new_state = command("file", &lab.mount_path("b").join(&new))?;
         eprintln!("trial {trial}: old={old_state}, new={new_state}");
         failures += usize::from(new_state["kept"] != true || !new_state["error"].is_null());
     }
