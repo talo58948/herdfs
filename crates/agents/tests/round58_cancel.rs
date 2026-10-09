@@ -13,9 +13,7 @@ struct Runner(Child);
 
 impl Runner {
     fn start(mount: &Path) -> Self {
-        let command = concat!(
-            "while [ ! -f \"$HERDFS_SESSION_DIR/release\" ]; do sleep 0.05; done"
-        );
+        let command = concat!("while [ ! -f \"$HERDFS_SESSION_DIR/release\" ]; do sleep 0.05; done");
         let child = Command::new(env!("CARGO_BIN_EXE_herdfs-agents"))
             .arg("--mount")
             .arg(mount)
@@ -51,7 +49,11 @@ fn status(dir: &Path) -> Option<String> {
 fn wait_status(dir: &Path, wanted: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while status(dir).as_deref() != Some(wanted) {
-        assert!(Instant::now() < deadline, "{} never became {wanted}", dir.display());
+        assert!(
+            Instant::now() < deadline,
+            "{} never became {wanted}",
+            dir.display()
+        );
         sleep(Duration::from_millis(20));
     }
 }
@@ -67,7 +69,10 @@ fn cancel_stops_sessions_that_are_waiting_for_a_slot() {
     let cancelled = Instant::now();
     fs::write(control.join("cancel"), "").unwrap();
     wait_status(&control, "cancelled");
-    assert!(cancelled.elapsed() < Duration::from_secs(5), "running control missed A2");
+    assert!(
+        cancelled.elapsed() < Duration::from_secs(5),
+        "running control missed A2"
+    );
 
     let blocker = session(mount.path(), "blocker");
     wait_status(&blocker, "running");
@@ -89,5 +94,10 @@ fn cancel_stops_sessions_that_are_waiting_for_a_slot() {
     for dir in &queued {
         wait_status(dir, "cancelled");
     }
-    assert_eq!(stopped, 3, "{}/3 queued sessions exceeded A2's five-second bound", 3 - stopped);
+    assert_eq!(
+        stopped,
+        3,
+        "{}/3 queued sessions exceeded A2's five-second bound",
+        3 - stopped
+    );
 }

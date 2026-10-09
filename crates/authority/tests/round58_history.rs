@@ -65,7 +65,14 @@ fn group_handoff(trial: usize, overlap: bool) -> (bool, bool) {
     let (file, before) = fixture.file(&path, b"before");
     fixture.set_acl(&path, "group:eng", Some(Perm::Read));
     let visible = fixture
-        .commit(&alice(), file.id, &format!("visible-group-{trial}"), None, false, &[])
+        .commit(
+            &alice(),
+            file.id,
+            &format!("visible-group-{trial}"),
+            None,
+            false,
+            &[],
+        )
         .unwrap();
     if !overlap {
         fixture.set_acl(&path, "group:eng", None);
@@ -75,7 +82,14 @@ fn group_handoff(trial: usize, overlap: bool) -> (bool, bool) {
         fixture.set_acl(&path, "group:eng", None);
     }
     let head = fixture
-        .commit(&alice(), file.id, &format!("head-group-{trial}"), None, false, &[])
+        .commit(
+            &alice(),
+            file.id,
+            &format!("head-group-{trial}"),
+            None,
+            false,
+            &[],
+        )
         .unwrap();
     let dave = user("dave", &["eng"]);
     let history = ids(&mut fixture, &dave, space_path(&path).as_str());
