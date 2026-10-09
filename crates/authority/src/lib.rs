@@ -58,6 +58,9 @@ impl Authority {
             db.execute_batch(db::DROP_ALL)?;
         }
         db.execute_batch(db::SCHEMA)?;
+        if version < db::SCHEMA_VERSION {
+            db.execute_batch(db::MIGRATE_ACL_HISTORY)?;
+        }
         db.pragma_update(None, "user_version", db::SCHEMA_VERSION)?;
         db.set_prepared_statement_cache_capacity(64);
         Ok(Self { db })

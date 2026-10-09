@@ -109,6 +109,19 @@ pub(crate) async fn queue(mount: &Path, dir: &Path) -> io::Result<()> {
     transition(&session, None, "queued").await
 }
 
+/// Cancels a queued session without waiting for a runner slot.
+pub(crate) async fn cancel_queued(mount: &Path, dir: &Path) -> io::Result<bool> {
+    let session = session(mount, dir).await?;
+    match open(&session, "cancel", OFlags::RDONLY).await {
+        Ok(_) => {
+            transition(&session, Some("queued"), "cancelled").await?;
+            Ok(true)
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
 /// Moves a queued session to `running`, once its directory proves to be inside the host's.
 pub(crate) async fn claim(mount: &Path, dir: &Path) -> io::Result<Session> {
     let session = session(mount, dir).await?;

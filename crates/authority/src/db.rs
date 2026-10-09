@@ -11,7 +11,7 @@ use crate::{Call, Result, refuse};
 
 /// Bumped when the schema changes. Databases older than the last supported
 /// migration are recreated.
-pub(crate) const SCHEMA_VERSION: i64 = 10;
+pub(crate) const SCHEMA_VERSION: i64 = 11;
 pub(crate) const MIGRATES_FROM: i64 = 9;
 
 pub(crate) const DROP_ALL: &str = "
@@ -20,6 +20,7 @@ DROP TABLE IF EXISTS collection;
 DROP TABLE IF EXISTS unreferenced;
 DROP TABLE IF EXISTS commits;
 DROP TABLE IF EXISTS uploads;
+DROP TABLE IF EXISTS acl_history;
 DROP TABLE IF EXISTS acl;
 DROP TABLE IF EXISTS versions;
 DROP TABLE IF EXISTS manifests;
@@ -70,6 +71,16 @@ CREATE TABLE IF NOT EXISTS acl (
     granted_seq INTEGER NOT NULL,
     PRIMARY KEY (space, principal, path)
 );
+CREATE TABLE IF NOT EXISTS acl_history (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    space TEXT NOT NULL,
+    path TEXT NOT NULL,
+    principal TEXT NOT NULL,
+    granted_version INTEGER NOT NULL,
+    revoked_seq INTEGER
+);
+CREATE INDEX IF NOT EXISTS acl_history_by_principal
+ON acl_history (space, principal);
 CREATE TABLE IF NOT EXISTS uploads (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     principal TEXT NOT NULL,
@@ -104,6 +115,16 @@ CREATE TABLE IF NOT EXISTS local_tokens (
     user TEXT NOT NULL,
     expires_ms INTEGER NOT NULL,
     revoked INTEGER NOT NULL DEFAULT 0
+);
+";
+
+pub(crate) const MIGRATE_ACL_HISTORY: &str = "
+INSERT INTO acl_history (space, path, principal, granted_version)
+SELECT space, path, principal, granted_seq FROM acl AS current_acl
+WHERE NOT EXISTS (
+    SELECT 1 FROM acl_history AS past
+    WHERE past.space = current_acl.space AND past.path = current_acl.path
+      AND past.principal = current_acl.principal AND past.revoked_seq IS NULL
 );
 ";
 

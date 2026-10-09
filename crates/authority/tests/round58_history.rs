@@ -48,7 +48,6 @@ fn descendant_handoff(trial: usize, overlap: bool) -> (bool, bool) {
 /// keeps the original history boundary; an actual revoke before the ancestor grant is the control.
 // contract: C14, S8
 #[test]
-#[ignore = "ROUND58: descendant-to-ancestor ACL handoff resets readable history"]
 fn descendant_to_ancestor_handoffs_keep_readable_history() {
     let mut lost = 0;
     for trial in 0..3 {
@@ -104,7 +103,6 @@ fn group_handoff(trial: usize, overlap: bool) -> (bool, bool) {
 /// keeps the group grant's history boundary; a real revoke before the user grant is the control.
 // contract: C14, S8
 #[test]
-#[ignore = "ROUND58: group-to-user ACL handoff resets readable history"]
 fn group_to_user_handoffs_keep_readable_history() {
     let mut lost = 0;
     for trial in 0..3 {

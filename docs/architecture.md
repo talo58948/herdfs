@@ -46,7 +46,10 @@ Retention, request-id memory and sweep grace use the authority's clock. A forwar
 
 The grace period must be at least twice the grant TTL and at least the collection interval plus the grant TTL, and exceed the time between one upload and the next or the commit, so in-flight uploads and outstanding URLs never race the sweep. `Purge` and `DeleteSpace` make history and whole spaces eligible at once. Chunks are shared across files, spaces and forks, so the live set is global.
 
-Access to history follows S8: each ACL row records the highest committed version ID when it was granted, and a principal sees only later versions plus the head unless it is an admin.
+Access to history follows S8: the authority keeps grant/revoke intervals for each ACL row. At read
+time it finds the uninterrupted chain of overlapping intervals on the entry's current path for the
+caller's user and token groups; versions after that chain began are visible, plus the head and the
+caller's own versions. Space admins see all history.
 
 ## Limits
 

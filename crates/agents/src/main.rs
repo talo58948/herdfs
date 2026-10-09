@@ -123,6 +123,15 @@ impl Runner {
                     continue;
                 }
             }
+            match session::cancel_queued(&self.agent.mount, &dir).await {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(err) => {
+                    log_error(&dir, &err);
+                    pending.insert(dir, stamp);
+                    continue;
+                }
+            }
             if let Ok(slot) = Arc::clone(&self.slots).try_acquire_owned() {
                 self.start(dir, slot).await;
                 continue;

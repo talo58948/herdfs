@@ -235,7 +235,8 @@ impl Model {
         );
         let mut fork = Space {
             nodes: BTreeMap::new(),
-            acl: parent.acl,
+            acl: BTreeMap::new(),
+            access: Vec::new(),
         };
         for (path, node) in parent.nodes {
             let (entry, copies) = &snapshot[&path];
@@ -274,6 +275,9 @@ impl Model {
             );
         }
         self.spaces.insert(name.to_owned(), fork);
+        for ((path, principal), (perm, _)) in parent.acl {
+            self.change_acl(name, &path, &principal, Some(perm));
+        }
         for (path, (entry, _)) in snapshot {
             assert_eq!(*entry, self.entry(name, path));
         }
