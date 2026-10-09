@@ -28,8 +28,7 @@ fn a_v9_database_gains_local_tokens_without_losing_data() {
     drop(old);
 
     let mut authority = Authority::open(&db).unwrap();
-    let Outcome::Reply(Response::Spaces { spaces }) =
-        authority.handle(&alice, Request::Spaces, 2).unwrap()
+    let Outcome::Reply(Response::Spaces { spaces }) = authority.handle(&alice, Request::Spaces, 2).unwrap()
     else {
         panic!("spaces returned the wrong response")
     };
@@ -81,8 +80,7 @@ fn a_v10_database_keeps_acl_access_when_history_is_added() {
     drop(old);
 
     let mut authority = Authority::open(&db).unwrap();
-    let Outcome::Reply(Response::Spaces { spaces }) =
-        authority.handle(&bob, Request::Spaces, 3).unwrap()
+    let Outcome::Reply(Response::Spaces { spaces }) = authority.handle(&bob, Request::Spaces, 3).unwrap()
     else {
         panic!("spaces returned the wrong response")
     };

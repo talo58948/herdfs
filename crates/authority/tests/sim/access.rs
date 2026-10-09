@@ -68,9 +68,7 @@ impl Model {
         loop {
             let previous = start;
             for access in &accesses {
-                if access.granted_seq <= start
-                    && access.revoked_seq.is_none_or(|end| end > start)
-                {
+                if access.granted_seq <= start && access.revoked_seq.is_none_or(|end| end > start) {
                     start = start.min(access.granted_seq);
                     floor = floor.min(access.version_floor);
                 }
@@ -115,13 +113,7 @@ impl Model {
     }
 
     /// Applies one successful ACL mutation to current permissions and interval history.
-    pub fn change_acl(
-        &mut self,
-        space: &str,
-        path: &SpacePath,
-        principal: &str,
-        perm: Option<Perm>,
-    ) {
+    pub fn change_acl(&mut self, space: &str, path: &SpacePath, principal: &str, perm: Option<Perm>) {
         let key = (path.clone(), principal.to_owned());
         let exists = self.spaces[space].acl.contains_key(&key);
         if let (true, Some(perm)) = (exists, perm) {
@@ -158,9 +150,7 @@ impl Model {
                     .access
                     .iter_mut()
                     .find(|access| {
-                        access.path == *path
-                            && access.principal == principal
-                            && access.revoked_seq.is_none()
+                        access.path == *path && access.principal == principal && access.revoked_seq.is_none()
                     })
                     .expect("current ACL row has an active interval");
                 active.revoked_seq = Some(event);

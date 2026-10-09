@@ -82,9 +82,7 @@ impl Call<'_> {
         loop {
             let previous = start;
             for access in &accesses {
-                if access.granted_seq <= start
-                    && access.revoked_seq.is_none_or(|end| end > start)
-                {
+                if access.granted_seq <= start && access.revoked_seq.is_none_or(|end| end > start) {
                     start = start.min(access.granted_seq);
                     floor = floor.min(access.version_floor);
                 }
@@ -183,9 +181,7 @@ impl Call<'_> {
             None => {
                 let removed = self
                     .db
-                    .prepare_cached(
-                        "DELETE FROM acl WHERE space = ?1 AND path = ?2 AND principal = ?3",
-                    )?
+                    .prepare_cached("DELETE FROM acl WHERE space = ?1 AND path = ?2 AND principal = ?3")?
                     .execute(params![space, path.as_str(), principal])?;
                 if removed != 0 {
                     self.db
