@@ -57,7 +57,6 @@ fn wait_pending(client: &Path) -> Result<()> {
 /// concurrent read is part of the same access and must not advance to a newly committed version.
 // contract: C3, M2
 #[test]
-#[ignore = "ROUND75: a concurrent read expires the epoch of a still-active slow read"]
 fn round75_active_nfs_read_does_not_expire_its_epoch() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
         eprintln!("skipped: set LAB_MOUNT=nfs for the NFS suite");
@@ -137,7 +136,6 @@ fn round75_active_nfs_read_does_not_expire_its_epoch() -> Result<()> {
 /// commit. Settling the write must not expose the epoch's older captured head on the same client.
 // contract: C1, M2
 #[test]
-#[ignore = "ROUND75: a read during FILE_SYNC falls back to the old head after the commit"]
 fn round75_filesync_cannot_leave_an_old_read_epoch() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
         eprintln!("skipped: set LAB_MOUNT=nfs for the NFS suite");

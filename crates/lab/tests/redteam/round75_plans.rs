@@ -93,7 +93,6 @@ fn access(lab: &Lab, name: &str, bytes: &[u8], ranges: &[std::ops::Range<u64>]) 
 /// boxes. Header probes and fallback together must remain within the documented 36 MiB maximum.
 // contract: C9, P3
 #[test]
-#[ignore = "ROUND75: MP4 header probes exceed the documented 36 MiB index-prefetch bound"]
 fn round75_mp4_probe_walk_stays_within_prefetch_bound() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");
