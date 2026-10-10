@@ -89,5 +89,5 @@ fn unexpected_bytes_match_no_format() {
     let file = b"not an indexed format";
     assert_eq!(parquet(file.len() as u64, file), None);
     assert_eq!(zip(file.len() as u64, 0, file).next(), None);
-    assert!(!mp4_header(file));
+    assert!(!mp4_header(file, file.len() as u64));
 }

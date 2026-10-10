@@ -67,7 +67,7 @@ impl Reader {
         }
         let first = self.read(file, 0, BOX_HEADER.min(size), Some(fetched)).await?;
         let parquet_file = first.starts_with(b"PAR1");
-        if mp4_header(&first)
+        if mp4_header(&first, size)
             && let Some(range) = self.mp4(file, first, fetched).await?
         {
             return self.prefetch_range(file, range, fetched).await;
@@ -269,8 +269,8 @@ fn zip_entry_len(header: &[u8]) -> Option<u64> {
     Some(ZIP_ENTRY_HEADER + u64::from(name) + u64::from(extra) + u64::from(comment))
 }
 
-fn mp4_header(header: &[u8]) -> bool {
-    header.get(4..8) == Some(b"ftyp")
+fn mp4_header(header: &[u8], size: u64) -> bool {
+    mp4_box(0, size, header).is_some_and(|(kind, range)| kind == *b"ftyp" && range.end >= 16)
 }
 
 fn mp4_box(offset: u64, parent_end: u64, header: &[u8]) -> Option<([u8; 4], Range<u64>)> {
