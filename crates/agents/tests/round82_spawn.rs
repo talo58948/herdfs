@@ -116,7 +116,6 @@ fn trial(stopping: bool, number: usize) -> bool {
 /// runner crashes; crashing after the process-group record is durable is the passing control.
 // contract: A2
 #[test]
-#[ignore = "ROUND82: a command can stop the runner before its process group is recorded"]
 fn recovery_contains_a_command_that_stops_the_runner_before_recording() {
     let mut survived = 0;
     for trial_number in 0..3 {

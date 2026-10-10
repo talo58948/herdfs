@@ -1,7 +1,6 @@
 //! Child-process setup, output capture and cancellation for a session.
 
 use std::io;
-use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::process::ExitStatusExt;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
@@ -13,8 +12,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::task::JoinSet;
 
-use super::running::Running;
 use super::{Agent, Session, open, write};
+
+mod start;
 
 const CANCEL_POLL: Duration = Duration::from_millis(100);
 const CAPTURE_DRAIN: Duration = Duration::from_secs(1);
@@ -42,10 +42,9 @@ impl Agent {
             .stdin(prompt.into_std().await)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        child_context(&mut command, cwd.as_raw_fd());
-        let mut child = command.spawn().context("spawn")?;
+        let (mut child, running) = start::spawn(command, session, &cwd)?;
         let group = child.id().context("child has no pid")?;
-        let running = match Running::record(session, group) {
+        let running = match running {
             Ok(running) => running,
             Err(err) => {
                 kill_group(group).context("kill after process-group record failure")?;
@@ -53,7 +52,7 @@ impl Agent {
                     .wait()
                     .await
                     .context("wait after process-group record failure")?;
-                return Err(err).context("record process group");
+                return Err(err);
             }
         };
         drop(cwd);
@@ -162,24 +161,6 @@ fn exit_code(exit: ExitStatus) -> String {
         || format!("signal {}", exit.signal().unwrap_or_default()),
         |code| code.to_string(),
     )
-}
-
-#[expect(
-    unsafe_code,
-    reason = "fchdir must run between fork and exec to hold the checked cwd"
-)]
-fn child_context(command: &mut Command, cwd: RawFd) {
-    unsafe {
-        command.pre_exec(move || {
-            if libc::fchdir(cwd) == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            if libc::setpgid(0, 0) == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
 }
 
 pub(super) fn kill_group(group: u32) -> io::Result<()> {
