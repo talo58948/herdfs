@@ -24,7 +24,7 @@ fn mount_points() -> Result<Vec<std::path::PathBuf>> {
 
 #[cfg(target_os = "macos")]
 fn mount_points() -> Result<Vec<std::path::PathBuf>> {
-    let output = super::process::run(Command::new("mount"))?;
+    let output = super::process::run(&mut Command::new("mount"))?;
     Ok(output
         .lines()
         .filter_map(|line| {
