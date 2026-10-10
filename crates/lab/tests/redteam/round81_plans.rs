@@ -80,7 +80,6 @@ fn access(lab: &Lab, name: &str, gap_kind: &[u8; 4]) -> Result<(u64, u64)> {
 /// `moov`, so index discovery must skip either box and prefetch the complete movie index.
 // contract: P3, C9
 #[test]
-#[ignore = "ROUND81: a valid large MP4 free box hides the moov index"]
 fn round81_mp4_index_after_large_free_box_is_prefetched() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");

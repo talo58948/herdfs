@@ -138,13 +138,13 @@ impl Reader {
             if offset >= size || remaining == 0 {
                 return Ok(None);
             }
-            // Only media payload may be skipped to a remote header; other box lengths must not
-            // widen the fallback.
             let len = BOX_HEADER.min(size - offset);
             let cached = self.cached_range(file, offset, len);
-            header = match (cached, kind) {
-                (Some(header), _) => header,
-                (None, kind) if kind == *b"mdat" => {
+            header = match cached {
+                Some(header) => header,
+                // A lone ftyp claim is not enough to widen an unknown file's fallback.
+                None if range.start == 0 => return Ok(None),
+                None => {
                     let probe = file.overlapping(offset, len);
                     let chunks = file.version.chunks.len();
                     let last = chunks.saturating_sub(FIRST_CHUNKS);
@@ -154,7 +154,6 @@ impl Reader {
                     }
                     self.read(file, offset, len, Some(fetched)).await?
                 }
-                (None, _) => return Ok(None),
             };
         }
         Ok(None)

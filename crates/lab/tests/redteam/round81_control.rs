@@ -94,7 +94,6 @@ fn replacement(lab: &Lab, root: &Path) -> Result<Process> {
 /// the superseded mount's graceful exit must not make the still-running replacement disappear.
 // contract: U1
 #[test]
-#[ignore = "ROUND81: an exiting old mount deletes its live replacement's registration"]
 fn round81_old_mount_exit_does_not_unregister_its_replacement() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");

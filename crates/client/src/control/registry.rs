@@ -1,10 +1,11 @@
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, ensure};
+use rustix::fs::{FlockOperation, flock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -19,6 +20,8 @@ pub(crate) struct Registration {
 
 pub(super) struct Registered {
     path: PathBuf,
+    socket: PathBuf,
+    pid: u32,
 }
 
 impl Registered {
@@ -27,19 +30,44 @@ impl Registered {
         fs::create_dir_all(&dir)?;
         let key = Sha256::digest(registration.mountpoint.as_os_str().as_bytes());
         let path = dir.join(format!("{key:x}.json"));
+        let _lock = lock(&path)?;
         let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
         serde_json::to_writer(&mut temp, registration)?;
         temp.as_file().sync_all()?;
         temp.persist(&path).map_err(|error| error.error)?;
         fs::File::open(&dir)?.sync_all()?;
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            socket: registration.socket.clone(),
+            pid: registration.pid,
+        })
     }
 }
 
 impl Drop for Registered {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let Ok(_lock) = lock(&self.path) else {
+            return;
+        };
+        let own = fs::read(&self.path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Registration>(&bytes).ok())
+            .is_some_and(|current| current.pid == self.pid && current.socket == self.socket);
+        if own {
+            let _ = fs::remove_file(&self.path);
+        }
     }
+}
+
+fn lock(path: &Path) -> anyhow::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_extension("lock"))?;
+    flock(&file, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;
+    Ok(file)
 }
 
 pub(crate) fn find_mount(path: &Path) -> anyhow::Result<Registration> {
