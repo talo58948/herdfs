@@ -41,7 +41,11 @@ fn a_cloned_tree_builds_on_another_client() -> Result<()> {
     let built = build(&lab.mount_path("builder").join(TREE))?;
     // git reads back what it wrote through renames: its index, refs and packs (C1, C7).
     let git = |args: &[&str]| run(Command::new("git").args(args).current_dir(&clone));
-    assert_eq!(git(&["status", "--porcelain"])?, "");
+    // macOS stores NFS resource-fork metadata in ordinary AppleDouble sidecars.
+    assert_eq!(
+        git(&["status", "--porcelain", "--", ".", ":(exclude,glob)**/._*"])?,
+        ""
+    );
     git(&["fsck"])?;
 
     let scratch = tempfile::tempdir()?;
