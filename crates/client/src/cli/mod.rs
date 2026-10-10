@@ -198,7 +198,9 @@ pub fn run() -> anyhow::Result<()> {
         Command::Pause { mountpoint } => control_mount("pause", mountpoint.as_deref(), cli.json),
         Command::Resume { mountpoint } => control_mount("resume", mountpoint.as_deref(), cli.json),
         Command::File { path } => control_path("file", &path, cli.json),
-        Command::Logout(args) => crate::token::remove(&args.path()?).map_err(Into::into),
+        Command::Logout(args) => runtime()?
+            .block_on(crate::token::remove(&args.path()?))
+            .map_err(Into::into),
         Command::Login(args) => runtime()?.block_on(login::login(&args, cli.json)),
         Command::Authority(command) => runtime()?.block_on(commands::run(command, cli.json)),
     }

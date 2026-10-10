@@ -105,7 +105,6 @@ async fn logout(token: &Path) {
 /// refreshing it; deleting an idle token after that refresh is the control.
 // contract: U1
 #[tokio::test]
-#[ignore = "ROUND84: an in-flight refresh recreates a successfully logged-out token"]
 async fn logout_wins_over_an_in_flight_refresh() {
     let mut recreated = 0;
     for trial in 0..3 {

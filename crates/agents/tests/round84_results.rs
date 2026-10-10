@@ -69,7 +69,6 @@ fn result_files(dir: &Path) -> usize {
 /// queued; running cancellations are the control for the ordinary result-writing path.
 // contract: A2
 #[test]
-#[ignore = "ROUND84: queued cancellations omit every promised result file"]
 fn queued_cancellations_write_result_files() {
     let mount = tempfile::tempdir().unwrap();
     let control = session(mount.path(), "running-control");

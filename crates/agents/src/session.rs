@@ -24,7 +24,6 @@ const DIR_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 const FILE_MODE: Mode = Mode::from_raw_mode(0o666);
-const STATUS_TEMP: &str = ".status.tmp";
 
 /// A prompt's size and mtime. Unchanged across two polls means its writer is done.
 #[derive(Clone, Copy, PartialEq)]
@@ -116,6 +115,10 @@ pub(crate) async fn cancel_queued(mount: &Path, dir: &Path) -> io::Result<bool> 
     let session = session(mount, dir).await?;
     match open(&session, "cancel", OFlags::RDONLY).await {
         Ok(_) => {
+            write_atomic(&session, "stdout", b"").await?;
+            write_atomic(&session, "stderr", b"").await?;
+            write_atomic(&session, "output", b"").await?;
+            write(&session, "exit_code", "cancelled before start").await?;
             transition(&session, Some("queued"), "cancelled").await?;
             Ok(true)
         }
@@ -160,22 +163,25 @@ async fn transition(session: &Session, from: Option<&str>, status: &str) -> io::
 }
 
 async fn write_status(session: &Session, status: &str) -> io::Result<()> {
-    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC;
-    let mut file = open(session, STATUS_TEMP, flags).await?;
-    file.write_all(format!("{status}\n").as_bytes()).await?;
-    file.sync_all().await?;
-    let dir = session.file.try_clone()?;
-    tokio::task::spawn_blocking(move || rustix::fs::renameat(&dir, STATUS_TEMP, &dir, "status"))
-        .await
-        .map_err(io::Error::other)??;
-    Ok(())
+    write_atomic(session, "status", format!("{status}\n").as_bytes()).await
 }
 
 async fn write(session: &Session, name: &str, text: &str) -> io::Result<()> {
+    write_atomic(session, name, format!("{text}\n").as_bytes()).await
+}
+
+async fn write_atomic(session: &Session, name: &str, contents: &[u8]) -> io::Result<()> {
     let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC;
-    let mut file = open(session, name, flags).await?;
-    file.write_all(format!("{text}\n").as_bytes()).await?;
-    file.sync_all().await
+    let temporary = format!(".{name}.tmp");
+    let mut file = open(session, &temporary, flags).await?;
+    file.write_all(contents).await?;
+    file.sync_all().await?;
+    let dir = session.file.try_clone()?;
+    let name = name.to_owned();
+    tokio::task::spawn_blocking(move || rustix::fs::renameat(&dir, temporary, &dir, name))
+        .await
+        .map_err(io::Error::other)??;
+    Ok(())
 }
 
 /// A session file's text, or `None` if it does not exist.
