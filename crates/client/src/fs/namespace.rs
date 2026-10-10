@@ -8,7 +8,7 @@ use std::{
 };
 
 use herdfs_core::SpacePath;
-use herdfs_core::proto::{EntryId, ErrorCode};
+use herdfs_core::proto::{Entry, EntryId, ErrorCode};
 
 use super::{Attributes, DirectoryEntry, InodeNo, MAX_NAME, OpenMode, PERMISSIONS, Space, handles::Handle};
 use crate::{Error, Result, journal::Local, lock};
@@ -196,7 +196,7 @@ impl Space {
     /// Lists the directory once, for the readdir calls on this handle to page through.
     pub async fn opendir(self: Arc<Self>, ino: InodeNo) -> Result<u64> {
         let asked = Instant::now();
-        let entries = self.remote.list(self.entry_id(ino)).await?;
+        let entries = self.list(ino).await?;
         let listed = |entry| {
             self.inodes.observe(entry, asked, true);
             let attr = self.attr(entry, None);
@@ -206,6 +206,19 @@ impl Space {
         let handle = self.next_handle.fetch_add(1, Relaxed);
         lock(&self.listings).insert(handle, listing);
         Ok(handle)
+    }
+
+    pub(super) async fn list(&self, ino: InodeNo) -> Result<Vec<Entry>> {
+        let entry = self.entry_id(ino);
+        match self.remote.list(entry).await {
+            Err(error) if error.is_offline() => {
+                let Some(path) = self.path(ino)? else {
+                    return Err(error);
+                };
+                self.kept.listing(self, entry, &path).ok_or(error)
+            }
+            listed => listed,
+        }
     }
 
     pub fn readdir(&self, handle: u64, offset: u64) -> Result<Vec<DirectoryEntry>> {

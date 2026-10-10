@@ -230,12 +230,7 @@ impl Nfs {
         count: usize,
     ) -> Result<ReadDirResult, nfsstat3> {
         let asked = Instant::now();
-        let entries = self
-            .space
-            .remote
-            .list(herdfs_core::proto::EntryId(dir))
-            .await
-            .map_err(Self::stale)?;
+        let entries = self.space.list(self.ino(dir)).await.map_err(Self::stale)?;
         let start = entries
             .iter()
             .position(|entry| entry.id.0 == cookie)
