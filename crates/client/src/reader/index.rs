@@ -1,8 +1,9 @@
 //! Bounded format probing for index prefetch. Ranges become chunk indices before download, so
 //! every byte still uses the ordinary grant, verification and cache path (C9).
 
+use std::collections::HashSet;
 use std::ops::Range;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use crate::Result;
 use crate::strategy::{Prefetch, ReadAhead};
@@ -18,6 +19,8 @@ const SMALL_CHUNKS: usize = 2;
 const LARGE_CHUNKS: usize = 8;
 /// Larger format-declared indexes fall back to the bounded edge window.
 const MAX_INDEX_REGION: u64 = 8 * 1024 * 1024;
+/// Format probes, chunk boundaries, and the selected index or fallback stay within this bound.
+const MAX_INDEX_FETCH: u64 = 36 * 1024 * 1024;
 
 /// ZIP's 22-byte EOCD plus its maximum 65,535-byte comment.
 const ZIP_TAIL: u64 = 65_557;
@@ -128,7 +131,8 @@ impl Reader {
                 return Ok(None);
             };
             if kind == *b"moov" {
-                return Ok(Some(range));
+                let indices = file.overlapping(range.start, range.end - range.start);
+                return Ok(self.fits_index_fetch(file, indices, fetched).then_some(range));
             }
             offset = range.end;
             if offset >= size || remaining == 0 {
@@ -140,7 +144,16 @@ impl Reader {
             let cached = self.cached_range(file, offset, len);
             header = match (cached, kind) {
                 (Some(header), _) => header,
-                (None, kind) if kind == *b"mdat" => self.read(file, offset, len, Some(fetched)).await?,
+                (None, kind) if kind == *b"mdat" => {
+                    let probe = file.overlapping(offset, len);
+                    let chunks = file.version.chunks.len();
+                    let last = chunks.saturating_sub(FIRST_CHUNKS);
+                    let fallback = (0..chunks.min(FIRST_CHUNKS)).chain(last..chunks);
+                    if !self.fits_index_fetch(file, probe.chain(fallback), fetched) {
+                        return Ok(None);
+                    }
+                    self.read(file, offset, len, Some(fetched)).await?
+                }
                 (None, _) => return Ok(None),
             };
         }
@@ -154,6 +167,22 @@ impl Reader {
             bytes.extend_from_slice(chunk.get(file.within(index, off, len))?);
         }
         Some(bytes)
+    }
+
+    fn fits_index_fetch(
+        &self,
+        file: &OpenVersion,
+        indices: impl IntoIterator<Item = usize>,
+        fetched: &AtomicU64,
+    ) -> bool {
+        let mut ids = HashSet::new();
+        let missing: u64 = indices
+            .into_iter()
+            .filter(|&index| ids.insert(file.id(index)))
+            .filter(|&index| self.cached(&file.id(index)).is_none())
+            .map(|index| u64::from(file.version.chunks[index].len))
+            .sum();
+        fetched.load(Relaxed).saturating_add(missing) <= MAX_INDEX_FETCH
     }
 
     async fn prefetch_range(&self, file: &OpenVersion, range: Range<u64>, fetched: &AtomicU64) -> Result<()> {

@@ -209,6 +209,7 @@ impl Nfs {
             Ok(found) => found,
             Err(error) => return Err(self.name_error(&[dir], error).await),
         };
+        let entry = self.space.entry_id(attr.ino);
         self.space.forget(attr.ino, 1);
         match (directory, attr.kind) {
             (true, FileKind::Directory) | (false, FileKind::File | FileKind::Symlink) => {}
@@ -218,6 +219,7 @@ impl Nfs {
         if let Err(error) = self.space.clone().remove(self.ino(dir), name).await {
             return Err(self.name_error(&[dir], error).await);
         }
+        self.discard_flow(entry).await;
         Ok(())
     }
 
