@@ -50,6 +50,7 @@ fn twin(args: &[String]) -> Result<()> {
     for name in &names {
         println!("{name}={}", lab.mount_path(name).display());
     }
+    println!("issuer={}", lab.issuer_url());
     println!("authority={}", lab.authority_url("maker"));
     println!("admin={}", lab.token(ADMIN, &[]));
     println!("ready");
