@@ -99,7 +99,6 @@ async fn control(issuer: &str, token: &Path) {
 /// callback from completing; an otherwise identical uncontended login is the control.
 // contract: U1
 #[tokio::test]
-#[ignore = "ROUND76: one idle loopback connection blocks the real browser login callback"]
 async fn idle_loopback_connection_does_not_block_browser_login() {
     let issuer = issuer().await;
     let mut blocked = 0;
