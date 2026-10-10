@@ -9,7 +9,8 @@ use anyhow::{Result, ensure};
 
 /// Whether `path` is present in the host mount table.
 pub fn mounted(path: &Path) -> bool {
-    mount_points().is_ok_and(|mounts| mounts.iter().any(|mount| mount == path))
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    mount_points().is_ok_and(|mounts| mounts.iter().any(|mount| mount == &path))
 }
 
 #[cfg(target_os = "linux")]
