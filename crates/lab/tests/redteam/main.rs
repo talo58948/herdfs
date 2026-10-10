@@ -94,6 +94,7 @@ mod round73_control;
 mod round73_nfs;
 mod round73_plans;
 mod round75_nfs;
+mod round75_plans;
 mod saved_mtime;
 mod scratch_files;
 mod shared_appends;
