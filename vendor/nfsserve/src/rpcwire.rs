@@ -34,10 +34,8 @@ async fn handle_rpc(
             rpc_vers_mismatch(xid).serialize(output)?;
             return Ok(true);
         }
-        if call.prog == nfs::PROGRAM
-            && call.proc != 0
-            && !matches!(call.cred.flavor, auth_flavor::AUTH_UNIX)
-        {
+        let protected = matches!(call.prog, nfs::PROGRAM | mount::PROGRAM) && call.proc != 0;
+        if protected && (context.client_port >= 1024 || !matches!(call.cred.flavor, auth_flavor::AUTH_UNIX)) {
             auth_error_reply_message(xid).serialize(output)?;
             return Ok(true);
         }
@@ -45,6 +43,10 @@ async fn handle_rpc(
             let mut auth = auth_unix::default();
             auth.deserialize(&mut Cursor::new(&call.cred.body))?;
             context.auth = auth;
+        }
+        if protected && context.auth.uid() != 0 && context.auth.uid() != context.owner_uid {
+            auth_error_reply_message(xid).serialize(output)?;
+            return Ok(true);
         }
 
         let tracked = call.prog == nfs::PROGRAM && nfs_handlers::caches_reply(&call);

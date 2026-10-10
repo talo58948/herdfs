@@ -26,7 +26,11 @@ pub(super) fn mount(args: &MountArgs) -> anyhow::Result<()> {
     let address = format!("127.0.0.1:{}", identity.port());
     let nfs = Nfs::new(space.clone(), identity.clone());
     let listener = runtime
-        .block_on(NFSTcpListener::bind(&address, nfs))
+        .block_on(NFSTcpListener::bind(
+            &address,
+            nfs,
+            rustix::process::geteuid().as_raw(),
+        ))
         .with_context(|| format!("binding the loopback NFS server at {address}"))?;
     let port = listener.get_listen_port();
     let mut server = runtime.spawn(async move { listener.handle_forever().await });

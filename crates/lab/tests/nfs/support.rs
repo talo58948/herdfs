@@ -1,15 +1,17 @@
 use std::fs;
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 use herdfs_core::proto::EntryId;
 
+mod protocol;
 mod reply;
+mod socket;
 
+use protocol::{read_record, rpc_header, send_record};
 use reply::Reply;
 pub use reply::denied_auth;
+pub(crate) use socket::reserved_stream;
 
 const NFS_PROGRAM: u32 = 100_003;
 const NFS_VERSION: u32 = 3;
@@ -95,7 +97,7 @@ impl Rpc {
     pub fn write_then_commit(&mut self, handle: &[u8], data: &[u8]) -> Result<(WriteReply, u32)> {
         let write = self.write_call(handle, data, 0);
         let commit = self.commit_call(handle);
-        let mut stream = TcpStream::connect(("127.0.0.1", self.port))?;
+        let mut stream = reserved_stream(self.port)?;
         send_record(&mut stream, &write)?;
         send_record(&mut stream, &commit)?;
         let write = parse_write(&read_record(&mut stream)?)?;
@@ -171,7 +173,7 @@ impl Rpc {
         args.extend_from_slice(&count.to_be_bytes());
         let mut call = rpc_header(self.next_xid(), 16, 1);
         call.extend_from_slice(&args);
-        let mut stream = TcpStream::connect(("127.0.0.1", self.port))?;
+        let mut stream = reserved_stream(self.port)?;
         stream.set_read_timeout(Some(timeout))?;
         send_record(&mut stream, &call)?;
         read_record(&mut stream)
@@ -185,7 +187,7 @@ impl Rpc {
         if reconnect {
             return Ok([status(&self.send(&call)?)?, status(&self.send(&call)?)?]);
         }
-        let mut stream = TcpStream::connect(("127.0.0.1", self.port))?;
+        let mut stream = reserved_stream(self.port)?;
         send_record(&mut stream, &call)?;
         let first = status(&read_record(&mut stream)?)?;
         send_record(&mut stream, &call)?;
@@ -220,7 +222,7 @@ impl Rpc {
     pub fn auth_null(&mut self) -> Result<Vec<u8>> {
         let xid = self.next_xid();
         let call = rpc_header(xid, 1, 0);
-        let mut stream = TcpStream::connect(("127.0.0.1", self.port))?;
+        let mut stream = reserved_stream(self.port)?;
         send_record(&mut stream, &call)?;
         read_record(&mut stream)
     }
@@ -253,7 +255,7 @@ impl Rpc {
     }
 
     fn send(&self, call: &[u8]) -> Result<Vec<u8>> {
-        let mut stream = TcpStream::connect(("127.0.0.1", self.port))?;
+        let mut stream = reserved_stream(self.port)?;
         send_record(&mut stream, call)?;
         read_record(&mut stream)
     }
@@ -263,24 +265,6 @@ impl Rpc {
         self.xid += 1;
         xid
     }
-}
-
-fn rpc_header(xid: u32, procedure: u32, auth: u32) -> Vec<u8> {
-    let mut out = Vec::new();
-    for word in [xid, 0, 2, NFS_PROGRAM, NFS_VERSION, procedure, auth] {
-        out.extend_from_slice(&word.to_be_bytes());
-    }
-    if auth == 1 {
-        out.extend_from_slice(&20_u32.to_be_bytes());
-        for word in [0_u32, 0, 0, 0, 0] {
-            out.extend_from_slice(&word.to_be_bytes());
-        }
-    } else {
-        out.extend_from_slice(&0_u32.to_be_bytes());
-    }
-    out.extend_from_slice(&0_u32.to_be_bytes());
-    out.extend_from_slice(&0_u32.to_be_bytes());
-    out
 }
 
 fn parse_write(reply: &[u8]) -> Result<WriteReply> {
@@ -303,19 +287,4 @@ pub(crate) fn opaque(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
     out.extend_from_slice(bytes);
     out.resize(out.len().next_multiple_of(4), 0);
-}
-
-fn send_record(stream: &mut TcpStream, call: &[u8]) -> Result<()> {
-    stream.write_all(&((call.len() as u32) | (1 << 31)).to_be_bytes())?;
-    stream.write_all(call)?;
-    Ok(())
-}
-
-fn read_record(stream: &mut TcpStream) -> Result<Vec<u8>> {
-    let mut marker = [0; 4];
-    stream.read_exact(&mut marker)?;
-    let len = (u32::from_be_bytes(marker) & !(1 << 31)) as usize;
-    let mut reply = vec![0; len];
-    stream.read_exact(&mut reply)?;
-    Ok(reply)
 }

@@ -110,6 +110,12 @@ pub struct auth_unix {
 }
 xdr_struct!(auth_unix, stamp, machinename, uid, gid, gids);
 
+impl auth_unix {
+    pub(crate) fn uid(&self) -> u32 {
+        self.uid
+    }
+}
+
 ///Provisions for authentication of caller to service and vice-versa are
 ///provided as a part of the RPC protocol.  The call message has two
 ///authentication fields, the credentials and verifier.  The reply

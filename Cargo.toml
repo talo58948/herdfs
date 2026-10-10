@@ -28,7 +28,7 @@ nfsserve = { path = "vendor/nfsserve" }
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "net"] }
 rusty-s3 = { version = "0.10", default-features = false, features = ["rustcrypto"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

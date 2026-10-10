@@ -15,6 +15,8 @@ use crate::vfs::NFSFileSystem;
 pub struct RPCContext {
     pub local_port: u16,
     pub client_addr: IpAddr,
+    pub client_port: u16,
+    pub owner_uid: u32,
     pub auth: crate::rpc::auth_unix,
     pub vfs: Arc<dyn NFSFileSystem + Send + Sync>,
     pub mount_signal: Option<mpsc::Sender<bool>>,
@@ -103,6 +105,7 @@ impl fmt::Debug for RPCContext {
         f.debug_struct("RPCContext")
             .field("local_port", &self.local_port)
             .field("client_addr", &self.client_addr)
+            .field("client_port", &self.client_port)
             .field("auth", &self.auth)
             .finish()
     }

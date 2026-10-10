@@ -13,7 +13,7 @@ use herdfs_core::SpacePath;
 use herdfs_core::proto::{Entry, Request, Response};
 use herdfs_lab::{Lab, LabConfig, Profile, SPACE, Strategy};
 
-use crate::nfs_support::Rpc;
+use crate::nfs_support::{Rpc, reserved_stream};
 use crate::save;
 
 const NFS3ERR_STALE: u32 = 70;
@@ -39,7 +39,6 @@ fn entry(lab: &Lab, name: &str) -> Result<Entry> {
 /// entries. Once deletion has been visible for T_vis, use of each unlinked handle must be stale.
 // contract: C7, M1
 #[test]
-#[ignore = "ROUND77: active cached reads keep deleted NFS filehandles usable past T_vis"]
 fn round77_active_read_epoch_does_not_hide_a_deleted_handle() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
         eprintln!("skipped: set LAB_MOUNT=nfs for the NFS suite");
@@ -92,7 +91,6 @@ fn round77_active_read_epoch_does_not_hide_a_deleted_handle() -> Result<()> {
 /// export must not let that user bypass the mounting user's private mount directory.
 // contract: M1
 #[test]
-#[ignore = "ROUND77: any local OS user can mount and read the loopback NFS export"]
 fn round77_loopback_export_is_limited_to_the_mounting_user() -> Result<()> {
     if let Ok(port) = std::env::var("ROUND77_NFS_PORT") {
         ensure!(
@@ -135,18 +133,23 @@ fn round77_loopback_export_is_limited_to_the_mounting_user() -> Result<()> {
             .arg(format!("ROUND77_NFS_BYTES={expected}"))
             .arg(&executable)
             .args([
-                "--ignored",
                 "--exact",
                 "round77_nfs::round77_loopback_export_is_limited_to_the_mounting_user",
             ])
             .output()?;
         let read = output.status.success();
+        let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let denied = output.status.code() == Some(101) && stderr.contains("denied");
-        ensure!(read || denied, "unrelated-user helper failed: {stderr}");
+        let denied =
+            output.status.code() == Some(101) && (stdout.contains("denied") || stderr.contains("denied"));
+        ensure!(
+            read || denied,
+            "unrelated-user helper failed ({}): {stdout}{stderr}",
+            output.status
+        );
         eprintln!(
-            "trial {trial}: unrelated user read export={read}, stderr={}",
-            stderr
+            "trial {trial}: unrelated user read export={read}, output={}{stderr}",
+            stdout
         );
         failures += usize::from(read);
     }
@@ -182,6 +185,7 @@ fn raw_read(port: u16, name: &str) -> Result<Vec<u8>> {
 
 fn call(port: u16, program: u32, version: u32, procedure: u32, args: &[u8]) -> Result<Vec<u8>> {
     let mut call = Vec::new();
+    let uid = rustix::process::geteuid().as_raw();
     for word in [
         0x7700_0001,
         0,
@@ -193,8 +197,8 @@ fn call(port: u16, program: u32, version: u32, procedure: u32, args: &[u8]) -> R
         20,
         0,
         0,
-        65_534,
-        65_534,
+        uid,
+        uid,
         0,
         0,
         0,
@@ -202,7 +206,11 @@ fn call(port: u16, program: u32, version: u32, procedure: u32, args: &[u8]) -> R
         call.extend_from_slice(&word.to_be_bytes());
     }
     call.extend_from_slice(args);
-    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+    let mut stream = if rustix::process::geteuid().is_root() {
+        reserved_stream(port)?
+    } else {
+        TcpStream::connect(("127.0.0.1", port))?
+    };
     stream.write_all(&((call.len() as u32 | 1 << 31).to_be_bytes()))?;
     stream.write_all(&call)?;
     let mut marker = [0; 4];
