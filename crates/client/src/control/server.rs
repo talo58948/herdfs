@@ -54,7 +54,6 @@ pub(crate) fn serve(
     let mountpoint = fs::canonicalize(mountpoint)
         .with_context(|| format!("resolving mountpoint {}", mountpoint.display()))?;
     let registration = Registration {
-        id: format!("{:032x}", rand::random::<u128>()),
         space: space_name.to_owned(),
         authority: authority.to_owned(),
         mountpoint,
@@ -218,7 +217,6 @@ mod tests {
     #[test]
     fn control_paths_are_absolute_and_normal() {
         let mount = Registration {
-            id: "test".into(),
             space: "space".into(),
             authority: "http://authority".into(),
             mountpoint: "/mount".into(),

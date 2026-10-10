@@ -184,7 +184,7 @@ fn crc32(bytes: &[u8]) -> u32 {
 /// their 65,536-entry count. Index prefetch must find each complete central directory.
 // contract: P3, C9
 #[test]
-#[ignore = "ROUND73: bounded ZIP64 central directories fall back as unknown input"]
+#[ignore = "outside P3: ZIP64 is not parsed; edge windows apply"]
 fn round73_zip64_central_directory_is_prefetched() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");

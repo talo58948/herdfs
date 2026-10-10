@@ -16,7 +16,6 @@ fn status(path: Option<&std::path::Path>) -> Result<std::process::Output> {
 /// still only one running mount after each restart, so stale registrations must not make it ambiguous.
 // contract: U1
 #[test]
-#[ignore = "ROUND73: stale registrations duplicate one restarted mount"]
 fn round73_pathless_status_survives_mount_restarts() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");

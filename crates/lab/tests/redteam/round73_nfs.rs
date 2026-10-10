@@ -32,7 +32,6 @@ fn entry(lab: &Lab, name: &str) -> Result<Entry> {
 /// spent inside a read is active time, so an immediate next read must remain on the same version.
 // contract: C3, M2
 #[test]
-#[ignore = "ROUND73: a slow NFS read consumes the idle interval before it returns"]
 fn round73_slow_nfs_read_gets_a_full_idle_second_after_completion() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
         eprintln!("skipped: set LAB_MOUNT=nfs for the NFS suite");
@@ -82,6 +81,7 @@ fn round73_slow_nfs_read_gets_a_full_idle_second_after_completion() -> Result<()
         eprintln!("trial {trial}: slow read took {elapsed:?}; immediate read advanced={advanced}");
         failures += usize::from(advanced);
 
+        thread::sleep(IDLE);
         let (status, primed) = rpc.read(&handle, 0, READ_SIZE as u32)?;
         ensure!(status == 0 && primed == new, "trial {trial} control prime failed");
         let control_started = Instant::now();

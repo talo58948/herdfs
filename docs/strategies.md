@@ -48,7 +48,8 @@ The default `rule` uses `whole/none/no` for files smaller than 64 MiB and `none/
 
 Parquet fetches only its footer and `FileMetaData`, ZIP only its end-of-central-directory record and
 central directory, and MP4 only its `moov` box; index prefetch never follows their references into
-file data. Inputs without a bounded matching index envelope fall back to the first and last two chunks.
+file data. ZIP64 archives, and any index the client cannot validate, use the first and last windows
+(two chunks each).
 
 Declared index regions larger than 8 MiB are treated as malformed. ZIP central directories must
 also begin with their expected signature. Including format probes, chunk boundaries and the
