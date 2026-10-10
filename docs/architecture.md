@@ -129,14 +129,13 @@ while online, while an offline COMMIT returns after the generation is sealed in
 the journal (M2). Finder's AppleDouble resource forks and extended attributes
 are ordinary `._` files.
 
-The parent `$HOME/HerdFS` is mode 0700. Non-NULL NFS and MOUNT requests are
-accepted only from a reserved source port and with an AUTH_SYS uid matching the
-mounting user or root. The kernel NFS client uses a reserved port by default on
-Linux and macOS. An unprivileged process therefore cannot issue equivalent raw
-loopback requests. Root remains the local limit: it can use a reserved port and
-uid 0, but the mount still carries only that client's principal and object-store
-grants (S1-S4). Replay identity assumes the single kernel client (XID, request
-checksum, address); only root can introduce a second accepted raw RPC caller.
+The parent `$HOME/HerdFS` and each export-state directory are mode 0700; the
+random export identity is mode 0600. Non-NULL MOUNT requests require a reserved
+source port, while NFS requests require an AUTH_SYS uid matching the mounting
+user or root. MOUNT is the only operation that reveals an export's unguessable
+128-bit identity, embedded in every filehandle and rejected when it differs.
+Root remains the local limit: it can MOUNT and use uid 0, but the mount still
+carries only that client's principal and object-store grants (S1-S4).
 
 ## Deliberately out of v0.1
 

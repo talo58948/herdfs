@@ -2,6 +2,7 @@
 
 use std::fs::{self, File};
 use std::io::{self, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -37,8 +38,13 @@ pub(crate) struct Identity {
 impl Identity {
     pub(crate) fn open(journal: &Path) -> io::Result<Self> {
         let path = journal.with_extension("nfs.json");
+        let parent = path.parent().unwrap_or(Path::new("."));
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
         let (mut state, created) = match fs::read(&path) {
-            Ok(bytes) => (serde_json::from_slice(&bytes)?, false),
+            Ok(bytes) => {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+                (serde_json::from_slice(&bytes)?, false)
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => (
                 State {
                     export_id: rand::random(),
@@ -118,6 +124,7 @@ impl Identity {
         let mut temp = tempfile::Builder::new()
             .prefix(".nfs-identity.")
             .suffix(".tmp")
+            .permissions(fs::Permissions::from_mode(0o600))
             .tempfile_in(parent)?;
         temp.write_all(&serde_json::to_vec(state)?)?;
         temp.as_file().sync_all()?;

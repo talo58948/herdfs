@@ -193,6 +193,32 @@ mod tests {
         assert!(matches!(restarted.fh_to_id(&handle), Ok(42)));
     }
 
+    // contract: M1, S3
+    #[test]
+    fn export_identity_is_private_and_foreign_handles_are_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let first_root = tempfile::tempdir().unwrap();
+        let second_root = tempfile::tempdir().unwrap();
+        fs::set_permissions(first_root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let first = adapter(first_root.path()).0;
+        let foreign = adapter(second_root.path()).0.id_to_fh(42);
+        assert!(matches!(
+            first.fh_to_id(&foreign),
+            Err(nfsstat3::NFS3ERR_BADHANDLE)
+        ));
+
+        let identity = first_root.path().join("journal.nfs.json");
+        assert_eq!(
+            fs::metadata(first_root.path()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(identity).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
     // contract: C4a, M1
     #[test]
     fn write_verifier_changes_for_each_server_incarnation() {
