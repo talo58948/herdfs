@@ -117,7 +117,6 @@ fn signal(kind: &str, pid: &str) {
 /// killed during restart recovery; ordinary live cancellation of the same command is the control.
 // contract: A2
 #[test]
-#[ignore = "ROUND78: recovery misses process-group members that clear their environment"]
 fn recovery_contains_members_without_the_runner_marker() {
     let mount = TempDir::new().unwrap();
     let attacks = sessions(mount.path(), "attack");

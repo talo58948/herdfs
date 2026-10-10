@@ -105,7 +105,6 @@ async fn control(issuer: &str, token: &Path) {
 /// its valid state-and-code callback; an otherwise identical uncontended login is the control.
 // contract: U1
 #[tokio::test]
-#[ignore = "ROUND78: malformed loopback traffic terminates browser login"]
 async fn malformed_loopback_request_does_not_abort_browser_login() {
     let issuer = issuer().await;
     let mut aborted = 0;
