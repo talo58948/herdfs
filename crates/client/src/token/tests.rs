@@ -4,10 +4,17 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use axum::Json;
+use axum::response::IntoResponse;
 use axum::routing::post;
+use axum::{Json, Router};
+use axum::{
+    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    response::Response as HttpResponse,
+};
+use herdfs_core::proto::Request;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
+use tokio::sync::{Barrier, Mutex};
 
 use super::*;
 
@@ -66,40 +73,47 @@ async fn login_exchange_needs_a_refresh_token() -> anyhow::Result<()> {
 }
 
 /// Concurrent requests sharing one login must reuse the first completed refresh just as separate
-/// processes do; an uncontended forced refresh controls the ordinary path.
+/// processes do, or a rotating issuer can invalidate the first caller's retry. An uncontended
+/// expired request and a request with the final fresh token control the ordinary paths.
 // contract: U1
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "ROUND74: concurrent calls on one client refresh the same rotating login twice"]
 async fn concurrent_calls_share_one_rotating_refresh() -> anyhow::Result<()> {
-    let mut duplicated = 0;
+    let mut failed = 0;
     for trial in 0..3 {
-        assert_eq!(
-            forced_refreshes(1).await?,
-            (vec!["access-1".to_owned()], 1),
-            "uncontended control {trial}"
-        );
-        let (mut access, count) = forced_refreshes(2).await?;
-        access.sort();
-        eprintln!("trial {trial}: returned {access:?} after {count} refreshes");
-        duplicated += usize::from(access != ["access-1", "access-1"] || count != 1);
+        assert_eq!(request_wave(1).await?, (1, 1), "uncontended control {trial}");
+        let (succeeded, refreshes) = request_wave(2).await?;
+        eprintln!("trial {trial}: {succeeded}/2 calls succeeded after {refreshes} refreshes");
+        failed += usize::from(succeeded != 2 || refreshes != 1);
     }
-    assert_eq!(duplicated, 0, "{duplicated}/3 shared clients refreshed twice");
+    assert_eq!(failed, 0, "{failed}/3 shared-client request waves failed");
     Ok(())
 }
 
-async fn forced_refreshes(callers: usize) -> anyhow::Result<(Vec<String>, usize)> {
+struct RefreshService {
+    authority: String,
+    token_endpoint: String,
+    refreshes: Arc<AtomicUsize>,
+}
+
+async fn refresh_service(callers: usize) -> anyhow::Result<RefreshService> {
+    let current = Arc::new(Mutex::new("stale".to_owned()));
     let refreshes = Arc::new(AtomicUsize::new(0));
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let endpoint = format!("http://{}", listener.local_addr()?);
-    let app = axum::Router::new().route(
-        "/",
+    let token_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let token_endpoint = format!("http://{}/token", token_listener.local_addr()?);
+    let token = Router::new().route(
+        "/token",
         post({
+            let current = Arc::clone(&current);
             let refreshes = Arc::clone(&refreshes);
             move || {
+                let current = Arc::clone(&current);
                 let generation = refreshes.fetch_add(1, Ordering::SeqCst) + 1;
                 async move {
+                    let access = format!("access-{generation}");
+                    *current.lock().await = access.clone();
                     Json(json!({
-                        "access_token": format!("access-{generation}"),
+                        "access_token": access,
                         "refresh_token": format!("refresh-{generation}"),
                         "expires_in": 60
                     }))
@@ -107,27 +121,86 @@ async fn forced_refreshes(callers: usize) -> anyhow::Result<(Vec<String>, usize)
             }
         }),
     );
-    tokio::spawn(async move { axum::serve(listener, app).await });
+    tokio::spawn(async move { axum::serve(token_listener, token).await });
 
+    let stale = Arc::new(Barrier::new(callers));
+    let authority_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let authority = format!("http://{}", authority_listener.local_addr()?);
+    let rpc = Router::new().route(
+        "/v1/rpc",
+        post({
+            let current = Arc::clone(&current);
+            move |headers: HeaderMap| {
+                let current = Arc::clone(&current);
+                let stale = Arc::clone(&stale);
+                async move {
+                    let bearer = headers
+                        .get(AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.strip_prefix("Bearer "))
+                        .unwrap_or_default()
+                        .to_owned();
+                    if bearer == "stale" {
+                        stale.wait().await;
+                        return refusal();
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    if *current.lock().await == bearer {
+                        return (
+                            StatusCode::OK,
+                            Json(json!({
+                                "type": "me",
+                                "principal": "user:alice",
+                                "groups": []
+                            })),
+                        )
+                            .into_response();
+                    }
+                    refusal()
+                }
+            }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(authority_listener, rpc).await });
+    Ok(RefreshService {
+        authority,
+        token_endpoint,
+        refreshes,
+    })
+}
+
+fn refusal() -> HttpResponse {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"code": "unauthenticated", "message": "stale token"})),
+    )
+        .into_response()
+}
+
+async fn request_wave(callers: usize) -> anyhow::Result<(usize, usize)> {
+    let service = refresh_service(callers).await?;
     let (dir, path) = token_file(60)?;
     let mut stored = read_login(&path)?;
-    stored.token_endpoint = endpoint;
+    stored.access_token = "stale".into();
+    stored.token_endpoint = service.token_endpoint;
     write(&path, &stored, stored.generation)?;
-    let source = Arc::new(Source::new(path)?);
-    let http = Client::new();
+    let remote = Arc::new(crate::remote::Remote::new(&service.authority, "", path, &[])?);
     let calls: Vec<_> = (0..callers)
         .map(|_| {
-            let source = Arc::clone(&source);
-            let http = http.clone();
-            tokio::spawn(async move { source.access(&http, true).await })
+            let remote = Arc::clone(&remote);
+            tokio::spawn(async move { remote.request(Request::Whoami).await })
         })
         .collect();
-    let mut access = Vec::new();
+    let mut succeeded = 0;
     for call in calls {
-        access.push(call.await??);
+        succeeded += usize::from(call.await?.is_ok());
     }
+    assert!(
+        remote.request(Request::Whoami).await.is_ok(),
+        "fresh-token control"
+    );
     drop(dir);
-    Ok((access, refreshes.load(Ordering::SeqCst)))
+    Ok((succeeded, service.refreshes.load(Ordering::SeqCst)))
 }
 
 fn token_file(expires_in: u64) -> anyhow::Result<(tempfile::TempDir, PathBuf)> {
