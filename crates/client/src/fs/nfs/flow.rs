@@ -61,7 +61,11 @@ impl Nfs {
         };
         let size = file.version.size;
         let handle = handle.ok_or(libc::EBADF)?;
-        let bytes = self.space.read_version(Some(file), off, count, &handle).await?;
+        let read = self.space.read_version(Some(file), off, count, &handle).await;
+        if read.is_ok() {
+            flow.lock().await.last_data = Some(Instant::now());
+        }
+        let bytes = read?;
         Ok((bytes, off.saturating_add(u64::from(count)) >= size))
     }
 

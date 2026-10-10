@@ -1,13 +1,15 @@
+use std::collections::HashSet;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, ensure};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Registration {
-    pub id: String,
     pub space: String,
     pub authority: String,
     pub mountpoint: PathBuf,
@@ -23,7 +25,8 @@ impl Registered {
     pub fn write(registration: &Registration) -> anyhow::Result<Self> {
         let dir = directory()?;
         fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{}.json", registration.id));
+        let key = Sha256::digest(registration.mountpoint.as_os_str().as_bytes());
+        let path = dir.join(format!("{key:x}.json"));
         let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
         serde_json::to_writer(&mut temp, registration)?;
         temp.as_file().sync_all()?;
@@ -69,6 +72,7 @@ fn registrations() -> anyhow::Result<Vec<Registration>> {
         Err(error) => return Err(error.into()),
     };
     let mut mounts = Vec::new();
+    let mut mountpoints = HashSet::new();
     for entry in entries {
         let path = match entry {
             Ok(entry) if entry.path().extension().is_some_and(|ext| ext == "json") => entry.path(),
@@ -91,7 +95,7 @@ fn registrations() -> anyhow::Result<Vec<Registration>> {
                 continue;
             }
         };
-        if UnixStream::connect(&mount.socket).is_ok() {
+        if UnixStream::connect(&mount.socket).is_ok() && mountpoints.insert(mount.mountpoint.clone()) {
             mounts.push(mount);
         }
     }
