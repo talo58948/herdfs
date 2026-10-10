@@ -1,5 +1,7 @@
 //! Host-local identity for process groups that outlive a crashed runner.
 
+mod processes;
+
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -7,20 +9,23 @@ use std::path::{Path, PathBuf};
 
 use super::Session;
 use super::process::kill_group;
+use processes::{kill_members, start_time};
 
 pub(super) struct Running {
     path: PathBuf,
     group: u32,
     started: String,
+    session_id: String,
     armed: bool,
 }
 
 impl Running {
-    pub(super) fn record(session: &Session, group: u32) -> io::Result<Self> {
+    pub(super) fn record(session: &Session, group: u32, session_id: String) -> io::Result<Self> {
         let running = Self {
             path: state_path(session)?,
             group,
             started: start_time(group)?,
+            session_id,
             armed: true,
         };
         let temporary = running.path.with_extension(format!("{}.tmp", std::process::id()));
@@ -30,7 +35,11 @@ impl Running {
             .truncate(true)
             .mode(0o600)
             .open(&temporary)?;
-        write!(file, "{}\n{}\n", running.group, running.started)?;
+        write!(
+            file,
+            "{}\n{}\n{}\n",
+            running.group, running.started, running.session_id
+        )?;
         file.sync_all()?;
         fs::rename(temporary, &running.path)?;
         Ok(running)
@@ -59,10 +68,16 @@ impl Running {
             .filter(|line| !line.is_empty())
             .ok_or_else(|| invalid("process start time"))?
             .to_owned();
+        let session_id = lines
+            .next()
+            .filter(|line| !line.is_empty())
+            .ok_or_else(|| invalid("session id"))?
+            .to_owned();
         Ok(Some(Self {
             path,
             group,
             started,
+            session_id,
             armed: true,
         }))
     }
@@ -71,13 +86,19 @@ impl Running {
         match start_time(self.group) {
             Ok(started) if started == self.started => kill_group(self.group)?,
             Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                kill_members(self.group, &self.session_id)?;
+            }
             Err(err) => return Err(err),
         }
         remove(&self.path)?;
         self.armed = false;
         Ok(())
     }
+}
+
+pub(super) fn session_id() -> String {
+    format!("{:032x}", rand::random::<u128>())
 }
 
 impl Drop for Running {
@@ -116,51 +137,4 @@ fn remove(path: &Path) -> io::Result<()> {
 
 fn invalid(field: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("invalid {field} record"))
-}
-
-#[cfg(target_os = "linux")]
-fn start_time(pid: u32) -> io::Result<String> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    let (_, fields) = stat
-        .rsplit_once(") ")
-        .ok_or_else(|| invalid("/proc process stat"))?;
-    let fields = fields.split_whitespace();
-    let group = fields
-        .clone()
-        .nth(2)
-        .ok_or_else(|| invalid("/proc process group"))?;
-    let started = fields
-        .clone()
-        .nth(19)
-        .ok_or_else(|| invalid("/proc process start time"))?;
-    Ok(format!("{started}:{group}"))
-}
-
-#[cfg(target_os = "macos")]
-#[expect(
-    unsafe_code,
-    reason = "proc_pidinfo provides precise process identity on macOS"
-)]
-fn start_time(pid: u32) -> io::Result<String> {
-    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
-    let size = size_of::<libc::proc_bsdinfo>() as i32;
-    // SAFETY: proc_pidinfo receives a correctly sized, writable PROC_PIDTBSDINFO buffer.
-    let read = unsafe {
-        libc::proc_pidinfo(
-            pid as i32,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            info.as_mut_ptr().cast(),
-            size,
-        )
-    };
-    if read != size {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: a full buffer was initialized by proc_pidinfo.
-    let info = unsafe { info.assume_init() };
-    Ok(format!(
-        "{}:{}:{}",
-        info.pbi_start_tvsec, info.pbi_start_tvusec, info.pbi_pgid
-    ))
 }

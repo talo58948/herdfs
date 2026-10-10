@@ -13,7 +13,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::task::JoinSet;
 
-use super::running::Running;
+use super::running::{self, Running};
 use super::{Agent, Session, open, write};
 
 const CANCEL_POLL: Duration = Duration::from_millis(100);
@@ -33,11 +33,13 @@ impl Agent {
         let stderr = result_file(session, "stderr").await?;
         let stdout_sync = stdout.try_clone().await?;
         let stderr_sync = stderr.try_clone().await?;
+        let session_id = running::session_id();
         let mut command = Command::new("sh");
         command
             .arg("-c")
             .arg(&self.command)
             .env("HERDFS_SESSION_DIR", &session.dir)
+            .env("HERDFS_SESSION_ID", &session_id)
             .env("HERDFS_MOUNT", &self.mount)
             .stdin(prompt.into_std().await)
             .stdout(Stdio::piped())
@@ -45,7 +47,7 @@ impl Agent {
         child_context(&mut command, cwd.as_raw_fd());
         let mut child = command.spawn().context("spawn")?;
         let group = child.id().context("child has no pid")?;
-        let running = match Running::record(session, group) {
+        let running = match Running::record(session, group, session_id) {
             Ok(running) => running,
             Err(err) => {
                 kill_group(group).context("kill after process-group record failure")?;
@@ -182,12 +184,17 @@ fn child_context(command: &mut Command, cwd: RawFd) {
     }
 }
 
-#[expect(
-    unsafe_code,
-    reason = "libc is the portable Unix process-group signalling API"
-)]
 pub(super) fn kill_group(group: u32) -> io::Result<()> {
-    let result = unsafe { libc::kill(-(group as libc::pid_t), libc::SIGKILL) };
+    kill(-(group as libc::pid_t))
+}
+
+pub(super) fn kill_process(pid: u32) -> io::Result<()> {
+    kill(pid as libc::pid_t)
+}
+
+#[expect(unsafe_code, reason = "libc is the portable Unix process signalling API")]
+fn kill(target: libc::pid_t) -> io::Result<()> {
+    let result = unsafe { libc::kill(target, libc::SIGKILL) };
     if result == 0 {
         return Ok(());
     }

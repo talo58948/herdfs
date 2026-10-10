@@ -40,6 +40,8 @@ pub(crate) struct Source {
     stored: Mutex<Stored>,
 }
 
+type Access = (String, Option<u64>);
+
 impl Source {
     pub(crate) fn new(path: PathBuf) -> Result<Self> {
         let stored = read(&path)?;
@@ -49,25 +51,36 @@ impl Source {
         })
     }
 
-    pub(crate) async fn access(&self, http: &Client, force_refresh: bool) -> Result<String> {
+    pub(crate) async fn access(&self, http: &Client) -> Result<Access> {
+        self.token(http, None).await
+    }
+
+    pub(crate) async fn refresh(&self, http: &Client, generation: Option<u64>) -> Result<Access> {
+        self.token(http, Some(generation)).await
+    }
+
+    async fn token(&self, http: &Client, refresh_after: Option<Option<u64>>) -> Result<Access> {
         let mut stored = self.stored.lock().await;
-        let cached_generation = match &*stored {
-            Stored::Legacy(_) if !force_refresh => return stored.access(),
-            Stored::Legacy(_) => None,
-            Stored::Login(token) if !force_refresh && !refresh_due(token) => {
-                return Ok(token.access_token.clone());
+        match &*stored {
+            Stored::Legacy(_) if refresh_after.is_none() => return Ok(stored.access()),
+            Stored::Legacy(_) => {}
+            Stored::Login(token) if refresh_after.is_none() && !refresh_due(token) => {
+                return Ok(stored.access());
             }
-            Stored::Login(token) => Some(token.generation),
-        };
+            Stored::Login(_) => {}
+        }
         let _lock = lock(self.path.with_extension("lock")).await?;
         *stored = read(&self.path)?;
         let Stored::Login(token) = &*stored else {
-            return stored.access();
+            return Ok(stored.access());
         };
-        if (!force_refresh && !refresh_due(token))
-            || (force_refresh && Some(token.generation) != cached_generation)
+        if refresh_after.is_none() && !refresh_due(token)
+            || refresh_after == Some(None)
+            || refresh_after
+                .flatten()
+                .is_some_and(|generation| token.generation > generation)
         {
-            return Ok(token.access_token.clone());
+            return Ok(stored.access());
         }
         let form = [
             ("grant_type", "refresh_token"),
@@ -79,15 +92,14 @@ impl Source {
         let refreshed = exchange(http, &token.token_endpoint, &form, Some(&token.refresh_token)).await;
         let mut refreshed = match refreshed {
             Ok(refreshed) => refreshed,
-            Err(_) if !force_refresh && now() < expires_at => {
-                return Ok(token.access_token.clone());
+            Err(_) if refresh_after.is_none() && now() < expires_at => {
+                return Ok(stored.access());
             }
             Err(error) => return Err(error),
         };
         refreshed.generation = write(&self.path, &refreshed, generation)?;
-        let access = refreshed.access_token.clone();
         *stored = Stored::Login(refreshed);
-        Ok(access)
+        Ok(stored.access())
     }
 }
 
@@ -97,10 +109,10 @@ enum Stored {
 }
 
 impl Stored {
-    fn access(&self) -> Result<String> {
+    fn access(&self) -> Access {
         match self {
-            Self::Login(token) => Ok(token.access_token.clone()),
-            Self::Legacy(token) => Ok(token.clone()),
+            Self::Login(token) => (token.access_token.clone(), Some(token.generation)),
+            Self::Legacy(token) => (token.clone(), None),
         }
     }
 }
