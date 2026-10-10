@@ -2,3 +2,9 @@
 [[profile.default.overrides]]
 filter = 'test(an_upload_answers_the_same_whether_or_not_the_store_has_the_bytes)'
 threads-required = "num-test-threads"
+
+# A pathless `herdfs status` sees every mount the user has registered, so other lab tests'
+# mounts would make it ambiguous.
+[[profile.default.overrides]]
+filter = 'test(round73_pathless_status_survives_mount_restarts)'
+threads-required = "num-test-threads"
