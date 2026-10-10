@@ -34,7 +34,7 @@ async fn a_valid_cached_token_needs_no_file_read() -> anyhow::Result<()> {
     let (dir, path) = token_file(60)?;
     let source = Source::new(path.clone())?;
     fs::remove_file(path)?;
-    assert_eq!(source.access(&Client::new(), false).await?, "access");
+    assert_eq!(source.access(&Client::new()).await?.0, "access");
     drop(dir);
     Ok(())
 }
@@ -52,7 +52,7 @@ async fn a_failed_early_refresh_uses_the_still_valid_token() -> anyhow::Result<(
     token.token_endpoint = endpoint;
     write(&path, &token, token.generation)?;
     let http = Client::builder().timeout(Duration::from_millis(10)).build()?;
-    assert_eq!(Source::new(path)?.access(&http, false).await?, "access");
+    assert_eq!(Source::new(path)?.access(&http).await?.0, "access");
     drop(dir);
     Ok(())
 }
@@ -77,7 +77,6 @@ async fn login_exchange_needs_a_refresh_token() -> anyhow::Result<()> {
 /// expired request and a request with the final fresh token control the ordinary paths.
 // contract: U1
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "ROUND74: concurrent calls on one client refresh the same rotating login twice"]
 async fn concurrent_calls_share_one_rotating_refresh() -> anyhow::Result<()> {
     let mut failed = 0;
     for trial in 0..3 {

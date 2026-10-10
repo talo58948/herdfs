@@ -1600,6 +1600,7 @@ dependencies = [
  "anyhow",
  "clap",
  "libc",
+ "rand 0.10.3",
  "rustix",
  "tempfile",
  "tokio",

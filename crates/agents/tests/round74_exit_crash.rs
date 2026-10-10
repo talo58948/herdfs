@@ -116,7 +116,6 @@ fn signal(kind: &str, pid: &str) {
 /// leader exited just before the runner crashed; ordinary cancellation is the passing control.
 // contract: A2
 #[test]
-#[ignore = "ROUND74: recovery loses groups whose leader exited before the runner crashed"]
 fn recovery_contains_a_group_after_its_leader_exits() {
     let mount = TempDir::new().unwrap();
     let attacks = sessions(mount.path(), "attack");
