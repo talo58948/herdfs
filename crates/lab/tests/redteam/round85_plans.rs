@@ -116,7 +116,6 @@ fn access(lab: &Lab, name: &str, truncated_ftyp: bool) -> Result<(u64, u64, u64)
 /// The truncated candidates are unexpected input and must use the edge-window fallback.
 // contract: P3, C9
 #[test]
-#[ignore = "ROUND85: a truncated MP4 ftyp widens index prefetch"]
 fn round85_truncated_mp4_ftyp_uses_fallback() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");
