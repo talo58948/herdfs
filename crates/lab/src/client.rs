@@ -160,8 +160,9 @@ impl Client {
 
     /// SIGKILLs the mount process, then detaches the mount it leaves behind.
     pub(crate) fn kill(&mut self) -> Result<()> {
+        let mounted = mount::mounted(&self.mount);
         self.process = None;
-        if !mount::mounted(&self.mount) {
+        if !mounted {
             return Ok(());
         }
         match self.spec.mount {
