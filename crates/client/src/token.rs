@@ -65,7 +65,8 @@ impl Source {
             }
             Stored::Login(_) => {}
         }
-        let _lock = lock(self.path.with_extension("lock")).await?;
+        let _refresh_lock = lock(self.path.with_extension("refresh.lock")).await?;
+        let token_lock = lock(self.path.with_extension("lock")).await?;
         *stored = read(&self.path)?;
         let Stored::Login(token) = &*stored else {
             return Ok(stored.access());
@@ -85,6 +86,7 @@ impl Source {
         ];
         let expires_at = token.expires_at;
         let generation = token.generation;
+        drop(token_lock);
         let refreshed = exchange(http, &token.token_endpoint, &form, Some(&token.refresh_token)).await;
         let mut refreshed = match refreshed {
             Ok(refreshed) => refreshed,
@@ -93,6 +95,16 @@ impl Source {
             }
             Err(error) => return Err(error),
         };
+        let _lock = lock(self.path.with_extension("lock")).await?;
+        if !exists(&self.path)? {
+            *stored = Stored::Login(refreshed);
+            return Ok(stored.access());
+        }
+        let current = read(&self.path)?;
+        if !matches!(&current, Stored::Login(token) if token.generation == generation) {
+            *stored = current;
+            return Ok(stored.access());
+        }
         refreshed.generation = write(&self.path, &refreshed, generation)?;
         *stored = Stored::Login(refreshed);
         Ok(stored.access())
@@ -169,12 +181,25 @@ fn generation(path: &Path) -> u64 {
         .map_or(0, |token| token.generation)
 }
 
-pub(crate) fn remove(path: &Path) -> Result<()> {
+pub(crate) async fn remove(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
+    let _lock = lock(path.with_extension("lock")).await?;
     remove_refresh(path)?;
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(Error::Io(error)),
+    }
+}
+
+fn exists(path: &Path) -> Result<bool> {
+    match fs::metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
     }
 }
 
