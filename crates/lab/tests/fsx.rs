@@ -117,7 +117,10 @@ fn exercise(strategy: impl FnOnce(u64) -> Strategy) -> Result<()> {
 
 /// Runs fsx on `dir`/[`FILE`], keeping its artifacts in `artifacts`.
 fn fsx(dir: &Path, artifacts: &Path, seed: u64, ops: u64) -> Result<()> {
-    let config = if env::var("LAB_MOUNT").as_deref() == Ok("nfs") {
+    let nfs = env::var("LAB_MOUNT").as_deref() == Ok("nfs");
+    let config = if cfg!(target_os = "macos") && nfs {
+        "fsx-macos-nfs.toml"
+    } else if nfs {
         "fsx-nfs.toml"
     } else {
         "fsx.toml"
