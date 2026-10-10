@@ -20,10 +20,15 @@ mod state;
 pub(crate) use state::load;
 use state::{Loaded, Saved, SavedFile};
 
+struct Download {
+    pending: bool,
+}
+
 pub(crate) struct Kept {
     path: PathBuf,
     saved: Mutex<Saved>,
     pending: Mutex<BTreeSet<SpacePath>>,
+    downloads: Mutex<BTreeMap<SpacePath, Download>>,
     errors: Mutex<BTreeMap<SpacePath, String>>,
     write: Mutex<()>,
     wake: Notify,
@@ -36,6 +41,7 @@ impl Kept {
             path,
             saved: Mutex::new(loaded.saved),
             pending: Mutex::new(pending),
+            downloads: Mutex::default(),
             errors: Mutex::default(),
             write: Mutex::default(),
             wake: Notify::new(),
@@ -126,6 +132,7 @@ impl Kept {
         let saved = lock(&self.saved);
         let pending = lock(&self.pending);
         let errors = lock(&self.errors);
+        let downloads = lock(&self.downloads);
         let mut ids = HashSet::new();
         let bytes = saved
             .files
@@ -140,6 +147,7 @@ impl Kept {
             .keys()
             .map(|root| {
                 let ready = !pending.contains(root)
+                    && !downloads.get(root).is_some_and(|download| download.pending)
                     && !errors.contains_key(root)
                     && saved
                         .files

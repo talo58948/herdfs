@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{Entry, EntryId, Kind, Version};
 
-use super::{Kept, unpin_file};
+use super::{CHECK_HEADS, Download, Kept, unpin_file};
 use crate::fs::Space;
 use crate::version::OpenVersion;
 use crate::{Error, Result, lock};
@@ -12,20 +13,23 @@ use crate::{Error, Result, lock};
 impl Kept {
     pub(super) async fn heads_changed(&self, space: &Space) -> bool {
         let saved = lock(&self.saved).clone();
-        for root in saved.roots.keys() {
+        let mut changed = false;
+        'roots: for root in saved.roots.keys() {
             if let Some(entry) = saved.roots[root] {
                 let current = match space.remote.locate(entry).await {
                     Ok(current) => current,
-                    Err(error) if error.is_offline() => return false,
+                    Err(error) if error.is_offline() => continue,
                     Err(_) => {
                         lock(&self.pending).insert(root.clone());
-                        return true;
+                        changed = true;
+                        continue;
                     }
                 };
                 let version = saved.files.get(root).map(|file| file.current.id);
                 if current.path != *root || current.kind == Kind::File && current.head != version {
                     lock(&self.pending).insert(root.clone());
-                    return true;
+                    changed = true;
+                    continue;
                 }
             }
             let entries: Vec<_> = space
@@ -47,10 +51,11 @@ impl Kept {
             for directory in entries.iter().filter(|entry| entry.kind == Kind::Dir) {
                 let listed = match space.remote.list(directory.id).await {
                     Ok(listed) => listed,
-                    Err(error) if error.is_offline() => return false,
+                    Err(error) if error.is_offline() => continue 'roots,
                     Err(_) => {
                         lock(&self.pending).insert(root.clone());
-                        return true;
+                        changed = true;
+                        continue 'roots;
                     }
                 };
                 let listed_entries: HashSet<_> = listed
@@ -63,14 +68,14 @@ impl Kept {
                 });
                 if known.remove(&directory.path).unwrap_or_default() != listed_entries || heads_changed {
                     lock(&self.pending).insert(root.clone());
-                    return true;
+                    changed = true;
                 }
             }
         }
-        false
+        changed || !lock(&self.pending).is_empty()
     }
 
-    pub(super) async fn refresh(&self, space: &Space) {
+    pub(super) async fn refresh(self: &Arc<Self>, space: &Arc<Space>) {
         let roots: Vec<_> = lock(&self.saved)
             .roots
             .iter()
@@ -110,15 +115,7 @@ impl Kept {
             match self.scan(space, entry).await {
                 Ok((files, found)) => {
                     let seen = files.iter().map(|(path, _, _)| path.clone()).collect();
-                    let mut error = None;
-                    for (path, entry, version) in files {
-                        if let Err(failed) = self.fetch(space, path, entry, version).await {
-                            error.get_or_insert_with(|| failed.to_string());
-                        }
-                    }
-                    self.set_error(&root, error);
-                    self.drop_unseen(space, &root, &seen);
-                    lock(&self.pending).remove(&root);
+                    self.download(space, root, files, seen);
                     entries.extend(found);
                 }
                 Err(error) => {
@@ -130,6 +127,45 @@ impl Kept {
             }
         }
         space.inodes.keep(entries);
+    }
+
+    fn download(
+        self: &Arc<Self>,
+        space: &Arc<Space>,
+        root: SpacePath,
+        files: Vec<(SpacePath, Entry, Option<Version>)>,
+        seen: std::collections::BTreeSet<SpacePath>,
+    ) {
+        let mut pending = lock(&self.pending);
+        let mut downloads = lock(&self.downloads);
+        if downloads.contains_key(&root) {
+            return;
+        }
+        let changed = pending.remove(&root);
+        downloads.insert(root.clone(), Download { pending: changed });
+        drop(downloads);
+        drop(pending);
+        let kept = self.clone();
+        let space = space.clone();
+        tokio::spawn(async move {
+            let mut error = None;
+            let mut retry = false;
+            for (path, entry, version) in files {
+                if let Err(failed) = kept.fetch(&space, path, entry, version).await {
+                    retry |= failed.is_offline();
+                    error.get_or_insert_with(|| failed.to_string());
+                }
+            }
+            if retry {
+                lock(&kept.pending).insert(root.clone());
+            }
+            kept.set_error(&root, error);
+            kept.drop_unseen(&space, &root, &seen);
+            lock(&kept.downloads).remove(&root);
+            if lock(&kept.pending).contains(&root) {
+                kept.wake.notify_one();
+            }
+        });
     }
 
     pub(super) fn relocate(
@@ -195,7 +231,18 @@ impl Kept {
             return Ok(());
         };
         if downloading {
-            space.reader.cache_all(&OpenVersion::new(version.clone())).await?;
+            let file = OpenVersion::new(version.clone());
+            let download = space.reader.cache_all(&file);
+            tokio::pin!(download);
+            loop {
+                tokio::select! {
+                    result = &mut download => break result?,
+                    _ = tokio::time::sleep(CHECK_HEADS) => {}
+                }
+                if !space.remote.link.connected() {
+                    return Err(Error::Offline);
+                }
+            }
         }
         if let Some(chunk) = version
             .chunks

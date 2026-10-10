@@ -1,7 +1,5 @@
 //! NFS data-access epochs and whole-file write generations (M2).
 
-use std::fs::File;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use herdfs_core::proto::EntryId;
@@ -22,7 +20,6 @@ struct Epoch {
     head: Head,
     attr: Attributes,
     handle: u64,
-    checked: Instant,
 }
 
 #[derive(Default)]
@@ -32,6 +29,7 @@ pub(super) struct Flow {
     in_flight: usize,
     last_completed: Option<Instant>,
     epoch_stale: bool,
+    checked: Option<Instant>,
     serial: u64,
 }
 
@@ -59,13 +57,12 @@ impl Nfs {
         let flow = self.flow(entry);
         let mut state = flow.lock().await;
         let copy = self.local_copy(entry);
-        if copy.is_none() {
-            self.refresh_epoch(entry, &mut state).await?;
-            self.revalidate_epoch(entry, &mut state).await?;
-        }
+        self.revalidate_access(entry, &mut state).await?;
+        self.refresh_epoch(entry, &mut state).await?;
         if copy.is_none() && state.write.is_none() && (state.epoch.is_none() || state.idle()) {
             self.end_epoch(&mut state).await?;
             state.epoch = Some(self.start_epoch(entry).await?);
+            state.checked = Some(Instant::now());
         }
         let epoch = state.epoch.as_ref();
         let head = epoch.and_then(|epoch| epoch.head.clone());
@@ -104,6 +101,7 @@ impl Nfs {
         let flow = self.flow(entry);
         let mut state = flow.lock().await;
         self.expire_epoch(&mut state).await?;
+        self.revalidate_access(entry, &mut state).await?;
         let (handle, started) = self.write_handle(entry, &mut state, OpenMode::Write).await?;
         if started {
             arm_idle(
@@ -145,10 +143,12 @@ impl Nfs {
         let flow = self.flow(entry);
         let mut state = flow.lock().await;
         self.expire_epoch(&mut state).await?;
+        self.revalidate_access(entry, &mut state).await?;
         let (handle, started) = match (state.write, initial) {
             (Some(handle), _) => (handle, false),
             (None, Some(handle)) => {
                 state.write = Some(handle);
+                state.checked = Some(Instant::now());
                 state.serial = state.serial.wrapping_add(1);
                 (handle, true)
             }
@@ -181,6 +181,7 @@ impl Nfs {
             return self.space.sync_entry(entry, None).await;
         };
         let mut state = flow.lock().await;
+        self.revalidate_access(entry, &mut state).await?;
         state.begin();
         let result = match state.write {
             Some(handle) => self.finish_generation(entry, handle, &mut state).await,
@@ -204,6 +205,9 @@ impl Nfs {
     pub(super) async fn flow_attr(&self, entry: EntryId) -> Option<Attributes> {
         let flow = self.existing_flow(entry)?;
         let mut state = flow.lock().await;
+        if self.revalidate_access(entry, &mut state).await.is_err() {
+            return None;
+        }
         let known = self.space.known_attr(entry);
         if state.write.is_some() && known.is_some() {
             return known;
@@ -233,12 +237,7 @@ impl Nfs {
             tokio::spawn(self.space.clone().upgrade(handle, upgrade));
         }
         let (attr, _) = self.space.clone().getattr(self.space.ino(entry)).await?;
-        Ok(Epoch {
-            head,
-            attr,
-            handle,
-            checked: Instant::now(),
-        })
+        Ok(Epoch { head, attr, handle })
     }
 
     async fn write_handle(&self, entry: EntryId, state: &mut Flow, mode: OpenMode) -> Result<(u64, bool)> {
@@ -251,6 +250,7 @@ impl Nfs {
             .open(self.space.ino(entry), mode, "nfs")
             .await?;
         state.write = Some(handle);
+        state.checked = Some(Instant::now());
         state.serial = state.serial.wrapping_add(1);
         Ok((handle, true))
     }
@@ -281,10 +281,6 @@ impl Nfs {
         }
         state.epoch_stale = false;
         Ok(())
-    }
-
-    fn local_copy(&self, entry: EntryId) -> Option<Arc<File>> {
-        self.space.inodes.local(entry, |local| local.copy()).flatten()
     }
 
     async fn finish_generation(&self, entry: EntryId, handle: u64, state: &mut Flow) -> Result<()> {

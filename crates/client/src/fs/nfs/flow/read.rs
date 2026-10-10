@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::os::unix::fs::FileExt;
+use std::sync::Arc;
 use std::time::Instant;
 
 use herdfs_core::proto::EntryId;
@@ -9,14 +10,18 @@ use crate::Result;
 use crate::fs::nfs::Nfs;
 
 impl Nfs {
-    pub(in crate::fs::nfs) async fn revalidate_epoch(&self, entry: EntryId, state: &mut Flow) -> Result<()> {
-        let Some(epoch) = &mut state.epoch else {
-            return Ok(());
-        };
-        if epoch.checked.elapsed() < IDLE {
+    pub(super) fn local_copy(&self, entry: EntryId) -> Option<Arc<File>> {
+        self.space.inodes.local(entry, |local| local.copy()).flatten()
+    }
+
+    pub(in crate::fs::nfs) async fn revalidate_access(&self, entry: EntryId, state: &mut Flow) -> Result<()> {
+        if state.epoch.is_none() && state.write.is_none() && self.local_copy(entry).is_none() {
             return Ok(());
         }
-        epoch.checked = Instant::now();
+        if state.checked.is_some_and(|checked| checked.elapsed() < IDLE) {
+            return Ok(());
+        }
+        state.checked = Some(Instant::now());
         match self.space.remote.locate(entry).await {
             Ok(_) => Ok(()),
             Err(error) if error.is_offline() => Ok(()),
@@ -24,6 +29,10 @@ impl Nfs {
                 let error = self.space.gone(self.space.ino(entry), error);
                 if error.errno() == libc::ESTALE {
                     self.end_epoch(state).await?;
+                    if let Some(handle) = state.write.take() {
+                        self.space.clone().release(handle).await?;
+                    }
+                    state.checked = None;
                 }
                 Err(error)
             }
