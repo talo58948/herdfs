@@ -56,7 +56,6 @@ fn wait_until(lab: &Lab, root: &str, expected: bool) -> Result<Value> {
 /// first root downloads slowly. Each root's readiness must reflect its own latest membership.
 // contract: P4, C2
 #[test]
-#[ignore = "ROUND79: one slow kept root blocks readiness checks for another root"]
 fn round79_slow_kept_root_does_not_hide_another_roots_new_child() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() == Ok("nfs") {
         eprintln!("skipped: the default-mount probe runs separately from NFS");

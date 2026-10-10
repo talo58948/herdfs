@@ -33,7 +33,6 @@ fn entry(lab: &Lab, name: &str) -> Result<Entry> {
 /// renames a source over them. Once the replacement is visible, each old handle must be stale.
 // contract: C7, M1
 #[test]
-#[ignore = "ROUND79: a replaced destination's active NFS write generation remains usable"]
 fn round79_replaced_nfs_write_generation_becomes_stale() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
         eprintln!("skipped: set LAB_MOUNT=nfs for the NFS suite");
