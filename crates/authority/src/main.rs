@@ -73,6 +73,7 @@ enum Command {
     RevokeToken {
         #[arg(long)]
         db: PathBuf,
+        #[arg(allow_hyphen_values = true)]
         id: String,
     },
 }

@@ -90,6 +90,8 @@ impl Server {
         let issuer = local_issuer.issuer().to_owned();
         let audience = local_issuer.audience().to_owned();
         let public_key = local_issuer.public_key();
+        let key = local_issuer.decoding_key();
+        let verifier = auth::Verifier::new_fixed(issuer.clone(), audience.clone(), KEY_ID, key);
         let mut server = Self::new(
             authority,
             bucket,
@@ -99,6 +101,7 @@ impl Server {
             audience,
             grant_ttl,
         );
+        server.verifier = verifier;
         server.local_key = Some(public_key);
         server
     }
