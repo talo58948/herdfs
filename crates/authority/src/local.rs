@@ -11,7 +11,7 @@ use anyhow::Context;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::SigningKey;
-use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header};
 use herdfs_core::proto;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -104,6 +104,10 @@ impl LocalIssuer {
         URL_SAFE_NO_PAD.encode(self.key.verifying_key().as_bytes())
     }
 
+    pub(crate) fn decoding_key(&self) -> DecodingKey {
+        DecodingKey::from_ed_der(self.key.verifying_key().as_bytes())
+    }
+
     pub(crate) fn issuer(&self) -> &str {
         &self.stored.issuer
     }
@@ -143,7 +147,7 @@ impl Authority {
         let exp = now
             .checked_add(ttl.as_secs())
             .context("token expiry is too large")?;
-        let id = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 16]>());
+        let id = format!("{:032x}", rand::random::<u128>());
         let token = issuer.token(user, &id, now, exp)?;
         let now_ms = i64::try_from(now.saturating_mul(1000))?;
         let exp_ms = i64::try_from(exp.saturating_mul(1000))?;

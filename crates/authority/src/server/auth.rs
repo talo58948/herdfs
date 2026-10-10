@@ -23,6 +23,7 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) struct Verifier {
     issuer: String,
     audience: String,
+    fixed: Option<(String, DecodingKey)>,
     http: reqwest::Client,
     keys: Mutex<Keys>,
     refreshing: Mutex<()>,
@@ -61,10 +62,17 @@ impl Verifier {
         Self {
             issuer,
             audience,
+            fixed: None,
             http: reqwest::Client::new(),
             keys: Mutex::default(),
             refreshing: Mutex::new(()),
         }
+    }
+
+    pub(super) fn new_fixed(issuer: String, audience: String, key_id: &str, key: DecodingKey) -> Self {
+        let mut verifier = Self::new(issuer, audience);
+        verifier.fixed = Some((key_id.to_owned(), key));
+        verifier
     }
 
     pub(super) fn issuer(&self) -> &str {
@@ -114,6 +122,11 @@ impl Verifier {
     }
 
     async fn key(&self, kid: &str) -> Result<DecodingKey, proto::Error> {
+        if let Some((fixed_id, key)) = &self.fixed {
+            return (fixed_id == kid)
+                .then(|| key.clone())
+                .ok_or_else(|| unauthenticated(format!("unknown key id {kid:?}")));
+        }
         let keys = self.keys.lock().await;
         if keys.fetched.is_none_or(|at| at.elapsed() >= TRUST_AT_MOST) {
             let message = "the issuer's keys could not be fetched";
@@ -127,6 +140,9 @@ impl Verifier {
     }
 
     async fn refresh(&self) {
+        if self.fixed.is_some() {
+            return;
+        }
         let attempted = {
             let mut keys = self.keys.lock().await;
             let usable = keys.fetched.is_some_and(|at| at.elapsed() < TRUST_AT_MOST);

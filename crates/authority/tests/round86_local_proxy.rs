@@ -47,7 +47,6 @@ impl Drop for Authority {
 /// a normally issued token without the proxy is the passing control.
 // contract: S5
 #[tokio::test]
-#[ignore = "ROUND86: local issuer accepts a proxy-substituted signing key"]
 async fn local_issuer_does_not_fetch_its_own_key_through_a_proxy() {
     let attacker = SigningKey::from_bytes(&rand::random());
     let proxy = proxy(attacker.verifying_key().as_bytes()).await;
