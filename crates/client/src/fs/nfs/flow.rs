@@ -1,7 +1,6 @@
 //! NFS data-access epochs and whole-file write generations (M2).
 
 use std::fs::File;
-use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,6 +13,8 @@ use crate::reader::Head;
 
 mod idle;
 use idle::{arm_idle, remove_empty};
+mod read;
+use read::read_copy;
 
 const IDLE: Duration = Duration::from_secs(1);
 
@@ -21,6 +22,7 @@ struct Epoch {
     head: Head,
     attr: Attributes,
     handle: u64,
+    checked: Instant,
 }
 
 #[derive(Default)]
@@ -59,6 +61,7 @@ impl Nfs {
         let copy = self.local_copy(entry);
         if copy.is_none() {
             self.refresh_epoch(entry, &mut state).await?;
+            self.revalidate_epoch(entry, &mut state).await?;
         }
         if copy.is_none() && state.write.is_none() && (state.epoch.is_none() || state.idle()) {
             self.end_epoch(&mut state).await?;
@@ -230,7 +233,12 @@ impl Nfs {
             tokio::spawn(self.space.clone().upgrade(handle, upgrade));
         }
         let (attr, _) = self.space.clone().getattr(self.space.ino(entry)).await?;
-        Ok(Epoch { head, attr, handle })
+        Ok(Epoch {
+            head,
+            attr,
+            handle,
+            checked: Instant::now(),
+        })
     }
 
     async fn write_handle(&self, entry: EntryId, state: &mut Flow, mode: OpenMode) -> Result<(u64, bool)> {
@@ -289,11 +297,4 @@ impl Nfs {
         let released = self.space.clone().release(handle).await;
         committed.and(refreshed).and(released)
     }
-}
-
-fn read_copy(copy: &File, off: u64, count: u32) -> std::io::Result<Vec<u8>> {
-    let available = copy.metadata()?.len().saturating_sub(off);
-    let mut bytes = vec![0; u64::from(count).min(available) as usize];
-    copy.read_exact_at(&mut bytes, off)?;
-    Ok(bytes)
 }

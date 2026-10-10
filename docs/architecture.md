@@ -121,19 +121,22 @@ the adapter maps them back through `Locate` rather than relying on an inode
 remembered by this process.
 
 Because NFS exposes neither open nor close, reads pin an immutable version for
-one data-access epoch and advance after one second idle. WRITE, size SETATTR
-and COMMIT are ordered per handle. They share a whole-file write generation;
-FILE_SYNC and COMMIT wait for the authority while online, while an offline
-COMMIT returns after the generation is sealed in the journal (M2). Finder's
-AppleDouble resource forks and extended attributes are ordinary `._` files.
+one data-access epoch and advance after one second idle. An active epoch checks
+the entry id at most once per second; once deletion is visible it ends and the
+filehandle is stale. WRITE, size SETATTR and COMMIT are ordered per handle. They
+share a whole-file write generation; FILE_SYNC and COMMIT wait for the authority
+while online, while an offline COMMIT returns after the generation is sealed in
+the journal (M2). Finder's AppleDouble resource forks and extended attributes
+are ordinary `._` files.
 
-The parent `$HOME/HerdFS` is mode 0700. The remaining local risk is NFSv3
-AUTH_SYS: any process already running as the mounting user can make equivalent
-loopback requests, and root on that Mac can impersonate that local user. The
-mount still carries only that client's principal and object-store grants, so
-this does not expand what the client itself may read (S1-S4).
-Replay identity assumes the single kernel client (XID, request checksum,
-address), so a second raw RPC caller on loopback is not separated from it (M1).
+The parent `$HOME/HerdFS` is mode 0700. Non-NULL NFS and MOUNT requests are
+accepted only from a reserved source port and with an AUTH_SYS uid matching the
+mounting user or root. The kernel NFS client uses a reserved port by default on
+Linux and macOS. An unprivileged process therefore cannot issue equivalent raw
+loopback requests. Root remains the local limit: it can use a reserved port and
+uid 0, but the mount still carries only that client's principal and object-store
+grants (S1-S4). Replay identity assumes the single kernel client (XID, request
+checksum, address); only root can introduce a second accepted raw RPC caller.
 
 ## Deliberately out of v0.1
 
