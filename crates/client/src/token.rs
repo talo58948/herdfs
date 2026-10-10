@@ -14,6 +14,9 @@ use tokio::sync::Mutex;
 
 use crate::{Error, Result};
 
+mod exchange;
+pub(crate) use exchange::exchange;
+
 const REFRESH_MARGIN: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -26,13 +29,6 @@ pub(crate) struct TokenFile {
     expires_at: u64,
     client_id: String,
     token_endpoint: String,
-}
-
-#[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    refresh_token: Option<String>,
-    expires_in: u64,
 }
 
 pub(crate) struct Source {
@@ -160,6 +156,10 @@ fn write(path: &Path, token: &TokenFile, generation: u64) -> Result<u64> {
 }
 
 pub(crate) async fn save(path: &Path, token: &TokenFile) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
     let _lock = lock(path.with_extension("lock")).await?;
     write(path, token, generation(path)).map(drop)
 }
@@ -262,38 +262,6 @@ async fn lock(path: PathBuf) -> Result<File> {
     })
     .await
     .map_err(std::io::Error::other)??)
-}
-
-pub(crate) async fn exchange(
-    http: &Client,
-    endpoint: &str,
-    form: &[(&str, &str)],
-    previous_refresh: Option<&str>,
-) -> Result<TokenFile> {
-    let response = http
-        .post(endpoint)
-        .form(form)
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<TokenResponse>()
-        .await?;
-    let refresh_token = response
-        .refresh_token
-        .or_else(|| previous_refresh.map(str::to_owned))
-        .ok_or_else(|| Error::Protocol("issuer returned no refresh token".into()))?;
-    let client_id = form
-        .iter()
-        .find_map(|(name, value)| (*name == "client_id").then(|| (*value).to_owned()))
-        .ok_or_else(|| Error::Protocol("token exchange omitted client_id".into()))?;
-    Ok(TokenFile {
-        generation: 0,
-        access_token: response.access_token,
-        refresh_token,
-        expires_at: expiry(response.expires_in),
-        client_id,
-        token_endpoint: endpoint.to_owned(),
-    })
 }
 
 #[cfg(test)]

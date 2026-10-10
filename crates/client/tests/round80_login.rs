@@ -97,7 +97,6 @@ async fn login(issuer: &str, home: &Path) -> (bool, String) {
 /// A fresh default path must sign in just like the same path with its parent pre-created.
 // contract: U1
 #[tokio::test]
-#[ignore = "ROUND80: first login fails before creating the default token directory"]
 async fn first_login_creates_the_default_token_directory() {
     let issuer = issuer().await;
     let mut failed = 0;
