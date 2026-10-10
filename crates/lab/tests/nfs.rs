@@ -96,8 +96,12 @@ fn remove_and_rmdir_report_the_target_kind() -> Result<()> {
     let remove_dir = fs::remove_file(mount.join("directory")).unwrap_err();
     let rmdir_file = fs::remove_dir(mount.join("file")).unwrap_err();
     ensure!(
-        remove_dir.raw_os_error() == Some(libc::EISDIR),
-        "REMOVE dir was not EISDIR"
+        remove_dir.raw_os_error() == Some(if cfg!(target_os = "macos") {
+            libc::EPERM
+        } else {
+            libc::EISDIR
+        }),
+        "REMOVE dir returned {remove_dir}"
     );
     ensure!(
         rmdir_file.raw_os_error() == Some(libc::ENOTDIR),
