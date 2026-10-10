@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
 
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{Entry, EntryId, Kind, Version};
 
+use super::state::SavedDirectory;
 use super::{CHECK_HEADS, Download, Kept, unpin_file};
 use crate::fs::Space;
 use crate::version::OpenVersion;
@@ -113,9 +113,9 @@ impl Kept {
                 continue;
             }
             match self.scan(space, entry).await {
-                Ok((files, found)) => {
+                Ok((files, found, directories)) => {
                     let seen = files.iter().map(|(path, _, _)| path.clone()).collect();
-                    self.download(space, root, files, seen);
+                    self.download(space, root, files, seen, directories);
                     entries.extend(found);
                 }
                 Err(error) => {
@@ -135,6 +135,7 @@ impl Kept {
         root: SpacePath,
         files: Vec<(SpacePath, Entry, Option<Version>)>,
         seen: std::collections::BTreeSet<SpacePath>,
+        directories: BTreeMap<SpacePath, SavedDirectory>,
     ) {
         let mut pending = lock(&self.pending);
         let mut downloads = lock(&self.downloads);
@@ -159,8 +160,10 @@ impl Kept {
             if retry {
                 lock(&kept.pending).insert(root.clone());
             }
+            if let Err(failed) = kept.finish_scan(&space, &root, &seen, directories) {
+                error.get_or_insert_with(|| failed.to_string());
+            }
             kept.set_error(&root, error);
-            kept.drop_unseen(&space, &root, &seen);
             lock(&kept.downloads).remove(&root);
             if lock(&kept.pending).contains(&root) {
                 kept.wake.notify_one();
@@ -182,6 +185,7 @@ impl Kept {
             }
             saved.roots.remove(from);
             saved.roots.insert(to.clone(), Some(entry));
+            saved.directories.retain(|path, _| !path.is_within(from));
             let paths: Vec<_> = saved
                 .files
                 .keys()
@@ -203,9 +207,8 @@ impl Kept {
         else {
             return Ok(());
         };
-        if lock(&self.pending).remove(from) {
-            lock(&self.pending).insert(to.clone());
-        }
+        lock(&self.pending).remove(from);
+        lock(&self.pending).insert(to.clone());
         if let Some(error) = lock(&self.errors).remove(from) {
             lock(&self.errors).insert(to.clone(), error);
         }
@@ -259,38 +262,5 @@ impl Kept {
             space.kernel.invalidate_attrs(entry.id);
         }
         Ok(())
-    }
-
-    async fn scan(
-        &self,
-        space: &Space,
-        entry: Entry,
-    ) -> Result<(Vec<(SpacePath, Entry, Option<Version>)>, Vec<EntryId>)> {
-        let asked = Instant::now();
-        space.inodes.observe(&entry, asked, false);
-        let mut stack = vec![entry];
-        let mut files = Vec::new();
-        let mut entries = Vec::new();
-        while let Some(entry) = stack.pop() {
-            entries.push(entry.id);
-            match entry.kind {
-                Kind::Dir => {
-                    let asked = Instant::now();
-                    let children = space.remote.list(entry.id).await?;
-                    children
-                        .iter()
-                        .for_each(|child| space.inodes.observe(child, asked, true));
-                    stack.extend(children);
-                }
-                Kind::File => {
-                    let asked = Instant::now();
-                    let (opened, version, _) = space.remote.open(entry.id).await?;
-                    space.inodes.observe(&opened, asked, false);
-                    files.push((opened.path.clone(), opened, version));
-                }
-                Kind::Symlink => {}
-            }
-        }
-        Ok((files, entries))
     }
 }

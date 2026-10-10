@@ -15,6 +15,7 @@ use crate::{Result, lock};
 const REFRESH: Duration = Duration::from_secs(60);
 const CHECK_HEADS: Duration = Duration::from_secs(1);
 
+mod directory;
 mod scan;
 mod state;
 pub(crate) use state::load;
@@ -113,6 +114,9 @@ impl Kept {
                     .filter(|file| !roots.iter().any(|root| file.is_within(root)))
                     .cloned()
                     .collect();
+                saved
+                    .directories
+                    .retain(|path, _| roots.iter().any(|root| path.is_within(root)));
                 Some(
                     paths
                         .into_iter()
@@ -130,9 +134,6 @@ impl Kept {
 
     pub fn status(&self, space: &Space) -> (u64, Vec<(String, bool)>) {
         let saved = lock(&self.saved);
-        let pending = lock(&self.pending);
-        let errors = lock(&self.errors);
-        let downloads = lock(&self.downloads);
         let mut ids = HashSet::new();
         let bytes = saved
             .files
@@ -142,26 +143,11 @@ impl Kept {
             .filter(|chunk| ids.insert(chunk.id) && space.cache.contains(&chunk.id))
             .map(|chunk| u64::from(chunk.len))
             .sum();
-        let pins = saved
-            .roots
-            .keys()
-            .map(|root| {
-                let ready = !pending.contains(root)
-                    && !downloads.get(root).is_some_and(|download| download.pending)
-                    && !errors.contains_key(root)
-                    && saved
-                        .files
-                        .iter()
-                        .filter(|(path, _)| path.is_within(root))
-                        .all(|(path, file)| {
-                            file.ready
-                                && space
-                                    .inodes
-                                    .at(path)
-                                    .is_none_or(|(entry, _, _)| entry.head == Some(file.current.id))
-                        });
-                (root.as_str().to_owned(), ready)
-            })
+        let roots: Vec<_> = saved.roots.keys().cloned().collect();
+        drop(saved);
+        let pins = roots
+            .iter()
+            .map(|root| (root.as_str().to_owned(), self.ready(space, root)))
             .collect();
         (bytes, pins)
     }
@@ -234,28 +220,6 @@ impl Kept {
         *lock(&self.saved) = saved;
         retired.iter().for_each(|version| unpin_version(space, version));
         Ok(())
-    }
-
-    fn drop_unseen(&self, space: &Space, root: &SpacePath, seen: &BTreeSet<SpacePath>) {
-        let removed = self.update(|saved| {
-            let paths: Vec<_> = saved
-                .files
-                .keys()
-                .filter(|path| path.is_within(root) && !seen.contains(*path))
-                .cloned()
-                .collect();
-            (!paths.is_empty()).then(|| {
-                paths
-                    .into_iter()
-                    .filter_map(|path| saved.files.remove(&path))
-                    .collect::<Vec<_>>()
-            })
-        });
-        match removed {
-            Ok(Some(removed)) => removed.iter().for_each(|file| unpin_file(space, file)),
-            Ok(None) => {}
-            Err(error) => tracing::warn!(%error, %root, "could not persist removed kept files"),
-        }
     }
 
     fn set_error(&self, root: &SpacePath, error: Option<String>) {

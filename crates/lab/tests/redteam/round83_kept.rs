@@ -51,7 +51,6 @@ fn names(path: &Path) -> Result<Vec<String>> {
 /// metadata to list each folder, not only enough metadata to open a child by a known name.
 // contract: P4, M1
 #[test]
-#[ignore = "ROUND83: ready kept folders cannot be listed offline"]
 fn round83_ready_kept_folders_are_listable_offline() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
-use herdfs_core::proto::{EntryId, Version};
+use herdfs_core::proto::{Entry, EntryId, Version};
 use herdfs_core::{ChunkId, SpacePath};
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -11,6 +11,8 @@ pub(super) struct Saved {
     #[serde(default, deserialize_with = "roots")]
     pub roots: BTreeMap<SpacePath, Option<EntryId>>,
     pub files: BTreeMap<SpacePath, SavedFile>,
+    #[serde(default)]
+    pub directories: BTreeMap<SpacePath, SavedDirectory>,
 }
 
 fn roots<'de, D>(deserializer: D) -> Result<BTreeMap<SpacePath, Option<EntryId>>, D::Error>
@@ -27,6 +29,12 @@ where
         Roots::Current(roots) => roots,
         Roots::Legacy(roots) => roots.into_iter().map(|path| (path, None)).collect(),
     })
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub(super) struct SavedDirectory {
+    pub entry: EntryId,
+    pub children: Vec<Entry>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
