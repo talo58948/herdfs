@@ -1,3 +1,7 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::Duration;
 
 use axum::Json;
@@ -59,6 +63,71 @@ async fn login_exchange_needs_a_refresh_token() -> anyhow::Result<()> {
     };
     assert!(error.to_string().contains("issuer returned no refresh token"));
     Ok(())
+}
+
+/// Concurrent requests sharing one login must reuse the first completed refresh just as separate
+/// processes do; an uncontended forced refresh controls the ordinary path.
+// contract: U1
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "ROUND74: concurrent calls on one client refresh the same rotating login twice"]
+async fn concurrent_calls_share_one_rotating_refresh() -> anyhow::Result<()> {
+    let mut duplicated = 0;
+    for trial in 0..3 {
+        assert_eq!(
+            forced_refreshes(1).await?,
+            (vec!["access-1".to_owned()], 1),
+            "uncontended control {trial}"
+        );
+        let (mut access, count) = forced_refreshes(2).await?;
+        access.sort();
+        eprintln!("trial {trial}: returned {access:?} after {count} refreshes");
+        duplicated += usize::from(access != ["access-1", "access-1"] || count != 1);
+    }
+    assert_eq!(duplicated, 0, "{duplicated}/3 shared clients refreshed twice");
+    Ok(())
+}
+
+async fn forced_refreshes(callers: usize) -> anyhow::Result<(Vec<String>, usize)> {
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}", listener.local_addr()?);
+    let app = axum::Router::new().route(
+        "/",
+        post({
+            let refreshes = Arc::clone(&refreshes);
+            move || {
+                let generation = refreshes.fetch_add(1, Ordering::SeqCst) + 1;
+                async move {
+                    Json(json!({
+                        "access_token": format!("access-{generation}"),
+                        "refresh_token": format!("refresh-{generation}"),
+                        "expires_in": 60
+                    }))
+                }
+            }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let (dir, path) = token_file(60)?;
+    let mut stored = read_login(&path)?;
+    stored.token_endpoint = endpoint;
+    write(&path, &stored, stored.generation)?;
+    let source = Arc::new(Source::new(path)?);
+    let http = Client::new();
+    let calls: Vec<_> = (0..callers)
+        .map(|_| {
+            let source = Arc::clone(&source);
+            let http = http.clone();
+            tokio::spawn(async move { source.access(&http, true).await })
+        })
+        .collect();
+    let mut access = Vec::new();
+    for call in calls {
+        access.push(call.await??);
+    }
+    drop(dir);
+    Ok((access, refreshes.load(Ordering::SeqCst)))
 }
 
 fn token_file(expires_in: u64) -> anyhow::Result<(tempfile::TempDir, PathBuf)> {
