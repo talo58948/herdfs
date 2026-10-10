@@ -132,28 +132,36 @@ async fn read_callback(
         if len == request.len() {
             break None;
         }
-        let read = stream.read(&mut request[len..]).await?;
+        let Ok(read) = stream.read(&mut request[len..]).await else {
+            return Ok(None);
+        };
         if read == 0 {
             break None;
         }
         len += read;
     };
     let Some(header_end) = header_end else {
-        reply(&mut stream, "400 Bad Request", "bad callback request\n").await?;
+        let _ = reply(&mut stream, "400 Bad Request", "bad callback request\n").await;
         return Ok(None);
     };
-    let request = std::str::from_utf8(&request[..header_end])?;
+    let Ok(request) = std::str::from_utf8(&request[..header_end]) else {
+        let _ = reply(&mut stream, "400 Bad Request", "bad callback request\n").await;
+        return Ok(None);
+    };
     let Some(target) = request
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
     else {
-        reply(&mut stream, "400 Bad Request", "bad callback request\n").await?;
+        let _ = reply(&mut stream, "400 Bad Request", "bad callback request\n").await;
         return Ok(None);
     };
-    let url = reqwest::Url::parse(&format!("http://127.0.0.1{target}"))?;
+    let Ok(url) = reqwest::Url::parse(&format!("http://127.0.0.1{target}")) else {
+        let _ = reply(&mut stream, "400 Bad Request", "bad callback request\n").await;
+        return Ok(None);
+    };
     if url.path() != "/callback" {
-        reply(&mut stream, "404 Not Found", "not found\n").await?;
+        let _ = reply(&mut stream, "404 Not Found", "not found\n").await;
         return Ok(None);
     }
     let parameter = |name| {
@@ -161,19 +169,19 @@ async fn read_callback(
             .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
     };
     if parameter("state").as_deref() != Some(expected_state) {
-        reply(&mut stream, "400 Bad Request", "OIDC state did not match\n").await?;
+        let _ = reply(&mut stream, "400 Bad Request", "OIDC state did not match\n").await;
         return Ok(None);
     }
     if let Some(error) = parameter("error") {
         let description = parameter("error_description");
-        reply(&mut stream, "400 Bad Request", "sign in failed\n").await?;
+        let _ = reply(&mut stream, "400 Bad Request", "sign in failed\n").await;
         bail!(
             "issuer returned {error}{}",
             description.map_or(String::new(), |text| format!(": {text}"))
         );
     }
     let Some(code) = parameter("code") else {
-        reply(&mut stream, "400 Bad Request", "OIDC callback lacked a code\n").await?;
+        let _ = reply(&mut stream, "400 Bad Request", "OIDC callback lacked a code\n").await;
         return Ok(None);
     };
     Ok(Some((stream, code)))

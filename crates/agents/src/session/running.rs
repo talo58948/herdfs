@@ -9,23 +9,24 @@ use std::path::{Path, PathBuf};
 
 use super::Session;
 use super::process::kill_group;
-use processes::{kill_members, start_time};
+use processes::{boot_id, start_time};
 
 pub(super) struct Running {
     path: PathBuf,
     group: u32,
     started: String,
-    session_id: String,
+    boot: String,
     armed: bool,
 }
 
 impl Running {
-    pub(super) fn record(session: &Session, group: u32, session_id: String) -> io::Result<Self> {
+    pub(super) fn record(session: &Session, group: u32) -> io::Result<Self> {
         let running = Self {
             path: state_path(session)?,
             group,
-            started: start_time(group)?,
-            session_id,
+            started: start_time(group)?
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "process group leader exited"))?,
+            boot: boot_id()?,
             armed: true,
         };
         let temporary = running.path.with_extension(format!("{}.tmp", std::process::id()));
@@ -35,11 +36,7 @@ impl Running {
             .truncate(true)
             .mode(0o600)
             .open(&temporary)?;
-        write!(
-            file,
-            "{}\n{}\n{}\n",
-            running.group, running.started, running.session_id
-        )?;
+        write!(file, "{}\n{}\n{}\n", running.group, running.started, running.boot)?;
         file.sync_all()?;
         fs::rename(temporary, &running.path)?;
         Ok(running)
@@ -68,37 +65,31 @@ impl Running {
             .filter(|line| !line.is_empty())
             .ok_or_else(|| invalid("process start time"))?
             .to_owned();
-        let session_id = lines
+        let boot = lines
             .next()
             .filter(|line| !line.is_empty())
-            .ok_or_else(|| invalid("session id"))?
+            .ok_or_else(|| invalid("boot id"))?
             .to_owned();
         Ok(Some(Self {
             path,
             group,
             started,
-            session_id,
+            boot,
             armed: true,
         }))
     }
 
     fn stop(&mut self) -> io::Result<()> {
-        match start_time(self.group) {
-            Ok(started) if started == self.started => kill_group(self.group)?,
-            Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                kill_members(self.group, &self.session_id)?;
+        if boot_id()? == self.boot {
+            match start_time(self.group)? {
+                Some(started) if started != self.started => {}
+                Some(_) | None => kill_group(self.group)?,
             }
-            Err(err) => return Err(err),
         }
         remove(&self.path)?;
         self.armed = false;
         Ok(())
     }
-}
-
-pub(super) fn session_id() -> String {
-    format!("{:032x}", rand::random::<u128>())
 }
 
 impl Drop for Running {
