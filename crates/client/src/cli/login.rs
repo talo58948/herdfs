@@ -8,6 +8,7 @@ use anyhow::{Context, bail};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use clap::Args;
+use futures::{StreamExt, stream::FuturesUnordered};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -101,63 +102,81 @@ async fn callback(
     listener: &TcpListener,
     expected_state: &str,
 ) -> anyhow::Result<(tokio::net::TcpStream, String)> {
+    let mut requests = FuturesUnordered::new();
     loop {
-        let (mut stream, _) = listener.accept().await?;
-        let mut request = vec![0; 8192];
-        let mut len = 0;
-        let header_end = loop {
-            if let Some(end) = request[..len].windows(4).position(|bytes| bytes == b"\r\n\r\n") {
-                break Some(end + 4);
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                requests.push(read_callback(stream, expected_state));
             }
-            if len == request.len() {
-                break None;
+            request = requests.next(), if !requests.is_empty() => {
+                let Some(request) = request else { continue };
+                if let Some(callback) = request? {
+                    return Ok(callback);
+                }
             }
-            let read = stream.read(&mut request[len..]).await?;
-            if read == 0 {
-                break None;
-            }
-            len += read;
-        };
-        let Some(header_end) = header_end else {
-            reply(&mut stream, "400 Bad Request", "bad callback request\n").await?;
-            continue;
-        };
-        let request = std::str::from_utf8(&request[..header_end])?;
-        let Some(target) = request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-        else {
-            reply(&mut stream, "400 Bad Request", "bad callback request\n").await?;
-            continue;
-        };
-        let url = reqwest::Url::parse(&format!("http://127.0.0.1{target}"))?;
-        if url.path() != "/callback" {
-            reply(&mut stream, "404 Not Found", "not found\n").await?;
-            continue;
         }
-        let parameter = |name| {
-            url.query_pairs()
-                .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
-        };
-        if parameter("state").as_deref() != Some(expected_state) {
-            reply(&mut stream, "400 Bad Request", "OIDC state did not match\n").await?;
-            continue;
-        }
-        if let Some(error) = parameter("error") {
-            let description = parameter("error_description");
-            reply(&mut stream, "400 Bad Request", "sign in failed\n").await?;
-            bail!(
-                "issuer returned {error}{}",
-                description.map_or(String::new(), |text| format!(": {text}"))
-            );
-        }
-        let Some(code) = parameter("code") else {
-            reply(&mut stream, "400 Bad Request", "OIDC callback lacked a code\n").await?;
-            continue;
-        };
-        return Ok((stream, code));
     }
+}
+
+async fn read_callback(
+    mut stream: tokio::net::TcpStream,
+    expected_state: &str,
+) -> anyhow::Result<Option<(tokio::net::TcpStream, String)>> {
+    let mut request = vec![0; 8192];
+    let mut len = 0;
+    let header_end = loop {
+        if let Some(end) = request[..len].windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+            break Some(end + 4);
+        }
+        if len == request.len() {
+            break None;
+        }
+        let read = stream.read(&mut request[len..]).await?;
+        if read == 0 {
+            break None;
+        }
+        len += read;
+    };
+    let Some(header_end) = header_end else {
+        reply(&mut stream, "400 Bad Request", "bad callback request\n").await?;
+        return Ok(None);
+    };
+    let request = std::str::from_utf8(&request[..header_end])?;
+    let Some(target) = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+    else {
+        reply(&mut stream, "400 Bad Request", "bad callback request\n").await?;
+        return Ok(None);
+    };
+    let url = reqwest::Url::parse(&format!("http://127.0.0.1{target}"))?;
+    if url.path() != "/callback" {
+        reply(&mut stream, "404 Not Found", "not found\n").await?;
+        return Ok(None);
+    }
+    let parameter = |name| {
+        url.query_pairs()
+            .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
+    };
+    if parameter("state").as_deref() != Some(expected_state) {
+        reply(&mut stream, "400 Bad Request", "OIDC state did not match\n").await?;
+        return Ok(None);
+    }
+    if let Some(error) = parameter("error") {
+        let description = parameter("error_description");
+        reply(&mut stream, "400 Bad Request", "sign in failed\n").await?;
+        bail!(
+            "issuer returned {error}{}",
+            description.map_or(String::new(), |text| format!(": {text}"))
+        );
+    }
+    let Some(code) = parameter("code") else {
+        reply(&mut stream, "400 Bad Request", "OIDC callback lacked a code\n").await?;
+        return Ok(None);
+    };
+    Ok(Some((stream, code)))
 }
 
 async fn reply(stream: &mut tokio::net::TcpStream, status: &str, body: &str) -> anyhow::Result<()> {
