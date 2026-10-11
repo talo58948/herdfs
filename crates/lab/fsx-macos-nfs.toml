@@ -10,6 +10,7 @@ truncate = 3
 fsync = 1
 fdatasync = 1
 close_open = 2
+# fsx 0.3.2's MS_INVALIDATE gets EINVAL on plain APFS (Mac test day 4).
 invalidate = 0
 sendfile = 2
 posix_fadvise = 0
