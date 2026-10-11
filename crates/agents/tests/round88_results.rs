@@ -67,7 +67,6 @@ fn result_files(dir: &Path) -> usize {
 /// the ordinary result-writing path.
 // contract: A2
 #[test]
-#[ignore = "ROUND88: pre-spawn failures omit every promised result file"]
 fn pre_spawn_failures_write_result_files() {
     let mount = tempfile::tempdir().unwrap();
     let _runner = Runner::start(mount.path());
