@@ -223,7 +223,8 @@ final class AppModel: ObservableObject {
     }
 
     func appMount(_ record: MountRecord) -> Bool {
-        record.mountpoint == expectedMountpoint(record.space).path
+        URL(fileURLWithPath: record.mountpoint).resolvingSymlinksInPath()
+            == expectedMountpoint(record.space).resolvingSymlinksInPath()
             && processPath(record.pid) == CLI.executableURL.standardizedFileURL.path
     }
 
