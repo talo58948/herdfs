@@ -62,8 +62,10 @@ caller's own versions. Space admins see all history.
 Each access independently chooses prefetch (`none`, format index, first two chunks, or whole),
 sequential read-ahead (`none`, two chunks, or eight chunks), and whether accessed chunks stay
 cached until that access ends. Index discovery reads bounded headers/tails and finds Parquet
-footers, ZIP central directories, or an MP4 `moov`; unexpected input falls back to the first and
-last two chunks. All bytes use the same grant, hash verification and cache path (C8, C9).
+footers, ZIP central directories, or an MP4 `moov`. An MP4 `moov` counts as the index when its child
+boxes tile it exactly and include `mvhd`; any such `moov` up to the 8 MiB region cap is fetched whole,
+whatever else it contains. Unexpected input falls back to the first and last two chunks. All bytes
+use the same grant, hash verification and cache path (C8, C9).
 A kept chunk damaged on disk after verification fails its hash when read and is refetched once the
 authority is reachable; offline, that file is unreadable until then (P4, C11).
 

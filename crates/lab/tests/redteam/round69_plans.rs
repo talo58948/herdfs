@@ -55,7 +55,7 @@ fn mp4(late: bool) -> (Vec<u8>, std::ops::Range<u64>) {
     box_header(&mut bytes, 0, ftyp, b"ftyp");
     box_header(&mut bytes, mdat_start, MDAT_LEN, b"mdat");
     box_header(&mut bytes, moov_start, MOOV_LEN, b"moov");
-    box_header(&mut bytes, moov_start + 8, MOOV_LEN - 8, b"free");
+    box_header(&mut bytes, moov_start + 8, MOOV_LEN - 8, b"mvhd");
     (bytes, moov_start as u64..(moov_start + MOOV_LEN) as u64)
 }
 

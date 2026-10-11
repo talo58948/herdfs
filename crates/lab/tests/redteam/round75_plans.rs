@@ -29,7 +29,7 @@ fn valid_mp4() -> Vec<u8> {
     box_header(&mut bytes, 0, 16, b"ftyp");
     box_header(&mut bytes, mdat, moov - mdat, b"mdat");
     box_header(&mut bytes, moov, moov_len, b"moov");
-    box_header(&mut bytes, moov + 8, moov_len - 8, b"free");
+    box_header(&mut bytes, moov + 8, moov_len - 8, b"mvhd");
     bytes
 }
 

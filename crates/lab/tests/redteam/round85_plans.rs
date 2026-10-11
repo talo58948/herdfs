@@ -35,7 +35,7 @@ fn mp4(truncated_ftyp: bool) -> Vec<u8> {
     };
     box_header(&mut bytes, media, MOOV_START - media, b"mdat");
     box_header(&mut bytes, MOOV_START, MOOV_LEN, b"moov");
-    box_header(&mut bytes, MOOV_START + 8, MOOV_LEN - 8, b"free");
+    box_header(&mut bytes, MOOV_START + 8, MOOV_LEN - 8, b"mvhd");
     box_header(
         &mut bytes,
         MOOV_START + MOOV_LEN,
