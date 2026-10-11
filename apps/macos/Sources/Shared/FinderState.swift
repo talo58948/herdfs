@@ -20,6 +20,27 @@ private func realPath(_ path: String) -> String? {
     return String(cString: resolved)
 }
 
+func sameFile(_ left: URL, _ right: URL) -> Bool {
+    let left = canonicalFileURL(left)
+    let right = canonicalFileURL(right)
+    if left.path == right.path { return true }
+    var leftStatus = stat()
+    var rightStatus = stat()
+    guard lstat(left.path, &leftStatus) == 0,
+          lstat(right.path, &rightStatus) == 0 else { return false }
+    return leftStatus.st_dev == rightStatus.st_dev && leftStatus.st_ino == rightStatus.st_ino
+}
+
+func relativeFilePath(_ url: URL, below root: URL) -> [String]? {
+    let path = canonicalFileURL(url).pathComponents
+    let root = canonicalFileURL(root)
+    let rootCount = root.pathComponents.count
+    guard path.count >= rootCount else { return nil }
+    let prefix = URL(fileURLWithPath: NSString.path(withComponents: Array(path.prefix(rootCount))))
+    guard sameFile(prefix, root) else { return nil }
+    return Array(path.dropFirst(rootCount))
+}
+
 struct FinderState: Codable, Equatable, Sendable {
     static let container = realHomeDirectory()
         .appending(path: "Library/Containers/dev.herdfs.HerdFS.Finder/Data", directoryHint: .isDirectory)
@@ -47,11 +68,10 @@ struct FinderState: Codable, Equatable, Sendable {
     }
 
     func locate(_ url: URL) -> LocatedFinderPath? {
-        let path = canonicalFileURL(url).pathComponents
         return mounts.compactMap { mount in
-            let rootParts = canonicalFileURL(URL(fileURLWithPath: mount.mountpoint, isDirectory: true)).pathComponents
-            guard path.starts(with: rootParts) else { return nil }
-            let relative = path.dropFirst(rootParts.count).joined(separator: "/")
+            let root = URL(fileURLWithPath: mount.mountpoint, isDirectory: true)
+            guard let parts = relativeFilePath(url, below: root) else { return nil }
+            let relative = parts.joined(separator: "/")
             return LocatedFinderPath(mount: mount, relativePath: relative)
         }.min { $0.relativePath.count < $1.relativePath.count }
     }
