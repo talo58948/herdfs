@@ -57,9 +57,19 @@ jobs:
         run: cargo build --workspace --bins
       - name: Lab suites
         run: |
+          loaded='test(kept_folder_survives_restart_follows_heads_and_becomes_evictable) |
+            test(a_reader_sees_a_file_that_grows_whole) |
+            test(a_rewrite_while_a_closed_write_commits_publishes_only_whole_versions) |
+            test(f1_a_client_killed_before_its_commit_lands_commits_after_restart) |
+            test(a_fork_takes_linear_time_and_leaves_its_parent_alone)'
           cargo nextest run -p herdfs-lab \
             --test smoke --test round_trip --test semantics --test faults \
-            --test cli --test plans --test local_issuer --test control --no-fail-fast
+            --test cli --test plans --test local_issuer --test control \
+            -E "not ($loaded)" --no-fail-fast
+          cargo nextest run -p herdfs-lab \
+            --test smoke --test round_trip --test semantics --test faults \
+            --test cli --test plans --test local_issuer --test control \
+            -E "$loaded" --test-threads=1 --no-fail-fast
       - name: Confirmed default-mount probes
         run: |
           cargo nextest run -p herdfs-lab --test redteam \

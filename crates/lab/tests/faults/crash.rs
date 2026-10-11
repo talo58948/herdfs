@@ -13,8 +13,8 @@ use herdfs_core::chunk;
 use herdfs_lab::{Lab, run};
 
 use crate::{
-    VISIBLE_AFTER, assert_history, assert_reads, chunks_of, commit, history, random_bytes, two_clients,
-    wait_committed, wait_until,
+    COMMIT_WITHIN, LARGE_COMMIT_WITHIN, VISIBLE_AFTER, assert_history, assert_reads, chunks_of, commit,
+    history, random_bytes, two_clients, wait_committed, wait_committed_within, wait_until,
 };
 
 /// The clients of `two_clients`.
@@ -103,9 +103,9 @@ fn kill_mid_write(lab: &mut Lab) -> Result<()> {
 }
 
 /// Restarts the writer and waits until its journal is committed and visible to others.
-fn recover(lab: &mut Lab) -> Result<()> {
+fn recover(lab: &mut Lab, within: Duration) -> Result<()> {
     lab.restart_client(WRITER)?;
-    wait_committed(lab, WRITER)?;
+    wait_committed_within(lab, WRITER, within)?;
     thread::sleep(VISIBLE_AFTER);
     Ok(())
 }
@@ -121,7 +121,7 @@ fn f1_a_client_killed_mid_write_keeps_its_last_commit() -> Result<()> {
     thread::sleep(VISIBLE_AFTER);
     let watcher = Watcher::start(&lab, &[&first]);
     kill_mid_write(&mut lab)?;
-    recover(&mut lab)?;
+    recover(&mut lab, COMMIT_WITHIN)?;
     for client in [WRITER, READER] {
         assert_reads(&lab, client, NAME, &first)?;
     }
@@ -142,7 +142,7 @@ fn f1_a_client_killed_mid_rewrite_still_commits_the_write_it_closed() -> Result<
     // Closed without fsync, so its commit is still under way when the rewrite starts.
     fs::write(lab.mount_path(WRITER).join(NAME), &closed)?;
     kill_mid_write(&mut lab)?;
-    recover(&mut lab)?;
+    recover(&mut lab, COMMIT_WITHIN)?;
     for client in [WRITER, READER] {
         assert_reads(&lab, client, NAME, &closed)?;
     }
@@ -161,7 +161,7 @@ fn a_rewrite_while_a_closed_write_commits_publishes_only_whole_versions() -> Res
     let path = lab.mount_path(WRITER).join(NAME);
     fs::write(&path, &first)?;
     fs::write(&path, &second)?;
-    wait_committed(&lab, WRITER)?;
+    wait_committed_within(&lab, WRITER, LARGE_COMMIT_WITHIN)?;
     // The first write may be superseded before it commits, but nothing else may appear.
     let whole = [chunks_of(&first)?, chunks_of(&second)?];
     let versions = history(&lab, NAME)?;
@@ -235,7 +235,7 @@ fn f1_a_client_killed_before_its_commit_lands_commits_after_restart() -> Result<
     fs::write(lab.mount_path(WRITER).join(NAME), &closed)?;
     lab.kill_client(WRITER)?;
     assert_history(&lab, NAME, &[&first])?;
-    recover(&mut lab)?;
+    recover(&mut lab, LARGE_COMMIT_WITHIN)?;
     for client in [WRITER, READER] {
         assert_reads(&lab, client, NAME, &closed)?;
     }

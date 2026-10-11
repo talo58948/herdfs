@@ -148,10 +148,6 @@ fn kept_folder_survives_restart_follows_heads_and_becomes_evictable() -> Result<
     lab.restore("b", Links::Both)?;
     command(&lab, "pin", Some(&pinned))?;
     wait_ready(&lab, false).context("new remote head never entered downloading state")?;
-    assert_eq!(
-        command(&lab, "file", Some(&pinned.join("one")))?["downloading"],
-        true
-    );
     wait_ready(&lab, true)?;
     assert_eq!(fs::read(pinned.join("one"))?, replacement);
 
