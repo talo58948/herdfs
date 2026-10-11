@@ -64,13 +64,14 @@ final class FinderSync: FIFinderSync, @unchecked Sendable {
     @objc nonisolated private func share() { openOnMain(action: "share") }
 
     private nonisolated func openOnMain(action: String) {
-        DispatchQueue.main.async { [weak self] in self?.open(action: action) }
+        // Finder reports the selection only while the action runs.
+        let controller = FIFinderSyncController.default()
+        guard let url = controller.selectedItemURLs()?.first ?? controller.targetedURL() else { return }
+        DispatchQueue.main.async { [weak self] in self?.open(action: action, url: url) }
     }
 
-    private func open(action: String) {
-        let controller = FIFinderSyncController.default()
-        guard let url = controller.selectedItemURLs()?.first ?? controller.targetedURL(),
-              let located = state.locate(url) else { return }
+    private func open(action: String, url: URL) {
+        guard let located = state.locate(url) else { return }
         var link = URLComponents()
         link.scheme = "herdfs"
         link.host = located.mount.space
