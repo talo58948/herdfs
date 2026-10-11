@@ -25,22 +25,31 @@ struct MountRegistry {
     }
 
     func liveRecords() async -> [MountRecord] {
-        await withTaskGroup(of: MountRecord?.self) { group in
-            for record in records() {
-                group.addTask {
-                    guard (try? await ControlClient.status(record)) != nil else { return nil }
-                    return record
+        let records = records()
+        var live: [MountRecord] = []
+        var mountpoints: Set<String> = []
+        // Registrations outlive killed mounts; bound their probes below the extension's FD limit.
+        for offset in stride(from: 0, to: records.count, by: 16) {
+            let end = min(offset + 16, records.count)
+            let responsive = await withTaskGroup(of: MountRecord?.self, returning: [MountRecord].self) { group in
+                for record in records[offset..<end] {
+                    group.addTask {
+                        guard (try? await ControlClient.status(record)) != nil else { return nil }
+                        return record
+                    }
                 }
+                var responsive: [MountRecord] = []
+                for await record in group {
+                    if let record { responsive.append(record) }
+                }
+                return responsive
             }
-            var live: [MountRecord] = []
-            var mountpoints: Set<String> = []
-            for await record in group {
-                guard let record,
-                      mountpoints.insert(Self.canonical(record.mountpoint).path).inserted else { continue }
+            for record in responsive
+            where mountpoints.insert(Self.canonical(record.mountpoint).path).inserted {
                 live.append(record)
             }
-            return live
         }
+        return live
     }
 
     func locate(_ url: URL, in records: [MountRecord]? = nil) -> LocatedPath? {
