@@ -53,7 +53,7 @@ fn final_status(dir: &Path) -> String {
     }
 }
 
-// contract: A1
+// contract: A1, A2
 #[test]
 fn refuses_session_files_that_are_not_regular_files() {
     let mount = TempDir::new().unwrap();
@@ -90,7 +90,7 @@ fn refuses_session_files_that_are_not_regular_files() {
         );
     }
     assert_eq!(fs::read_to_string(&secret).unwrap(), "secret");
-    assert!(!prompt_link.join("output").exists());
+    assert!(prompt_link.join("output").is_file());
     assert!(!status_link.join("output").exists());
     assert!(!outside.path().join("status").exists());
     assert!(!outside.path().join("output").exists());

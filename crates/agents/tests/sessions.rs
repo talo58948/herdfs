@@ -205,7 +205,7 @@ fn runs_at_most_max_sessions_at_once() {
     assert_eq!(most_running, 2);
 }
 
-// contract: A1
+// contract: A1, A2
 #[test]
 fn marks_sessions_left_running_as_failed_on_restart() {
     let mount = TempDir::new().unwrap();
@@ -213,10 +213,10 @@ fn marks_sessions_left_running_as_failed_on_restart() {
     fs::write(dir.join("status"), "running\n").unwrap();
     let _runner = Runner::start(mount.path(), &["--command", "cat", "--poll-ms", "50"]);
     assert_eq!(final_status(&dir), "failed: runner restarted");
-    assert!(!dir.join("output").exists());
+    assert!(dir.join("output").is_file());
 }
 
-// contract: A1
+// contract: A1, A2
 #[test]
 fn runs_in_cwd_and_rejects_cwd_outside_the_mount() {
     let mount = TempDir::new().unwrap();
@@ -255,7 +255,7 @@ fn runs_in_cwd_and_rejects_cwd_outside_the_mount() {
     assert_eq!(read(&inside, "output").unwrap(), expected);
     for (dir, cwd) in escaping.iter().zip(escapes) {
         assert_eq!(final_status(dir), "failed: cwd outside mount", "cwd {cwd:?}");
-        assert!(!dir.join("output").exists(), "cwd {cwd:?}");
+        assert!(dir.join("output").is_file(), "cwd {cwd:?}");
     }
 }
 
