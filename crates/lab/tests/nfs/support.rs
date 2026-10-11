@@ -234,6 +234,22 @@ impl Rpc {
         self.send(&call)
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn call_timeout(
+        &mut self,
+        procedure: u32,
+        args: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<Vec<u8>> {
+        let xid = self.next_xid();
+        let mut call = rpc_header(xid, procedure, 1);
+        call.extend_from_slice(args);
+        let mut stream = nfs_stream(self.port)?;
+        stream.set_read_timeout(Some(timeout))?;
+        send_record(&mut stream, &call)?;
+        read_record(&mut stream)
+    }
+
     fn write_call(&mut self, handle: &[u8], data: &[u8], stability: u32) -> Vec<u8> {
         let xid = self.next_xid();
         let mut call = rpc_header(xid, 7, 1);
