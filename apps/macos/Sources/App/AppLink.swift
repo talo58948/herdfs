@@ -1,6 +1,8 @@
 import Foundation
 
 enum LinkAction: String, Equatable {
+    case keep
+    case unpin
     case history
     case share
     case copylink

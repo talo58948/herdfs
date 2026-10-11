@@ -137,6 +137,11 @@ user or root. MOUNT is the only operation that reveals an export's unguessable
 Root remains the local limit: it can MOUNT and use uid 0, but the mount still
 carries only that client's principal and object-store grants (S1-S4).
 
+The unsandboxed menu-bar app polls each mount's control socket and atomically writes Finder badge
+state into the Finder extension's own sandbox container. Snapshots contain pending paths and files
+under kept roots, capped at 10,000 paths per mount; the extension reads only that file, and sends
+all Finder actions to the app as `herdfs://` URLs.
+
 ## Deliberately out of v0.1
 
 Hard links; access times (atime is reported as mtime) and a separate ctime (reported as mtime); using a file after it is unlinked while open (fails with `ENOENT`); cross-host `flock`/`fcntl` locks (locks coordinate processes on one client only, not across clients; so a database such as SQLite must not be written from two clients at once); shared-writable `mmap` coherence across hosts; device and special files; Windows, iOS and Intel Macs; a Finder Trash on a space (Finder deletes from network volumes at once; history of a deleted file goes with it); per-uid mapping inside one mount; an S3-compatible API on herdfs; remote execution as a read-path strategy;  FS-level guarded writes. Each of these fails cleanly (`ENOTSUP`/`EPERM`), is simply absent, or, for locks, is scoped to one client as stated.

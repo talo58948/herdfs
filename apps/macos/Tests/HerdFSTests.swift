@@ -19,6 +19,7 @@ final class HerdFSTests: XCTestCase {
         """)
         XCTAssertEqual(status.pending, [PendingUpload(path: "a/b.txt", bytes: 1234)])
         XCTAssertEqual(status.kept.bytes, 3)
+        XCTAssertEqual(status.kept.pins, [KeptPin(path: "a", ready: true)])
 
         let file = try decode(FileState.self,
             #"{"ok":true,"kept":true,"downloading":false,"pending":false,"error":null}"#)
@@ -120,6 +121,27 @@ final class HerdFSTests: XCTestCase {
             AppLink.resolve(valid, authority: "https://a", registry: registry, records: records)?.path.relativePath,
             "docs/file"
         )
+        for action in [LinkAction.keep, .unpin] {
+            let url = try XCTUnwrap(URL(string: "herdfs://one/docs/file?action=\(action.rawValue)"))
+            XCTAssertEqual(
+                AppLink.resolve(url, authority: "https://a", registry: registry, records: records)?.action,
+                action
+            )
+        }
+    }
+
+    func testFinderStateLocatesBadgesWithoutTheMountRegistry() {
+        // contract: U2
+        let mount = FinderMountState(
+            space: "one",
+            mountpoint: "/Volumes/one",
+            badges: ["docs/file": .kept]
+        )
+        let state = FinderState(mounts: [mount])
+        let found = state.locate(URL(fileURLWithPath: "/Volumes/one/docs/file"))
+        XCTAssertEqual(found?.relativePath, "docs/file")
+        XCTAssertEqual(found?.mount.badges["docs/file"], .kept)
+        XCTAssertNil(state.locate(URL(fileURLWithPath: "/Volumes/another/file")))
     }
 
     func testWaitingIsAControlFailure() {

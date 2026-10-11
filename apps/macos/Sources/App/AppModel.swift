@@ -1,4 +1,3 @@
-import AppKit
 import Darwin
 import FinderSync
 import Foundation
@@ -26,7 +25,7 @@ final class AppModel: ObservableObject {
 
     private static let cacheBytes = "10737418240"
     private static let processPathBufferSize = 4_096
-    private let registry = MountRegistry()
+    let registry = MountRegistry()
     private var started = false
 
     func start() {
@@ -178,31 +177,7 @@ final class AppModel: ObservableObject {
         SMAppService.openSystemSettingsLoginItems()
     }
 
-    func open(_ link: URL) {
-        Task {
-            let records = await registry.liveRecords().filter(appMount)
-            guard let link = AppLink.resolve(
-                link,
-                authority: Configuration.authority,
-                registry: registry,
-                records: records
-            ) else { return }
-            switch link.action {
-            case .history: ActionWindows.history(link.path)
-            case .share: ActionWindows.share(link.path)
-            case .copylink:
-                guard let value = link.canonicalURL?.absoluteString else { return }
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(value, forType: .string)
-            case nil:
-                NSWorkspace.shared.activateFileViewerSelecting([
-                    URL(fileURLWithPath: link.path.mount.mountpoint).appending(path: link.path.relativePath),
-                ])
-            }
-        }
-    }
-
-    private func refreshMounts() async {
+    func refreshMounts() async {
         let authority = Configuration.authority
         let records = registry.records().filter {
             $0.authority == authority && appMount($0)
@@ -224,6 +199,11 @@ final class AppModel: ObservableObject {
                 return SpaceState(access: space.access, mount: mount, status: status)
             }
             if next != spaces { spaces = next }
+            do {
+                try await FinderStateWriter.write(Array(mounted.values))
+            } catch {
+                fail("Could not update Finder badges: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -242,7 +222,7 @@ final class AppModel: ObservableObject {
         fail(stderr.isEmpty ? "Mount did not register; see \(log.path)" : stderr)
     }
 
-    private func appMount(_ record: MountRecord) -> Bool {
+    func appMount(_ record: MountRecord) -> Bool {
         record.mountpoint == expectedMountpoint(record.space).path
             && processPath(record.pid) == CLI.executableURL.standardizedFileURL.path
     }
@@ -266,7 +246,7 @@ final class AppModel: ObservableObject {
         loginRequiresApproval = status == .requiresApproval
     }
 
-    private func fail(_ message: String) {
+    func fail(_ message: String) {
         guard error != message else { return }
         error = message
         ErrorNotification.send(message)
