@@ -963,7 +963,8 @@ pub async fn nfsproc3_readdirplus(
 
             // this is a wrapper around a writer that also just counts the number of bytes
             // written
-            let mut counting_output = crate::write_counter::WriteCounter::new(output);
+            let mut reply = Vec::new();
+            let mut counting_output = crate::write_counter::WriteCounter::new(&mut reply);
 
             make_success_reply(xid).serialize(&mut counting_output)?;
             nfs::nfsstat3::NFS3_OK.serialize(&mut counting_output)?;
@@ -1013,6 +1014,12 @@ pub async fn nfsproc3_readdirplus(
                     break;
                 }
             }
+            if ctr == 0 && !all_entries_written {
+                make_success_reply(xid).serialize(output)?;
+                nfs::nfsstat3::NFS3ERR_TOOSMALL.serialize(output)?;
+                dir_attr.serialize(output)?;
+                return Ok(());
+            }
             // false flag for the final entryplus* linked list
             false.serialize(&mut counting_output)?;
             // eof flag is only valid here if we wrote everything
@@ -1027,6 +1034,7 @@ pub async fn nfsproc3_readdirplus(
                 "readir {}, has_version {},  start at {}, flushing {} entries, complete {}",
                 dirid, has_version, args.cookie, ctr, all_entries_written
             );
+            output.write_all(&reply)?;
         },
         Err(stat) => {
             error!("readdir error {:?} --> {:?} ", xid, stat);
