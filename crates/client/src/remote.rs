@@ -94,13 +94,20 @@ impl Remote {
         version: VersionId,
         chunks: Vec<u32>,
     ) -> Result<(Vec<String>, Duration)> {
-        let request = |space| Request::Grant {
-            space,
+        let request = || Request::Grant {
+            space: self.space.clone(),
             entry,
             version,
-            chunks,
+            chunks: chunks.clone(),
         };
-        match self.call(request).await? {
+        let mut response = self.request(request()).await;
+        if response.as_ref().is_err_and(Error::is_offline) {
+            // An open may have timed out but left a usable head; wait out its short offline
+            // window before failing the read that needs this grant.
+            tokio::time::sleep(self.link.remaining().unwrap_or_default()).await;
+            response = self.request(request()).await;
+        }
+        match response? {
             Response::Grants { urls, ttl_ms } => Ok((urls, Duration::from_millis(ttl_ms))),
             other => Err(unexpected(&other)),
         }
@@ -237,4 +244,43 @@ impl Remote {
 
 fn unexpected(response: &Response) -> Error {
     Error::Protocol(format!("{response:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{Json, Router, routing::post};
+    use herdfs_core::proto::{EntryId, Response, VersionId};
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    // contract: C3, C12
+    #[tokio::test]
+    async fn a_grant_retries_after_a_transient_offline_window() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/v1/rpc",
+            post(|| async {
+                Json(Response::Grants {
+                    urls: vec!["http://store/chunk".into()],
+                    ttl_ms: 60_000,
+                })
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "test-token").unwrap();
+        let remote = Remote::new(&format!("http://{address}"), "test", token, &[]).unwrap();
+        remote.link.record::<()>(&Err(Error::TimedOut));
+
+        let grant = remote.grant(EntryId(1), VersionId(2), vec![0]).await.unwrap();
+
+        assert_eq!(
+            grant,
+            (vec!["http://store/chunk".into()], Duration::from_secs(60))
+        );
+        server.abort();
+    }
 }
