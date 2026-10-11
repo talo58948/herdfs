@@ -73,7 +73,7 @@ final class FinderSync: FIFinderSync, @unchecked Sendable {
     private func refresh() {
         state = FinderState.read()
         let nextDirectories = Set(state.mounts.map {
-            URL(fileURLWithPath: $0.mountpoint).resolvingSymlinksInPath()
+            canonicalFileURL(URL(fileURLWithPath: $0.mountpoint, isDirectory: true))
         })
         if nextDirectories != directories {
             directories = nextDirectories

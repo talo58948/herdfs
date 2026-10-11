@@ -1,5 +1,18 @@
 import Foundation
 
+func canonicalFileURL(_ url: URL) -> URL {
+    let standardized = url.standardizedFileURL
+    if let path = (try? standardized.resourceValues(forKeys: [.canonicalPathKey]))?.canonicalPath {
+        return URL(fileURLWithPath: path, isDirectory: standardized.hasDirectoryPath)
+    }
+    let parent = standardized.deletingLastPathComponent()
+    if let path = (try? parent.resourceValues(forKeys: [.canonicalPathKey]))?.canonicalPath {
+        return URL(fileURLWithPath: path, isDirectory: true)
+            .appending(path: standardized.lastPathComponent)
+    }
+    return standardized.resolvingSymlinksInPath()
+}
+
 struct FinderState: Codable, Equatable, Sendable {
     static let url = realHomeDirectory()
         .appending(path: "Library/Containers/dev.herdfs.HerdFS.Finder/Data/Library/Application Support/HerdFS/state.json")
@@ -23,9 +36,9 @@ struct FinderState: Codable, Equatable, Sendable {
     }
 
     func locate(_ url: URL) -> LocatedFinderPath? {
-        mounts.compactMap { mount in
-            let root = URL(fileURLWithPath: mount.mountpoint, isDirectory: true).standardizedFileURL
-            let path = url.standardizedFileURL.pathComponents
+        let path = canonicalFileURL(url).pathComponents
+        return mounts.compactMap { mount in
+            let root = canonicalFileURL(URL(fileURLWithPath: mount.mountpoint, isDirectory: true))
             let rootParts = root.pathComponents
             guard path.starts(with: rootParts) else { return nil }
             let relative = path.dropFirst(rootParts.count).joined(separator: "/")

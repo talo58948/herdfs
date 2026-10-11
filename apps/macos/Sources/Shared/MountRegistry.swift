@@ -45,7 +45,7 @@ struct MountRegistry {
                 return responsive
             }
             for record in responsive
-            where mountpoints.insert(Self.canonical(record.mountpoint).path).inserted {
+            where mountpoints.insert(canonicalFileURL(URL(fileURLWithPath: record.mountpoint)).path).inserted {
                 live.append(record)
             }
         }
@@ -53,21 +53,14 @@ struct MountRegistry {
     }
 
     func locate(_ url: URL, in records: [MountRecord]? = nil) -> LocatedPath? {
-        let path = Self.canonical(url.path).pathComponents
+        let path = canonicalFileURL(url).pathComponents
         return (records ?? self.records())
             .compactMap { record -> (MountRecord, [String])? in
-                let root = Self.canonical(record.mountpoint).pathComponents
+                let root = canonicalFileURL(URL(fileURLWithPath: record.mountpoint)).pathComponents
                 guard path.starts(with: root) else { return nil }
                 return (record, Array(path.dropFirst(root.count)))
             }
             .min { $0.1.count < $1.1.count }
             .map { LocatedPath(mount: $0.0, relativePath: $0.1.joined(separator: "/")) }
-    }
-
-    private static func canonical(_ path: String) -> URL {
-        let url = URL(fileURLWithPath: path).standardizedFileURL
-        return url.deletingLastPathComponent()
-            .resolvingSymlinksInPath()
-            .appending(path: url.lastPathComponent)
     }
 }

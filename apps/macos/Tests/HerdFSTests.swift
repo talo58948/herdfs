@@ -144,6 +144,27 @@ final class HerdFSTests: XCTestCase {
         XCTAssertNil(state.locate(URL(fileURLWithPath: "/Volumes/another/file")))
     }
 
+    func testFinderStateMatchesFlowHerdFSMountCase() throws {
+        // contract: U2
+        // Reproduces /Users/example/HerdFS versus /Users/example/herdfs.
+        let parent = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        let mountpoint = parent.appending(path: "HerdFS", directoryHint: .isDirectory)
+        let report = mountpoint.appending(path: "lab/report.txt")
+        try FileManager.default.createDirectory(
+            at: report.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try Data().write(to: report)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let state = FinderState(mounts: [FinderMountState(
+            space: "lab", mountpoint: mountpoint.path, badges: ["lab/report.txt": .kept]
+        )])
+
+        let finderURL = parent.appending(path: "herdfs/lab/report.txt")
+        let found = state.locate(finderURL)
+        XCTAssertEqual(found?.relativePath, "lab/report.txt")
+        XCTAssertEqual(found?.mount.badges["lab/report.txt"], .kept)
+    }
+
     func testWaitingIsAControlFailure() {
         // contract: U1, U2
         XCTAssertNotNil(ControlClient.failure(for: .waiting(NWError.posix(.ETIMEDOUT))))
