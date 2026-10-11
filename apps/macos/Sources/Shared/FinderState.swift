@@ -49,7 +49,7 @@ struct FinderState: Codable, Equatable, Sendable {
     func locate(_ url: URL) -> LocatedFinderPath? {
         let path = canonicalFileURL(url).pathComponents
         return mounts.compactMap { mount in
-            let rootParts = URL(fileURLWithPath: mount.mountpoint, isDirectory: true).pathComponents
+            let rootParts = canonicalFileURL(URL(fileURLWithPath: mount.mountpoint, isDirectory: true)).pathComponents
             guard path.starts(with: rootParts) else { return nil }
             let relative = path.dropFirst(rootParts.count).joined(separator: "/")
             return LocatedFinderPath(mount: mount, relativePath: relative)
