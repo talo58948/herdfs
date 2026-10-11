@@ -167,7 +167,6 @@ final class HerdFSTests: XCTestCase {
         )])
 
         let alias = parent.appending(path: "herdfs", directoryHint: .isDirectory)
-        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: mountpoint)
         let finderURL = alias.appending(path: "lab/report.txt")
         let found = state.locate(finderURL)
         XCTAssertEqual(found?.relativePath, "lab/report.txt")
