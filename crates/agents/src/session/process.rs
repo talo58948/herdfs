@@ -50,7 +50,6 @@ impl Agent {
             Ok(started) => started,
             Err(err) => return Execution::NotStarted(err),
         };
-        drop(prepared.cwd);
         Execution::Started(self.supervise(session, child, running, prepared).await)
     }
 
@@ -62,6 +61,7 @@ impl Agent {
         running: anyhow::Result<Running>,
         prepared: Prepared,
     ) -> anyhow::Result<Outcome> {
+        drop(prepared.cwd);
         let group = child.id().context("child has no pid")?;
         let running = match running {
             Ok(running) => running,
