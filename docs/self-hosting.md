@@ -42,7 +42,7 @@ The command writes the token ID to standard error. Revoke that machine immediate
   --db ./herdfs.db TOKEN_ID
 ```
 
-The key file can mint tokens for any user, so protect it and back it up with the database; deleting it invalidates every token.
+The key file can mint tokens for any user, so protect it and back it up with the database; the authority refuses a key file that others can access. Deleting it invalidates every token.
 
 ### Any OIDC provider
 
