@@ -12,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::task::JoinSet;
 
+use super::running::Running;
 use super::{Agent, Session, open, write};
 
 mod start;
@@ -45,58 +46,64 @@ impl Agent {
             Ok(prepared) => prepared,
             Err(err) => return Execution::NotStarted(err),
         };
-        let (mut child, running) = match start::spawn(prepared.command, session, &prepared.cwd) {
+        let (child, running) = match start::spawn(prepared.command, session, &prepared.cwd) {
             Ok(started) => started,
             Err(err) => return Execution::NotStarted(err),
         };
         drop(prepared.cwd);
+        Execution::Started(self.supervise(session, child, running, prepared).await)
+    }
 
-        let result = async {
-            let group = child.id().context("child has no pid")?;
-            let running = match running {
-                Ok(running) => running,
-                Err(err) => {
-                    kill_group(group).context("kill after process-group record failure")?;
-                    child
-                        .wait()
-                        .await
-                        .context("wait after process-group record failure")?;
-                    return Err(err);
-                }
-            };
-
-            let child_stdout = child.stdout.take().context("stdout pipe")?;
-            let child_stderr = child.stderr.take().context("stderr pipe")?;
-            let mut captures = JoinSet::new();
-            captures.spawn(capture(
-                child_stdout,
-                prepared.stdout,
-                prepared.output.try_clone().await?,
-            ));
-            captures.spawn(capture(
-                child_stderr,
-                prepared.stderr,
-                prepared.output.try_clone().await?,
-            ));
-            let (exit, cancelled) = wait(session, &mut child, group).await?;
-            running.finish()?;
-            let capture_result = finish_captures(&mut captures).await;
-            // On herdfs, fsync means committed: terminal status must not precede its results.
-            prepared.stdout_sync.sync_all().await.context("sync stdout")?;
-            prepared.stderr_sync.sync_all().await.context("sync stderr")?;
-            prepared.output.sync_all().await.context("sync output")?;
-            capture_result?;
-            write(session, "exit_code", &exit_code(exit)).await?;
-
-            if cancelled {
-                return Ok(Outcome::Cancelled);
+    /// Captures the started command's output and waits for it to exit or be cancelled.
+    async fn supervise(
+        &self,
+        session: &Session,
+        mut child: Child,
+        running: anyhow::Result<Running>,
+        prepared: Prepared,
+    ) -> anyhow::Result<Outcome> {
+        let group = child.id().context("child has no pid")?;
+        let running = match running {
+            Ok(running) => running,
+            Err(err) => {
+                kill_group(group).context("kill after process-group record failure")?;
+                child
+                    .wait()
+                    .await
+                    .context("wait after process-group record failure")?;
+                return Err(err);
             }
-            let Some(code) = exit.code() else { bail!("{exit}") };
-            ensure!(code == 0, "exit {code}");
-            Ok(Outcome::Done)
+        };
+
+        let child_stdout = child.stdout.take().context("stdout pipe")?;
+        let child_stderr = child.stderr.take().context("stderr pipe")?;
+        let mut captures = JoinSet::new();
+        captures.spawn(capture(
+            child_stdout,
+            prepared.stdout,
+            prepared.output.try_clone().await?,
+        ));
+        captures.spawn(capture(
+            child_stderr,
+            prepared.stderr,
+            prepared.output.try_clone().await?,
+        ));
+        let (exit, cancelled) = wait(session, &mut child, group).await?;
+        running.finish()?;
+        let capture_result = finish_captures(&mut captures).await;
+        // On herdfs, fsync means committed: terminal status must not precede its results.
+        prepared.stdout_sync.sync_all().await.context("sync stdout")?;
+        prepared.stderr_sync.sync_all().await.context("sync stderr")?;
+        prepared.output.sync_all().await.context("sync output")?;
+        capture_result?;
+        write(session, "exit_code", &exit_code(exit)).await?;
+
+        if cancelled {
+            return Ok(Outcome::Cancelled);
         }
-        .await;
-        Execution::Started(result)
+        let Some(code) = exit.code() else { bail!("{exit}") };
+        ensure!(code == 0, "exit {code}");
+        Ok(Outcome::Done)
     }
 
     async fn prepare(&self, session: &Session) -> anyhow::Result<Prepared> {
