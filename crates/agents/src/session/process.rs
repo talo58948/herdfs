@@ -24,10 +24,85 @@ pub(super) enum Outcome {
     Cancelled,
 }
 
+pub(super) enum Execution {
+    NotStarted(anyhow::Error),
+    Started(anyhow::Result<Outcome>),
+}
+
+struct Prepared {
+    command: Command,
+    cwd: std::fs::File,
+    output: File,
+    stdout: File,
+    stderr: File,
+    stdout_sync: File,
+    stderr_sync: File,
+}
+
 impl Agent {
-    pub(super) async fn execute(&self, session: &Session, ran: &mut bool) -> anyhow::Result<Outcome> {
+    pub(super) async fn execute(&self, session: &Session) -> Execution {
+        let prepared = match self.prepare(session).await {
+            Ok(prepared) => prepared,
+            Err(err) => return Execution::NotStarted(err),
+        };
+        let (mut child, running) = match start::spawn(prepared.command, session, &prepared.cwd) {
+            Ok(started) => started,
+            Err(err) => return Execution::NotStarted(err),
+        };
+        drop(prepared.cwd);
+
+        let result = async {
+            let group = child.id().context("child has no pid")?;
+            let running = match running {
+                Ok(running) => running,
+                Err(err) => {
+                    kill_group(group).context("kill after process-group record failure")?;
+                    child
+                        .wait()
+                        .await
+                        .context("wait after process-group record failure")?;
+                    return Err(err);
+                }
+            };
+
+            let child_stdout = child.stdout.take().context("stdout pipe")?;
+            let child_stderr = child.stderr.take().context("stderr pipe")?;
+            let mut captures = JoinSet::new();
+            captures.spawn(capture(
+                child_stdout,
+                prepared.stdout,
+                prepared.output.try_clone().await?,
+            ));
+            captures.spawn(capture(
+                child_stderr,
+                prepared.stderr,
+                prepared.output.try_clone().await?,
+            ));
+            let (exit, cancelled) = wait(session, &mut child, group).await?;
+            running.finish()?;
+            let capture_result = finish_captures(&mut captures).await;
+            // On herdfs, fsync means committed: terminal status must not precede its results.
+            prepared.stdout_sync.sync_all().await.context("sync stdout")?;
+            prepared.stderr_sync.sync_all().await.context("sync stderr")?;
+            prepared.output.sync_all().await.context("sync output")?;
+            capture_result?;
+            write(session, "exit_code", &exit_code(exit)).await?;
+
+            if cancelled {
+                return Ok(Outcome::Cancelled);
+            }
+            let Some(code) = exit.code() else { bail!("{exit}") };
+            ensure!(code == 0, "exit {code}");
+            Ok(Outcome::Done)
+        }
+        .await;
+        Execution::Started(result)
+    }
+
+    async fn prepare(&self, session: &Session) -> anyhow::Result<Prepared> {
         let cwd = self.cwd(session).await?;
         let prompt = open(session, "prompt", OFlags::RDONLY).await?;
+        // Caller-writable result names must be cleared before the command can contribute its own.
         let code_file = result_file(session, "exit_code").await?;
         let output = result_file(session, "output").await?;
         let stdout = result_file(session, "stdout").await?;
@@ -44,43 +119,15 @@ impl Agent {
             .stdin(prompt.into_std().await)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let (mut child, running) = start::spawn(command, session, &cwd)?;
-        let group = child.id().context("child has no pid")?;
-        let running = match running {
-            Ok(running) => running,
-            Err(err) => {
-                kill_group(group).context("kill after process-group record failure")?;
-                child
-                    .wait()
-                    .await
-                    .context("wait after process-group record failure")?;
-                return Err(err);
-            }
-        };
-        *ran = true;
-        drop(cwd);
-
-        let child_stdout = child.stdout.take().context("stdout pipe")?;
-        let child_stderr = child.stderr.take().context("stderr pipe")?;
-        let mut captures = JoinSet::new();
-        captures.spawn(capture(child_stdout, stdout, output.try_clone().await?));
-        captures.spawn(capture(child_stderr, stderr, output.try_clone().await?));
-        let (exit, cancelled) = wait(session, &mut child, group).await?;
-        running.finish()?;
-        let capture_result = finish_captures(&mut captures).await;
-        // On herdfs, fsync means committed: terminal status must not precede its results.
-        stdout_sync.sync_all().await.context("sync stdout")?;
-        stderr_sync.sync_all().await.context("sync stderr")?;
-        output.sync_all().await.context("sync output")?;
-        capture_result?;
-        write(session, "exit_code", &exit_code(exit)).await?;
-
-        if cancelled {
-            return Ok(Outcome::Cancelled);
-        }
-        let Some(code) = exit.code() else { bail!("{exit}") };
-        ensure!(code == 0, "exit {code}");
-        Ok(Outcome::Done)
+        Ok(Prepared {
+            command,
+            cwd,
+            output,
+            stdout,
+            stderr,
+            stdout_sync,
+            stderr_sync,
+        })
     }
 }
 

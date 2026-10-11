@@ -65,8 +65,8 @@ fn result_files(dir: &Path) -> usize {
         .count()
 }
 
-/// Every terminal session must have the promised result files, including one cancelled while
-/// queued; running cancellations are the control for the ordinary result-writing path.
+/// Every terminal session must have fresh result files, including one cancelled while queued;
+/// running cancellations are the control for the ordinary result-writing path.
 // contract: A2
 #[test]
 fn queued_cancellations_write_result_files() {
@@ -85,11 +85,20 @@ fn queued_cancellations_write_result_files() {
         .collect();
     for dir in &queued {
         wait_status(dir, "queued");
+        for name in ["exit_code", "stdout", "stderr", "output"] {
+            fs::write(dir.join(name), "caller supplied\n").unwrap();
+        }
         fs::write(dir.join("cancel"), "").unwrap();
         wait_status(dir, "cancelled");
     }
 
     let complete = queued.iter().filter(|dir| result_files(dir) == 4).count();
+    for dir in &queued {
+        assert_eq!(fs::read(dir.join("exit_code")).unwrap(), b"cancelled\n");
+        for name in ["stdout", "stderr", "output"] {
+            assert_eq!(fs::read(dir.join(name)).unwrap(), b"");
+        }
+    }
     fs::write(blocker.join("release"), "").unwrap();
     wait_status(&blocker, "done");
     assert_eq!(
