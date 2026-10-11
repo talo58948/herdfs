@@ -1,4 +1,4 @@
-use std::fs;
+use std::fs::{self, File};
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -136,6 +136,31 @@ fn a_slow_write_gets_a_full_idle_second_before_sealing() -> Result<()> {
     ensure!(
         after == before + 1,
         "one active generation committed as multiple versions: {before} before, {after} after"
+    );
+    Ok(())
+}
+
+// contract: C2, M2
+#[test]
+fn wait_committed_includes_a_size_setattr_generation() -> Result<()> {
+    let Some(lab) = lab(Profile::Lan)? else {
+        return Ok(());
+    };
+    let path = lab.mount_path("a").join("truncate-idle");
+    save(&path, b"old head")?;
+    let before = history_len(&lab, "truncate-idle")?;
+
+    File::options().write(true).open(path)?.set_len(3)?;
+    lab.wait_committed("a")?;
+
+    let head = entry(&lab, "truncate-idle")?;
+    ensure!(
+        head.size == 3,
+        "size SETATTR left the {head:?} head visible after write idle"
+    );
+    ensure!(
+        history_len(&lab, "truncate-idle")? == before + 1,
+        "size SETATTR did not commit one version after write idle"
     );
     Ok(())
 }
