@@ -195,27 +195,63 @@ mod tests {
 
     // contract: M1, S3
     #[test]
-    fn export_identity_is_private_and_foreign_handles_are_rejected() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn foreign_export_handles_are_rejected() {
         let first_root = tempfile::tempdir().unwrap();
         let second_root = tempfile::tempdir().unwrap();
-        fs::set_permissions(first_root.path(), fs::Permissions::from_mode(0o755)).unwrap();
         let first = adapter(first_root.path()).0;
         let foreign = adapter(second_root.path()).0.id_to_fh(42);
         assert!(matches!(
             first.fh_to_id(&foreign),
             Err(nfsstat3::NFS3ERR_BADHANDLE)
         ));
+    }
+
+    // contract: M1, S3
+    #[test]
+    fn export_identity_is_private_without_changing_its_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let first_root = tempfile::tempdir().unwrap();
+        fs::set_permissions(first_root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let _first = adapter(first_root.path()).0;
 
         let identity = first_root.path().join("journal.nfs.json");
         assert_eq!(
             fs::metadata(first_root.path()).unwrap().permissions().mode() & 0o777,
-            0o700
+            0o755
         );
         assert_eq!(
             fs::metadata(identity).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+    }
+
+    // contract: M1, S3
+    #[test]
+    fn readable_export_identity_is_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let journal = root.path().join("journal");
+        fs::create_dir(&journal).unwrap();
+        let first = Identity::open(&journal).unwrap().export_id();
+        let path = root.path().join("journal.nfs.json");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let second = Identity::open(&journal).unwrap().export_id();
+        assert_ne!(first, second);
+        assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    // contract: M1, S3
+    #[test]
+    fn export_identity_requires_a_parent_directory() {
+        assert_eq!(
+            Identity::open(std::path::Path::new("journal"))
+                .err()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
         );
     }
 

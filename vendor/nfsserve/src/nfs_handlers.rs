@@ -178,6 +178,7 @@ pub async fn handle_nfs(
         NFSProgram::NFSPROC3_REMOVE => nfsproc3_remove(xid, input, output, context, false).await?,
         NFSProgram::NFSPROC3_RMDIR => nfsproc3_remove(xid, input, output, context, true).await?,
         NFSProgram::NFSPROC3_RENAME => nfsproc3_rename(xid, input, output, context).await?,
+        NFSProgram::NFSPROC3_LINK => nfsproc3_link(xid, input, output, context).await?,
         NFSProgram::NFSPROC3_MKDIR => nfsproc3_mkdir(xid, input, output, context).await?,
         NFSProgram::NFSPROC3_SYMLINK => nfsproc3_symlink(xid, input, output, context).await?,
         NFSProgram::NFSPROC3_READLINK => nfsproc3_readlink(xid, input, output, context).await?,
@@ -187,9 +188,31 @@ pub async fn handle_nfs(
             proc_unavail_reply_message(xid).serialize(output)?;
         } /*
           NFSPROC3_MKNOD,
-          NFSPROC3_LINK,
           INVALID*/
     }
+    Ok(())
+}
+
+pub async fn nfsproc3_link(
+    xid: u32,
+    input: &mut impl Read,
+    output: &mut impl Write,
+    context: &RPCContext,
+) -> Result<(), anyhow::Error> {
+    let mut file = nfs::nfs_fh3::default();
+    let mut link = nfs::diropargs3::default();
+    file.deserialize(input)?;
+    link.deserialize(input)?;
+    let status = context
+        .vfs
+        .fh_to_id(&file)
+        .err()
+        .or_else(|| context.vfs.fh_to_id(&link.dir).err())
+        .unwrap_or(nfs::nfsstat3::NFS3ERR_NOTSUPP);
+    make_success_reply(xid).serialize(output)?;
+    status.serialize(output)?;
+    nfs::post_op_attr::Void.serialize(output)?;
+    nfs::wcc_data::default().serialize(output)?;
     Ok(())
 }
 
