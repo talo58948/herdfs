@@ -160,8 +160,10 @@ impl Client {
 
     /// SIGKILLs the mount process, then detaches the mount it leaves behind.
     pub(crate) fn kill(&mut self) -> Result<()> {
-        let mounted = mount::mounted(&self.mount);
+        // Once its server stops, an NFS mount may block the mount-table probe.
+        let mounted = (self.spec.mount == Mount::Nfs).then(|| mount::mounted(&self.mount));
         self.process = None;
+        let mounted = mounted.unwrap_or_else(|| mount::mounted(&self.mount));
         if !mounted {
             return Ok(());
         }
