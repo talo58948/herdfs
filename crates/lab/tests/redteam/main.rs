@@ -43,6 +43,7 @@ mod replayed_commits;
 mod replayed_heads;
 mod revoked_replays;
 mod rewound_reads;
+mod round100_nfs;
 mod round21_rename_race;
 mod round22_agents;
 mod round23_local_pin;

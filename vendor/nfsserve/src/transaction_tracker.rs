@@ -36,7 +36,24 @@ impl TransactionTracker {
                     .lock()
                     .expect("unable to unlock transactions mutex");
                 if !transactions.contains_key(&key) && transactions.len() >= MAX_TRANSACTIONS {
-                    return Begin::Drop;
+                    let cutoff = Instant::now() - self.retention_period;
+                    transactions.retain(|_, state| match state {
+                        TransactionState::InProgress { .. } => true,
+                        TransactionState::Completed { finished, .. } => *finished >= cutoff,
+                    });
+                    if transactions.len() >= MAX_TRANSACTIONS {
+                        let oldest = transactions
+                            .iter()
+                            .filter_map(|(key, state)| match state {
+                                TransactionState::Completed { finished, .. } => Some((*key, *finished)),
+                                TransactionState::InProgress { .. } => None,
+                            })
+                            .min_by_key(|(_, finished)| *finished);
+                        let Some((oldest, _)) = oldest else {
+                            return Begin::New;
+                        };
+                        transactions.remove(&oldest);
+                    }
                 }
                 let finished = match transactions.entry(key) {
                     hash_map::Entry::Vacant(entry) => {
@@ -195,15 +212,36 @@ mod tests {
 
     // contract: M1
     #[tokio::test]
-    async fn distinct_requests_cannot_grow_the_tracker_without_bound() {
+    async fn all_in_progress_requests_do_not_grow_the_tracker_without_bound() {
         let tracker = TransactionTracker::new(Duration::from_secs(60));
         for xid in 0..MAX_TRANSACTIONS as u32 {
             assert!(matches!(tracker.begin(xid, request(), client()).await, Begin::New));
         }
         assert!(matches!(
             tracker.begin(MAX_TRANSACTIONS as u32, request(), client()).await,
-            Begin::Drop
+            Begin::New
         ));
         assert_eq!(tracker.transactions.lock().unwrap().len(), MAX_TRANSACTIONS);
+    }
+
+    // contract: M1
+    #[tokio::test]
+    async fn fresh_request_evicts_the_oldest_completed_transaction() {
+        let tracker = TransactionTracker::new(Duration::from_secs(60));
+        assert!(matches!(tracker.begin(0, request(), client()).await, Begin::New));
+        tracker.mark_processed(0, request(), client(), vec![0]);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        for xid in 1..MAX_TRANSACTIONS as u32 {
+            assert!(matches!(tracker.begin(xid, request(), client()).await, Begin::New));
+            tracker.mark_processed(xid, request(), client(), vec![1]);
+        }
+
+        assert!(matches!(
+            tracker.begin(MAX_TRANSACTIONS as u32, request(), client()).await,
+            Begin::New
+        ));
+        let transactions = tracker.transactions.lock().unwrap();
+        assert_eq!(transactions.len(), MAX_TRANSACTIONS);
+        assert!(!transactions.contains_key(&(0, request(), client())));
     }
 }
