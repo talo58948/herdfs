@@ -12,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::task::JoinSet;
 
+use super::running::Running;
 use super::{Agent, Session, open, write};
 
 mod start;
@@ -24,25 +25,41 @@ pub(super) enum Outcome {
     Cancelled,
 }
 
+pub(super) enum Execution {
+    NotStarted(anyhow::Error),
+    Started(anyhow::Result<Outcome>),
+}
+
+struct Prepared {
+    output: File,
+    stdout: File,
+    stderr: File,
+    stdout_sync: File,
+    stderr_sync: File,
+}
+
 impl Agent {
-    pub(super) async fn execute(&self, session: &Session) -> anyhow::Result<Outcome> {
-        let cwd = self.cwd(session).await?;
-        let prompt = open(session, "prompt", OFlags::RDONLY).await?;
-        let output = result_file(session, "output").await?;
-        let stdout = result_file(session, "stdout").await?;
-        let stderr = result_file(session, "stderr").await?;
-        let stdout_sync = stdout.try_clone().await?;
-        let stderr_sync = stderr.try_clone().await?;
-        let mut command = Command::new("sh");
-        command
-            .arg("-c")
-            .arg(&self.command)
-            .env("HERDFS_SESSION_DIR", &session.dir)
-            .env("HERDFS_MOUNT", &self.mount)
-            .stdin(prompt.into_std().await)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let (mut child, running) = start::spawn(command, session, &cwd)?;
+    pub(super) async fn execute(&self, session: &Session) -> Execution {
+        let (command, cwd, prepared) = match self.prepare(session).await {
+            Ok(prepared) => prepared,
+            Err(err) => return Execution::NotStarted(err),
+        };
+        let (child, running) = match start::spawn(command, session, &cwd) {
+            Ok(started) => started,
+            Err(err) => return Execution::NotStarted(err),
+        };
+        drop(cwd);
+        Execution::Started(self.supervise(session, child, running, prepared).await)
+    }
+
+    /// Captures the started command's output and waits for it to exit or be cancelled.
+    async fn supervise(
+        &self,
+        session: &Session,
+        mut child: Child,
+        running: anyhow::Result<Running>,
+        prepared: Prepared,
+    ) -> anyhow::Result<Outcome> {
         let group = child.id().context("child has no pid")?;
         let running = match running {
             Ok(running) => running,
@@ -55,20 +72,27 @@ impl Agent {
                 return Err(err);
             }
         };
-        drop(cwd);
 
         let child_stdout = child.stdout.take().context("stdout pipe")?;
         let child_stderr = child.stderr.take().context("stderr pipe")?;
         let mut captures = JoinSet::new();
-        captures.spawn(capture(child_stdout, stdout, output.try_clone().await?));
-        captures.spawn(capture(child_stderr, stderr, output.try_clone().await?));
+        captures.spawn(capture(
+            child_stdout,
+            prepared.stdout,
+            prepared.output.try_clone().await?,
+        ));
+        captures.spawn(capture(
+            child_stderr,
+            prepared.stderr,
+            prepared.output.try_clone().await?,
+        ));
         let (exit, cancelled) = wait(session, &mut child, group).await?;
         running.finish()?;
         let capture_result = finish_captures(&mut captures).await;
         // On herdfs, fsync means committed: terminal status must not precede its results.
-        stdout_sync.sync_all().await.context("sync stdout")?;
-        stderr_sync.sync_all().await.context("sync stderr")?;
-        output.sync_all().await.context("sync output")?;
+        prepared.stdout_sync.sync_all().await.context("sync stdout")?;
+        prepared.stderr_sync.sync_all().await.context("sync stderr")?;
+        prepared.output.sync_all().await.context("sync output")?;
         capture_result?;
         write(session, "exit_code", &exit_code(exit)).await?;
 
@@ -78,6 +102,39 @@ impl Agent {
         let Some(code) = exit.code() else { bail!("{exit}") };
         ensure!(code == 0, "exit {code}");
         Ok(Outcome::Done)
+    }
+
+    async fn prepare(&self, session: &Session) -> anyhow::Result<(Command, std::fs::File, Prepared)> {
+        let cwd = self.cwd(session).await?;
+        let prompt = open(session, "prompt", OFlags::RDONLY).await?;
+        // Caller-writable result names must be cleared before the command can contribute its own.
+        let code_file = result_file(session, "exit_code").await?;
+        let output = result_file(session, "output").await?;
+        let stdout = result_file(session, "stdout").await?;
+        let stderr = result_file(session, "stderr").await?;
+        drop(code_file);
+        let stdout_sync = stdout.try_clone().await?;
+        let stderr_sync = stderr.try_clone().await?;
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(&self.command)
+            .env("HERDFS_SESSION_DIR", &session.dir)
+            .env("HERDFS_MOUNT", &self.mount)
+            .stdin(prompt.into_std().await)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        Ok((
+            command,
+            cwd,
+            Prepared {
+                output,
+                stdout,
+                stderr,
+                stdout_sync,
+                stderr_sync,
+            },
+        ))
     }
 }
 
