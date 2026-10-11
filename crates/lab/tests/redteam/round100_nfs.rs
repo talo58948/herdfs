@@ -8,6 +8,7 @@ use herdfs_core::proto::{Entry, Request, Response};
 use herdfs_lab::{Lab, LabConfig, Profile, SPACE, Strategy};
 
 use crate::nfs_support::{Rpc, opaque, status};
+use crate::save;
 
 const REPLAY_LIMIT: usize = 4_096;
 
@@ -44,13 +45,14 @@ fn round100_replay_window_does_not_drop_fresh_commits() -> Result<()> {
         return Ok(());
     }
     let lab = Lab::start(LabConfig::default().client("a", "alice", &[], Profile::Lan, Strategy::Stream))?;
+    save(&lab.mount_path("a").join("barrier"), b"barrier")?;
     let mut rpc = Rpc::open(lab.client_dir("a"))?;
-    let root = rpc.handle(entry(&lab, "")?.id);
-    let args = commit_args(&root);
+    let file = rpc.handle(entry(&lab, "barrier")?.id);
+    let args = commit_args(&file);
     let timeout = Duration::from_millis(250);
 
     ensure!(
-        rpc.getattr(&root)?.0 == 0,
+        rpc.getattr(&file)?.0 == 0,
         "GETATTR control failed before saturation"
     );
     let mut answered = 0;
@@ -66,7 +68,7 @@ fn round100_replay_window_does_not_drop_fresh_commits() -> Result<()> {
         "replay window filled too early after {answered} replies"
     );
     ensure!(
-        rpc.getattr(&root)?.0 == 0,
+        rpc.getattr(&file)?.0 == 0,
         "GETATTR control failed after saturation"
     );
 
