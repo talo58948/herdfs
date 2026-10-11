@@ -1,4 +1,4 @@
-//! Round 91: NFS RENAME failures must contain both directory WCC fields.
+//! Round 91: NFS failure replies and guarded SETATTR semantics.
 
 use anyhow::{Context, Result, ensure};
 use herdfs_core::SpacePath;
@@ -35,6 +35,10 @@ fn rename(rpc: &mut Rpc, from: &[u8], to: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn setattr_size(rpc: &mut Rpc, handle: &[u8], size: u64, guarded: bool) -> Result<u32> {
+    status(&setattr_size_reply(rpc, handle, size, guarded)?)
+}
+
+fn setattr_size_reply(rpc: &mut Rpc, handle: &[u8], size: u64, guarded: bool) -> Result<Vec<u8>> {
     let mut args = Vec::new();
     opaque(&mut args, handle);
     for word in [0_u32, 0, 0, 1] {
@@ -48,7 +52,7 @@ fn setattr_size(rpc: &mut Rpc, handle: &[u8], size: u64, guarded: bool) -> Resul
         args.extend_from_slice(&0_u32.to_be_bytes());
         args.extend_from_slice(&0_u32.to_be_bytes());
     }
-    status(&rpc.call(2, &args)?)
+    rpc.call(2, &args)
 }
 
 fn decode_rename_failure(reply: &[u8], status: u32) -> Result<()> {
@@ -88,11 +92,50 @@ impl<'a> Reply<'a> {
         if self.u32()? != 0 {
             self.skip(24)?;
         }
+        self.post_attr()
+    }
+
+    fn post_attr(&mut self) -> Result<()> {
         if self.u32()? != 0 {
             self.skip(84)?;
         }
         Ok(())
     }
+}
+
+fn decode_attr_failure(reply: &[u8]) -> Result<()> {
+    let mut reply = Reply::new(reply)?;
+    ensure!(reply.u32()? == NFS3ERR_BADHANDLE);
+    reply.post_attr()
+}
+
+fn decode_wcc_failure(reply: &[u8]) -> Result<()> {
+    let mut reply = Reply::new(reply)?;
+    ensure!(reply.u32()? == NFS3ERR_BADHANDLE);
+    reply.wcc()
+}
+
+fn lookup(rpc: &mut Rpc, directory: &[u8]) -> Result<Vec<u8>> {
+    let mut args = Vec::new();
+    opaque(&mut args, directory);
+    opaque(&mut args, b"missing");
+    rpc.call(3, &args)
+}
+
+fn readlink(rpc: &mut Rpc, handle: &[u8]) -> Result<Vec<u8>> {
+    let mut args = Vec::new();
+    opaque(&mut args, handle);
+    rpc.call(5, &args)
+}
+
+fn write_empty(rpc: &mut Rpc, handle: &[u8]) -> Result<Vec<u8>> {
+    let mut args = Vec::new();
+    opaque(&mut args, handle);
+    args.extend_from_slice(&0_u64.to_be_bytes());
+    args.extend_from_slice(&0_u32.to_be_bytes());
+    args.extend_from_slice(&0_u32.to_be_bytes());
+    opaque(&mut args, &[]);
+    rpc.call(7, &args)
 }
 
 fn word(bytes: &[u8], at: usize) -> Result<u32> {
@@ -165,5 +208,38 @@ fn round91_setattr_guard_mismatch_does_not_mutate() -> Result<()> {
         failures += usize::from(changed);
     }
     assert_eq!(failures, 0, "rejected SETATTR requests that mutated files, of 3");
+    Ok(())
+}
+
+/// Foreign-handle LOOKUP and WRITE failures control the corresponding trailers for three
+/// READLINK and SETATTR pairs. Rejecting an export id must still produce a complete NFSv3 reply.
+// contract: M1
+#[test]
+#[ignore = "ROUND91: SETATTR and READLINK omit their failure bodies for foreign handles"]
+fn round91_foreign_handle_failures_have_complete_bodies() -> Result<()> {
+    if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
+        eprintln!("skipped: set LAB_MOUNT=nfs for the NFS suite");
+        return Ok(());
+    }
+    let lab = Lab::start(LabConfig::default().client("a", "alice", &[], Profile::Lan, Strategy::Stream))?;
+    let mut rpc = Rpc::open(lab.client_dir("a"))?;
+    let root = rpc.handle(entry(&lab, "")?.id);
+    let mut control = root.clone();
+    control[8] ^= 0x80;
+    decode_attr_failure(&lookup(&mut rpc, &control)?)?;
+    decode_wcc_failure(&write_empty(&mut rpc, &control)?)?;
+
+    let mut failures = 0;
+    for trial in 0..3 {
+        let mut foreign = root.clone();
+        foreign[8 + trial] ^= 1;
+        let readlink_complete = decode_attr_failure(&readlink(&mut rpc, &foreign)?).is_ok();
+        let setattr_complete = decode_wcc_failure(&setattr_size_reply(&mut rpc, &foreign, 0, false)?).is_ok();
+        eprintln!(
+            "trial {trial}: foreign READLINK complete={readlink_complete}, SETATTR complete={setattr_complete}"
+        );
+        failures += usize::from(!readlink_complete || !setattr_complete);
+    }
+    assert_eq!(failures, 0, "foreign-handle pairs with truncated replies, of 3");
     Ok(())
 }
