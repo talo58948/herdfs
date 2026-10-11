@@ -92,7 +92,7 @@ fn kill_group(pid: &str) {
 /// renames that keep sessions as direct host children are the passing controls.
 // contract: A1, A2
 #[test]
-#[ignore = "ROUND101: temporarily nested running sessions escape restart recovery"]
+#[ignore = "REJECTED ROUND101: sessions moved out of the host directory by a principal who may spawn them are untracked, like setsid (A2); see docs/architecture.md"]
 fn nested_renamed_sessions_remain_contained_across_restart() {
     let mount = TempDir::new().unwrap();
     let attacks: Vec<_> = (0..3)
