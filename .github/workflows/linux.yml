@@ -66,10 +66,17 @@ jobs:
             --test smoke --test round_trip --test semantics --test faults \
             --test cli --test plans --test local_issuer --test control \
             -E "not ($loaded)" --no-fail-fast
-          cargo nextest run -p herdfs-lab \
+          LAB_KEEP=1 cargo nextest run -p herdfs-lab \
             --test smoke --test round_trip --test semantics --test faults \
             --test cli --test plans --test local_issuer --test control \
             -E "$loaded" --test-threads=1 --no-fail-fast
+      - name: Upload client logs on lab failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-logs
+          path: /tmp/herdfs-lab-*/clients/*/client.log
+          if-no-files-found: warn
       - name: Confirmed default-mount probes
         run: |
           cargo nextest run -p herdfs-lab --test redteam \
