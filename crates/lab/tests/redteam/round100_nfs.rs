@@ -38,7 +38,6 @@ fn commit_args(handle: &[u8]) -> Vec<u8> {
 /// window. A live NFS export must answer new fsync/COMMIT requests instead of silently dropping them.
 // contract: M1, M2, C2
 #[test]
-#[ignore = "ROUND100: the full replay window silently drops every fresh NFS mutation"]
 fn round100_replay_window_does_not_drop_fresh_commits() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
         eprintln!("skipped: set LAB_MOUNT=nfs for the NFS suite");
