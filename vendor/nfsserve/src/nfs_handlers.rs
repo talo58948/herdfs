@@ -507,6 +507,7 @@ pub async fn nfsproc3_fsinfo(
             error!("fsinfo error {:?} --> {:?}", xid, stat);
             make_success_reply(xid).serialize(output)?;
             stat.serialize(output)?;
+            nfs::post_op_attr::Void.serialize(output)?;
         },
     }
     Ok(())
@@ -1645,6 +1646,7 @@ pub async fn nfsproc3_setattr(
     if let Err(stat) = id {
         make_success_reply(xid).serialize(output)?;
         stat.serialize(output)?;
+        nfs::wcc_data::default().serialize(output)?;
         return Ok(());
     }
     let id = id.unwrap();
@@ -1676,6 +1678,7 @@ pub async fn nfsproc3_setattr(
                 make_success_reply(xid).serialize(output)?;
                 nfs::nfsstat3::NFS3ERR_NOT_SYNC.serialize(output)?;
                 nfs::wcc_data::default().serialize(output)?;
+                return Ok(());
             }
         },
     }
@@ -1852,6 +1855,7 @@ pub async fn nfsproc3_rename(
         make_success_reply(xid).serialize(output)?;
         nfs::nfsstat3::NFS3ERR_ROFS.serialize(output)?;
         nfs::wcc_data::default().serialize(output)?;
+        nfs::wcc_data::default().serialize(output)?;
         return Ok(());
     }
 
@@ -1869,6 +1873,7 @@ pub async fn nfsproc3_rename(
         make_success_reply(xid).serialize(output)?;
         stat.serialize(output)?;
         nfs::wcc_data::default().serialize(output)?;
+        nfs::wcc_data::default().serialize(output)?;
         error!("Directory does not exist");
         return Ok(());
     }
@@ -1879,6 +1884,7 @@ pub async fn nfsproc3_rename(
         // directory does not exist
         make_success_reply(xid).serialize(output)?;
         stat.serialize(output)?;
+        nfs::wcc_data::default().serialize(output)?;
         nfs::wcc_data::default().serialize(output)?;
         error!("Directory does not exist");
         return Ok(());
@@ -1903,6 +1909,7 @@ pub async fn nfsproc3_rename(
             make_success_reply(xid).serialize(output)?;
             stat.serialize(output)?;
             nfs::wcc_data::default().serialize(output)?;
+            nfs::wcc_data::default().serialize(output)?;
             return Ok(());
         },
     };
@@ -1921,6 +1928,7 @@ pub async fn nfsproc3_rename(
             error!("Cannot stat directory");
             make_success_reply(xid).serialize(output)?;
             stat.serialize(output)?;
+            nfs::wcc_data::default().serialize(output)?;
             nfs::wcc_data::default().serialize(output)?;
             return Ok(());
         },
@@ -2259,6 +2267,7 @@ pub async fn nfsproc3_readlink(
     if let Err(stat) = id {
         make_success_reply(xid).serialize(output)?;
         stat.serialize(output)?;
+        nfs::post_op_attr::Void.serialize(output)?;
         return Ok(());
     }
     let id = id.unwrap();
