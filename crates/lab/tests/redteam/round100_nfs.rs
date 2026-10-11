@@ -67,6 +67,7 @@ fn round100_replay_window_does_not_drop_fresh_commits() -> Result<()> {
         answered > REPLAY_LIMIT - 32,
         "replay window filled too early after {answered} replies"
     );
+    eprintln!("replay window saturated after {answered} successful COMMIT replies");
     ensure!(
         rpc.getattr(&file)?.0 == 0,
         "GETATTR control failed after saturation"
