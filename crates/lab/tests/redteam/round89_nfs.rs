@@ -65,7 +65,6 @@ fn attacker(executable: &Path, port: u16, root: &[u8]) -> Result<bool> {
         .arg(format!("ROUND89_NFS_ROOT={}", serde_json::to_string(root)?))
         .arg(executable)
         .args([
-            "--ignored",
             "--exact",
             "round89_nfs::round89_writable_export_identity_is_replaced",
         ])
@@ -182,7 +181,6 @@ fn word(bytes: &[u8], at: usize) -> Result<u32> {
 /// local user must be replaced instead of becoming the secret prefix accepted by the NFS server.
 // contract: M1, S3
 #[test]
-#[ignore = "ROUND89: writable export identity lets another local user choose valid NFS handles"]
 fn round89_writable_export_identity_is_replaced() -> Result<()> {
     if std::env::var_os("ROUND89_NFS_PORT").is_some() {
         ensure!(attacker_read()? == SECRET, "attacker read changed bytes");
