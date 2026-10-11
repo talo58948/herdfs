@@ -29,7 +29,7 @@ final class FinderSync: FIFinderSync, @unchecked Sendable {
 
     override nonisolated func menu(for menuKind: FIMenuKind) -> NSMenu? {
         if Thread.isMainThread {
-            return MainActor.assumeIsolated { makeMenu(for: menuKind) }
+            return MainActor.assumeIsolated { MenuResult(makeMenu(for: menuKind)) }.value
         }
         return DispatchQueue.main.sync { MenuResult(makeMenu(for: menuKind)) }.value
     }
