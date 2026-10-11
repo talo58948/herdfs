@@ -64,7 +64,6 @@ fn wait_status(dir: &Path, wanted: &str) {
 /// that session even if the prompt disappears; queued sessions with intact prompts are controls.
 // contract: A2
 #[test]
-#[ignore = "ROUND96: queued cancellation is skipped after the prompt disappears"]
 fn queued_cancel_survives_prompt_removal() {
     let mount = tempfile::tempdir().unwrap();
     let blocker = session(mount.path(), "blocker");

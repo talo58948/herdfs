@@ -119,6 +119,9 @@ pub(crate) async fn queue(mount: &Path, dir: &Path) -> io::Result<()> {
 /// Cancels a queued session without waiting for a runner slot.
 pub(crate) async fn cancel_queued(mount: &Path, dir: &Path) -> io::Result<bool> {
     let session = session(mount, dir).await?;
+    if read(&session, "status").await?.as_deref().map(str::trim) != Some("queued") {
+        return Ok(false);
+    }
     match open(&session, "cancel", OFlags::RDONLY).await {
         Ok(_) => {
             finish(&session, "queued", "cancelled", false).await?;

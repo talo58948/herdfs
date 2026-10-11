@@ -65,7 +65,7 @@ fn file_results(dir: &Path) -> usize {
 /// identical rejected sessions without a planted result directory are the passing controls.
 // contract: A2
 #[test]
-#[ignore = "ROUND96: a planted result directory leaves terminal sessions without all results"]
+#[ignore = "REJECTED ROUND96: result files obstructed by a principal who can spawn the session (A1); see docs/architecture.md"]
 fn terminal_failure_replaces_result_directories() {
     let mount = tempfile::tempdir().unwrap();
     let controls: Vec<_> = (0..3)
