@@ -56,6 +56,9 @@ struct MountRegistry {
     }
 
     private static func canonical(_ path: String) -> URL {
-        URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        return url.deletingLastPathComponent()
+            .resolvingSymlinksInPath()
+            .appending(path: url.lastPathComponent)
     }
 }
