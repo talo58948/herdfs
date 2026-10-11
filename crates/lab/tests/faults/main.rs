@@ -25,6 +25,8 @@ const VISIBLE_AFTER: Duration = Duration::from_millis(1_200);
 /// A committer backs off to 30 s between attempts, so a write lands within this of its link
 /// returning.
 const COMMIT_WITHIN: Duration = Duration::from_secs(45);
+/// A 32 MiB commit has taken 52 s under contention on the 2-core CI runner.
+const LARGE_COMMIT_WITHIN: Duration = Duration::from_secs(90);
 
 fn start(config: LabConfig) -> Result<Option<Lab>> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
@@ -120,7 +122,11 @@ fn wait_until(what: &str, timeout: Duration, mut done: impl FnMut() -> Result<bo
 
 /// Waits until client `client` has committed every write it closed.
 fn wait_committed(lab: &Lab, client: &str) -> Result<()> {
-    wait_until(&format!("{client} commits its writes"), COMMIT_WITHIN, || {
+    wait_committed_within(lab, client, COMMIT_WITHIN)
+}
+
+fn wait_committed_within(lab: &Lab, client: &str, within: Duration) -> Result<()> {
+    wait_until(&format!("{client} commits its writes"), within, || {
         Ok(lab.stats(client)?["pending_commits"] == 0)
     })
 }

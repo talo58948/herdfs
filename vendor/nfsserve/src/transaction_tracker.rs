@@ -5,6 +5,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
+const MAX_TRANSACTIONS: usize = 4_096;
+
 /// `TransactionTracker` tracks the state of transactions to detect retransmissions.
 pub struct TransactionTracker {
     retention_period: Duration,
@@ -33,6 +35,9 @@ impl TransactionTracker {
                     .transactions
                     .lock()
                     .expect("unable to unlock transactions mutex");
+                if !transactions.contains_key(&key) && transactions.len() >= MAX_TRANSACTIONS {
+                    return Begin::Drop;
+                }
                 let finished = match transactions.entry(key) {
                     hash_map::Entry::Vacant(entry) => {
                         entry.insert(TransactionState::InProgress {
@@ -186,5 +191,19 @@ mod tests {
         assert!(matches!(tracker.begin(13, request(), client()).await, Begin::New));
         tracker.mark_failed(13, request(), client());
         assert!(matches!(tracker.begin(13, request(), client()).await, Begin::New));
+    }
+
+    // contract: M1
+    #[tokio::test]
+    async fn distinct_requests_cannot_grow_the_tracker_without_bound() {
+        let tracker = TransactionTracker::new(Duration::from_secs(60));
+        for xid in 0..MAX_TRANSACTIONS as u32 {
+            assert!(matches!(tracker.begin(xid, request(), client()).await, Begin::New));
+        }
+        assert!(matches!(
+            tracker.begin(MAX_TRANSACTIONS as u32, request(), client()).await,
+            Begin::Drop
+        ));
+        assert_eq!(tracker.transactions.lock().unwrap().len(), MAX_TRANSACTIONS);
     }
 }

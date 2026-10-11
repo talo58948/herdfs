@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use nfsserve::nfs::{self, nfsstat3};
 use nfsserve::vfs::{NFSFileSystem, ReadDirResult, VFSCapabilities, WriteStability};
+use subtle::ConstantTimeEq;
 
 use super::{MAX_FILE_SIZE, Nfs};
 
@@ -174,7 +175,10 @@ impl NFSFileSystem for Nfs {
     }
 
     fn fh_to_id(&self, handle: &nfs::nfs_fh3) -> Result<u64, nfsstat3> {
-        if handle.data.len() != 32 || handle.data[..24] != self.handle_prefix {
+        if handle.data.len() != 32
+            || handle.data[..8] != self.handle_prefix[..8]
+            || !bool::from(handle.data[8..24].ct_eq(&self.handle_prefix[8..]))
+        {
             return Err(nfsstat3::NFS3ERR_BADHANDLE);
         }
         let mut encoded = [0; 8];

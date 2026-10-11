@@ -225,8 +225,9 @@ pub fn child_processes(parent: u32) -> Result<Vec<String>> {
             .filter_map(|line| {
                 let mut fields = line.split_whitespace();
                 let pid = fields.next()?;
-                (fields.next()?.parse::<u32>().ok()? == parent)
-                    .then(|| format!("{pid} ({})", fields.collect::<Vec<_>>().join(" ")))
+                let child = fields.next()?.parse::<u32>().ok()? == parent;
+                let command = fields.collect::<Vec<_>>().join(" ");
+                (child && command != "ps").then(|| format!("{pid} ({command})"))
             })
             .collect())
     }

@@ -129,14 +129,28 @@ while online, while an offline COMMIT returns after the generation is sealed in
 the journal (M2). Finder's AppleDouble resource forks and extended attributes
 are ordinary `._` files.
 
-The parent `$HOME/HerdFS` is mode 0700. Non-NULL NFS and MOUNT requests are
-accepted only from a reserved source port and with an AUTH_SYS uid matching the
-mounting user or root. The kernel NFS client uses a reserved port by default on
-Linux and macOS. An unprivileged process therefore cannot issue equivalent raw
-loopback requests. Root remains the local limit: it can use a reserved port and
-uid 0, but the mount still carries only that client's principal and object-store
-grants (S1-S4). Replay identity assumes the single kernel client (XID, request
-checksum, address); only root can introduce a second accepted raw RPC caller.
+The parent `$HOME/HerdFS` is mode 0700, and the random export identity is
+mode 0600 without changing the permissions of its parent directory. Non-NULL
+MOUNT requests require a reserved source port, while NFS requests require an
+AUTH_SYS uid matching the mounting user or root. AUTH_SYS is caller-supplied and
+forgeable; the actual boundary is the unguessable 128-bit export identity in
+every filehandle, because MOUNT is the only operation that reveals it. This
+boundary holds on Linux with its default privileged-port settings; lowering
+`net.ipv4.ip_unprivileged_port_start` invalidates it.
+
+macOS lets an unprivileged process bind a reserved port. Consequently, another
+local user account can MOUNT the loopback export, obtain its identity, forge the
+signed-in user's AUTH_SYS uid, and read or write that user's HerdFS drive.
+The NFS client is therefore for single-user Macs. Root and any such local user
+still receive only the mounted client's principal and object-store grants
+(S1-S4), not object-store credentials or access granted to another client.
+
+The unsandboxed menu-bar app polls each mount's control socket and atomically writes Finder badge
+state into the Finder extension's own sandbox container. It refuses symlinked or escaping snapshot
+directories. Snapshots contain pending paths and files under kept roots, with both the traversal and
+output capped at 10,000 paths per mount. A per-launch token in the snapshot authenticates immediate
+Keep Downloaded and Unpin actions; the extension reads only that file and sends Finder actions to the
+app as `herdfs://` URLs.
 
 ## Deliberately out of v0.1
 

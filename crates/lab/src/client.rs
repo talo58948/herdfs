@@ -160,8 +160,11 @@ impl Client {
 
     /// SIGKILLs the mount process, then detaches the mount it leaves behind.
     pub(crate) fn kill(&mut self) -> Result<()> {
+        // Once its server stops, an NFS mount may block the mount-table probe.
+        let mounted = (self.spec.mount == Mount::Nfs).then(|| mount::mounted(&self.mount));
         self.process = None;
-        if !mount::mounted(&self.mount) {
+        let mounted = mounted.unwrap_or_else(|| mount::mounted(&self.mount));
+        if !mounted {
             return Ok(());
         }
         match self.spec.mount {
@@ -205,14 +208,14 @@ impl Client {
         if self.spec.mount == Mount::Fuse {
             return Ok(self.stats()?["pending_commits"] != 0);
         }
-        // Journal records are JSON files in this directory; NFS identity is journal.nfs.json
-        // beside it. This is deliberately the lab's on-disk format probe for mounts without xattrs.
+        // NFS has no close event: a generation is .work until its idle seal, then .sealed through
+        // commit. Records are .json; journal.nfs.json is beside, not inside, this directory.
         let records = fs::read_dir(self.dir.join("journal"))?;
         Ok(records.filter_map(|record| record.ok()).any(|record| {
             record
                 .path()
                 .extension()
-                .is_some_and(|extension| extension == "json")
+                .is_some_and(|extension| extension == "json" || extension == "work" || extension == "sealed")
         }))
     }
 }

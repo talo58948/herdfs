@@ -1,16 +1,21 @@
 //! The kernel's side of the mount: inode numbers and cached attributes.
 
+#[cfg(target_os = "linux")]
 use std::{ffi::OsStr, sync::OnceLock};
 
 use herdfs_core::proto::EntryId;
 
-use super::{InodeNo, Invalidation};
+use super::InodeNo;
+#[cfg(target_os = "linux")]
+use super::Invalidation;
 
+#[cfg(target_os = "linux")]
 type Invalidator = Box<dyn Fn(Invalidation) + Send + Sync>;
 
 pub struct Kernel {
     root: EntryId,
     /// Set once mounted.
+    #[cfg(target_os = "linux")]
     invalidator: OnceLock<Invalidator>,
 }
 
@@ -18,6 +23,7 @@ impl Kernel {
     pub fn new(root: EntryId) -> Self {
         Self {
             root,
+            #[cfg(target_os = "linux")]
             invalidator: OnceLock::new(),
         }
     }
@@ -35,12 +41,14 @@ impl Kernel {
         EntryId(if ino.0 == 1 { self.root.0 } else { ino.0 - 1 })
     }
 
+    #[cfg(target_os = "linux")]
     pub fn mounted(&self, invalidate: impl Fn(Invalidation) + Send + Sync + 'static) {
         let _ = self.invalidator.set(Box::new(invalidate));
     }
 
     /// Drops attributes cached before the entry switched versions. Direct I/O leaves no file
     /// content in the kernel to invalidate.
+    #[cfg(target_os = "linux")]
     pub fn invalidate_attrs(&self, entry: EntryId) {
         let Some(invalidate) = self.invalidator.get() else {
             return;
@@ -48,6 +56,10 @@ impl Kernel {
         invalidate(Invalidation::Attributes(self.ino(entry)));
     }
 
+    #[cfg(not(target_os = "linux"))]
+    pub fn invalidate_attrs(&self, _entry: EntryId) {}
+
+    #[cfg(target_os = "linux")]
     pub fn invalidate_entry(&self, parent: InodeNo, entry: EntryId, name: &OsStr) {
         if let Some(invalidate) = self.invalidator.get() {
             invalidate(Invalidation::Entry {

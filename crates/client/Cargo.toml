@@ -25,6 +25,7 @@ rustix = { workspace = true, features = ["process"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+subtle.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 time.workspace = true

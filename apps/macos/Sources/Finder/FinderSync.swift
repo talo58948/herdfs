@@ -1,14 +1,14 @@
 import AppKit
 import FinderSync
+import OSLog
 
 @MainActor
 final class FinderSync: FIFinderSync, @unchecked Sendable {
-    private let registry = MountRegistry()
-    private var records: [MountRecord] = []
+    private var state = FinderState(token: "", mounts: [])
     private var directories: Set<URL> = []
     private var requested: Set<URL> = []
-    private var commandErrors: Set<URL> = []
-    private var registryTimer: DispatchSourceTimer?
+    private var stateTimer: DispatchSourceTimer?
+    private let log = Logger(subsystem: "dev.herdfs.HerdFS", category: "FinderSync")
 
     override nonisolated init() {
         super.init()
@@ -27,13 +27,14 @@ final class FinderSync: FIFinderSync, @unchecked Sendable {
     }
 
     private func start() {
+        log.info("Finder extension started")
         registerBadges()
         refresh()
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + 2, repeating: 2)
         timer.setEventHandler { [weak self] in self?.refresh() }
         timer.resume()
-        registryTimer = timer
+        stateTimer = timer
     }
 
     private func makeMenu(for menuKind: FIMenuKind) -> NSMenu? {
@@ -48,61 +49,46 @@ final class FinderSync: FIFinderSync, @unchecked Sendable {
         return menu
     }
 
-    @objc private func keepDownloaded() { control("pin") }
-    @objc private func unpin() { control("unpin") }
+    @objc private func keepDownloaded() { open(action: "keep") }
+    @objc private func unpin() { open(action: "unpin") }
     @objc private func copyLink() { open(action: "copylink") }
     @objc private func versionHistory() { open(action: "history") }
     @objc private func share() { open(action: "share") }
 
-    private func control(_ op: String) {
-        let urls = FIFinderSyncController.default().selectedItemURLs() ?? []
-        for url in urls {
-            guard let mount = registry.locate(url, in: records)?.mount else { continue }
-            Task {
-                do {
-                    try await ControlClient.command(op, path: url, mount: mount)
-                    commandErrors.remove(url)
-                    updateBadge(for: url)
-                } catch {
-                    commandErrors.insert(url)
-                    setBadge(.error, for: url)
-                }
-            }
-        }
-    }
-
     private func open(action: String) {
         let controller = FIFinderSyncController.default()
         guard let url = controller.selectedItemURLs()?.first ?? controller.targetedURL(),
-              let located = registry.locate(url, in: records) else { return }
+              let located = state.locate(url) else { return }
         var link = URLComponents()
         link.scheme = "herdfs"
         link.host = located.mount.space
         link.path = "/" + located.relativePath
-        link.queryItems = [URLQueryItem(name: "action", value: action)]
-        if let url = link.url { NSWorkspace.shared.open(url) }
+        link.queryItems = [
+            URLQueryItem(name: "action", value: action),
+            URLQueryItem(name: "token", value: state.token),
+        ]
+        if let url = link.url {
+            log.info("Opening \(action, privacy: .public) link")
+            NSWorkspace.shared.open(url)
+        }
     }
 
     private func refresh() {
-        let next = registry.records()
-        records = next
-        let nextDirectories = Set(records.map { URL(fileURLWithPath: $0.mountpoint) })
+        state = FinderState.read()
+        let nextDirectories = Set(state.mounts.map {
+            canonicalFileURL(URL(fileURLWithPath: $0.mountpoint, isDirectory: true))
+        })
         if nextDirectories != directories {
             directories = nextDirectories
             FIFinderSyncController.default().directoryURLs = directories
+            log.info("Monitoring \(self.directories.count) live mounts")
         }
         requested.forEach(updateBadge)
     }
 
     private func updateBadge(for url: URL) {
-        guard !commandErrors.contains(url), let mount = registry.locate(url, in: records)?.mount else {
-            setBadge(commandErrors.contains(url) ? .error : nil, for: url)
-            return
-        }
-        Task {
-            let state = try? await ControlClient.file(url, mount: mount)
-            setBadge(state.flatMap(Badge.choose), for: url)
-        }
+        guard let located = state.locate(url) else { return setBadge(nil, for: url) }
+        setBadge(located.mount.badges[located.relativePath], for: url)
     }
 
     private func setBadge(_ badge: Badge?, for url: URL) {

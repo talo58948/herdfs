@@ -3,9 +3,8 @@ use std::io;
 use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 
-use super::{Space, handles::Handle};
+use super::Space;
 use crate::Result;
-use crate::reader::Head;
 
 impl Space {
     pub async fn read(self: Arc<Self>, fh: u64, off: u64, len: u32) -> Result<Vec<u8>> {
@@ -16,29 +15,6 @@ impl Space {
         }
         self.usable(handle.entry, |file| self.read_version(file, off, len, &handle))
             .await
-    }
-
-    pub(super) async fn read_version(
-        &self,
-        file: Head,
-        off: u64,
-        len: u32,
-        handle: &Handle,
-    ) -> Result<Vec<u8>> {
-        let Some(file) = file else {
-            return Ok(Vec::new());
-        };
-        let access = handle.access.as_ref();
-        let bytes = self
-            .reader
-            .read(&file, off, len.into(), access.map(|access| &access.bytes_fetched))
-            .await?;
-        if handle.sequential(off, bytes.len())
-            && let Some(access) = access
-        {
-            self.read_ahead(file, off.saturating_add(bytes.len() as u64), access.clone());
-        }
-        Ok(bytes)
     }
 }
 

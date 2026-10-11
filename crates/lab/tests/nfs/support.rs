@@ -11,7 +11,7 @@ mod socket;
 use protocol::{read_record, rpc_header, send_record};
 use reply::Reply;
 pub use reply::denied_auth;
-pub(crate) use socket::reserved_stream;
+use socket::nfs_stream;
 
 const NFS_PROGRAM: u32 = 100_003;
 const NFS_VERSION: u32 = 3;
@@ -97,7 +97,7 @@ impl Rpc {
     pub fn write_then_commit(&mut self, handle: &[u8], data: &[u8]) -> Result<(WriteReply, u32)> {
         let write = self.write_call(handle, data, 0);
         let commit = self.commit_call(handle);
-        let mut stream = reserved_stream(self.port)?;
+        let mut stream = nfs_stream(self.port)?;
         send_record(&mut stream, &write)?;
         send_record(&mut stream, &commit)?;
         let write = parse_write(&read_record(&mut stream)?)?;
@@ -173,7 +173,7 @@ impl Rpc {
         args.extend_from_slice(&count.to_be_bytes());
         let mut call = rpc_header(self.next_xid(), 16, 1);
         call.extend_from_slice(&args);
-        let mut stream = reserved_stream(self.port)?;
+        let mut stream = nfs_stream(self.port)?;
         stream.set_read_timeout(Some(timeout))?;
         send_record(&mut stream, &call)?;
         read_record(&mut stream)
@@ -187,7 +187,7 @@ impl Rpc {
         if reconnect {
             return Ok([status(&self.send(&call)?)?, status(&self.send(&call)?)?]);
         }
-        let mut stream = reserved_stream(self.port)?;
+        let mut stream = nfs_stream(self.port)?;
         send_record(&mut stream, &call)?;
         let first = status(&read_record(&mut stream)?)?;
         send_record(&mut stream, &call)?;
@@ -222,7 +222,7 @@ impl Rpc {
     pub fn auth_null(&mut self) -> Result<Vec<u8>> {
         let xid = self.next_xid();
         let call = rpc_header(xid, 1, 0);
-        let mut stream = reserved_stream(self.port)?;
+        let mut stream = nfs_stream(self.port)?;
         send_record(&mut stream, &call)?;
         read_record(&mut stream)
     }
@@ -255,7 +255,7 @@ impl Rpc {
     }
 
     fn send(&self, call: &[u8]) -> Result<Vec<u8>> {
-        let mut stream = reserved_stream(self.port)?;
+        let mut stream = nfs_stream(self.port)?;
         send_record(&mut stream, call)?;
         read_record(&mut stream)
     }

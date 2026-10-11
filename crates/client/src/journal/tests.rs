@@ -108,6 +108,7 @@ impl Mount {
         self.local(|local, journal| local.seal(journal, ENTRY)).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     fn defer(&self) {
         self.local(|local, journal| local.defer(journal, ENTRY)).unwrap();
     }
@@ -189,6 +190,7 @@ fn a_sealed_write_is_recovered_after_a_restart_and_an_unclosed_one_dropped() {
 
 // contract: C3, C4a
 #[test]
+#[cfg(target_os = "linux")]
 fn a_deferred_truncate_waits_live_and_commits_after_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let (mount, mut woken) = Mount::open(dir.path());

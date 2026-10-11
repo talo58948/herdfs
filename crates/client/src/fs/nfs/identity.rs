@@ -1,7 +1,8 @@
 //! Durable identity used by a loopback NFS export across client restarts.
 
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -37,16 +38,23 @@ pub(crate) struct Identity {
 impl Identity {
     pub(crate) fn open(journal: &Path) -> io::Result<Self> {
         let path = journal.with_extension("nfs.json");
-        let (mut state, created) = match fs::read(&path) {
-            Ok(bytes) => (serde_json::from_slice(&bytes)?, false),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (
-                State {
-                    export_id: rand::random(),
-                    port: 0,
-                    creates: Vec::new(),
-                },
-                true,
-            ),
+        parent(&path)?;
+        let (mut state, created, exposed) = match fs::symlink_metadata(&path) {
+            Ok(metadata)
+                if metadata.file_type().is_symlink()
+                    || metadata.mode() & 0o044 != 0
+                    || metadata.uid() != rustix::process::geteuid().as_raw() =>
+            {
+                (State::new(), false, true)
+            }
+            Ok(_) => {
+                let mut file = File::open(&path)?;
+                file.set_permissions(fs::Permissions::from_mode(0o600))?;
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)?;
+                (serde_json::from_slice(&bytes)?, false, false)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (State::new(), true, false),
             Err(error) => return Err(error),
         };
         let before = state.creates.len();
@@ -56,7 +64,7 @@ impl Identity {
             path,
             state: Mutex::new(state),
         };
-        if created || pruned {
+        if created || exposed || pruned {
             identity.persist()?;
         }
         Ok(identity)
@@ -114,16 +122,38 @@ impl Identity {
     }
 
     fn persist_state(&self, state: &State) -> io::Result<()> {
-        let parent = self.path.parent().unwrap_or(Path::new("."));
+        let parent = parent(&self.path)?;
         let mut temp = tempfile::Builder::new()
             .prefix(".nfs-identity.")
             .suffix(".tmp")
+            .permissions(fs::Permissions::from_mode(0o600))
             .tempfile_in(parent)?;
         temp.write_all(&serde_json::to_vec(state)?)?;
         temp.as_file().sync_all()?;
         temp.persist(&self.path).map_err(|error| error.error)?;
         File::open(parent)?.sync_all()
     }
+}
+
+impl State {
+    fn new() -> Self {
+        Self {
+            export_id: rand::random(),
+            port: 0,
+            creates: Vec::new(),
+        }
+    }
+}
+
+fn parent(path: &Path) -> io::Result<&Path> {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "NFS identity needs a parent directory",
+            )
+        })
 }
 
 fn unix_seconds() -> u64 {

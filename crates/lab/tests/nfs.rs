@@ -2,6 +2,9 @@
 
 #[path = "nfs/flow.rs"]
 mod flow;
+#[cfg(target_os = "macos")]
+#[path = "nfs/macos_attack.rs"]
+mod macos_attack;
 #[path = "nfs/support.rs"]
 mod support;
 
@@ -18,6 +21,7 @@ use support::{Rpc, denied_auth};
 
 const NFS3ERR_STALE: u32 = 70;
 const NFS3ERR_NOENT: u32 = 2;
+const NFS3ERR_BADHANDLE: u32 = 10_001;
 
 fn lab(profile: Profile) -> Result<Option<Lab>> {
     if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
@@ -96,8 +100,13 @@ fn remove_and_rmdir_report_the_target_kind() -> Result<()> {
     let remove_dir = fs::remove_file(mount.join("directory")).unwrap_err();
     let rmdir_file = fs::remove_dir(mount.join("file")).unwrap_err();
     ensure!(
-        remove_dir.raw_os_error() == Some(libc::EISDIR),
-        "REMOVE dir was not EISDIR"
+        remove_dir.raw_os_error()
+            == Some(if cfg!(target_os = "macos") {
+                libc::EPERM
+            } else {
+                libc::EISDIR
+            }),
+        "REMOVE dir returned {remove_dir}"
     );
     ensure!(
         rmdir_file.raw_os_error() == Some(libc::ENOTDIR),
@@ -163,6 +172,45 @@ fn handles_survive_restart_without_lookup_and_deleted_handles_are_stale() -> Res
         "deleted handle returned NFS status {status}"
     );
     Ok(())
+}
+
+// contract: M1, S3
+#[test]
+fn rename_and_link_reject_a_foreign_second_handle() -> Result<()> {
+    let Some(lab) = lab(Profile::Lan)? else {
+        return Ok(());
+    };
+    let root = entry(&lab, "")?;
+    let mut rpc = Rpc::open(lab.client_dir("a"))?;
+    let root = rpc.handle(root.id);
+    let mut foreign = root.clone();
+    foreign[8] ^= 1;
+    ensure!(
+        rename(&mut rpc, &root, &foreign)? == NFS3ERR_BADHANDLE,
+        "RENAME accepted a foreign target"
+    );
+    ensure!(
+        link(&mut rpc, &root, &foreign)? == NFS3ERR_BADHANDLE,
+        "LINK accepted a foreign target"
+    );
+    Ok(())
+}
+
+fn rename(rpc: &mut Rpc, from: &[u8], to: &[u8]) -> Result<u32> {
+    let mut args = Vec::new();
+    support::opaque(&mut args, from);
+    support::opaque(&mut args, b"source");
+    support::opaque(&mut args, to);
+    support::opaque(&mut args, b"destination");
+    support::status(&rpc.call(14, &args)?)
+}
+
+fn link(rpc: &mut Rpc, file: &[u8], directory: &[u8]) -> Result<u32> {
+    let mut args = Vec::new();
+    support::opaque(&mut args, file);
+    support::opaque(&mut args, directory);
+    support::opaque(&mut args, b"link");
+    support::status(&rpc.call(15, &args)?)
 }
 
 /// A missing child under a live directory controls three lookups through deleted directory

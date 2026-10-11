@@ -15,11 +15,12 @@ targets:
     sources:
       - Sources/Shared
       - Sources/App
-    info:
-      path: Sources/App/Info.plist
     settings:
       base:
         ENABLE_APP_SANDBOX: NO
+        # Static plists declare the URL scheme and Finder extension point that XcodeGen cannot infer.
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Sources/App/Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: dev.herdfs.HerdFS
         PRODUCT_NAME: HerdFS
     dependencies:
@@ -43,13 +44,15 @@ targets:
       - path: Sources/Shared
         excludes:
           - CLI.swift
+          - ControlClient.swift
+          - MountRegistry.swift
       - Sources/Finder
-    info:
-      path: Sources/Finder/Info.plist
     settings:
       base:
         CODE_SIGN_ENTITLEMENTS: Sources/Finder/Finder.entitlements
         ENABLE_APP_SANDBOX: YES
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Sources/Finder/Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: dev.herdfs.HerdFS.Finder
         PRODUCT_NAME: HerdFSFinder
         SKIP_INSTALL: YES

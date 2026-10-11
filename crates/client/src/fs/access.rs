@@ -7,6 +7,7 @@ use herdfs_core::proto::EntryId;
 
 use super::{Space, handles::Handle};
 use crate::lock;
+use crate::reader::Head;
 use crate::strategy::{AccessPlan, AccessRecord, Decided, Keep, OpenContext, PlanSource, Upgrade};
 use crate::version::OpenVersion;
 
@@ -15,6 +16,29 @@ const REOPENED_WITHIN: Duration = Duration::from_secs(300);
 const OPENS: u64 = 4096;
 
 impl Space {
+    pub(super) async fn read_version(
+        &self,
+        file: Head,
+        off: u64,
+        len: u32,
+        handle: &Handle,
+    ) -> crate::Result<Vec<u8>> {
+        let Some(file) = file else {
+            return Ok(Vec::new());
+        };
+        let access = handle.access.as_ref();
+        let bytes = self
+            .reader
+            .read(&file, off, len.into(), access.map(|access| &access.bytes_fetched))
+            .await?;
+        if handle.sequential(off, bytes.len())
+            && let Some(access) = access
+        {
+            self.read_ahead(file, off.saturating_add(bytes.len() as u64), access.clone());
+        }
+        Ok(bytes)
+    }
+
     /// Changes the version an inode follows, then moves retained handles to that version.
     pub(crate) fn switch_version(
         &self,
@@ -170,25 +194,4 @@ pub(super) fn process_name(pid: u32) -> String {
         .unwrap_or_default()
         .trim_end()
         .to_owned()
-}
-
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-pub(super) fn process_name(pid: u32) -> String {
-    let Ok(pid) = i32::try_from(pid) else {
-        return String::new();
-    };
-    let mut name = [0_u8; 256];
-    // SAFETY: `name` is writable for the exact length passed to libproc.
-    let read = unsafe { libc::proc_name(pid, name.as_mut_ptr().cast(), name.len() as u32) };
-    if read <= 0 {
-        return String::new();
-    }
-    let end = name.iter().position(|byte| *byte == 0).unwrap_or(name.len());
-    String::from_utf8_lossy(&name[..end]).into_owned()
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(super) fn process_name(_pid: u32) -> String {
-    String::new()
 }

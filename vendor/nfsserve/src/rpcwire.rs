@@ -35,7 +35,10 @@ async fn handle_rpc(
             return Ok(true);
         }
         let protected = matches!(call.prog, nfs::PROGRAM | mount::PROGRAM) && call.proc != 0;
-        if protected && (context.client_port >= 1024 || !matches!(call.cred.flavor, auth_flavor::AUTH_UNIX)) {
+        let mount_call = call.prog == mount::PROGRAM && call.proc != 0;
+        if (mount_call && context.client_port >= 1024)
+            || (protected && !matches!(call.cred.flavor, auth_flavor::AUTH_UNIX))
+        {
             auth_error_reply_message(xid).serialize(output)?;
             return Ok(true);
         }
@@ -93,9 +96,12 @@ async fn handle_rpc(
         .map(|_| true);
         if tracked {
             if res.is_ok() {
-                context
-                    .transaction_tracker
-                    .mark_processed(xid, checksum, context.client_addr, output.clone());
+                context.transaction_tracker.mark_processed(
+                    xid,
+                    checksum,
+                    context.client_addr,
+                    output.clone(),
+                );
             } else {
                 context
                     .transaction_tracker
@@ -208,13 +214,13 @@ impl SocketMessageHandler {
                     Err(e) => {
                         error!("RPC Error: {:?}", e);
                         let _ = send.send(Err(e));
-                    },
+                    }
                     Ok(true) => {
                         let _ = send.send(Ok(write_buf));
-                    },
+                    }
                     Ok(false) => {
                         // do not reply
-                    },
+                    }
                 }
             });
         }

@@ -1,7 +1,7 @@
 import Foundation
 
 struct MountRecord: Decodable, Equatable, Identifiable, Sendable {
-    let id: String
+    var id: String { socket }
     let space: String
     let authority: String
     let mountpoint: String
@@ -21,6 +21,12 @@ struct CacheUse: Decodable, Equatable, Sendable {
 
 struct KeptUse: Decodable, Equatable, Sendable {
     let bytes: UInt64
+    let pins: [KeptPin]?
+}
+
+struct KeptPin: Decodable, Equatable, Sendable {
+    let path: String
+    let ready: Bool
 }
 
 struct MountStatus: Decodable, Equatable, Sendable {
@@ -71,20 +77,13 @@ struct AccessGrant: Decodable, Equatable, Identifiable, Sendable {
     let perm: String
 }
 
-enum Badge: Equatable, Sendable {
+enum Badge: String, Codable, Equatable, Sendable {
     case kept
     case downloading
     case pending
     case error
 
-    var identifier: String {
-        switch self {
-        case .kept: "kept"
-        case .downloading: "downloading"
-        case .pending: "pending"
-        case .error: "error"
-        }
-    }
+    var identifier: String { rawValue }
 
     static func choose(_ state: FileState) -> Badge? {
         if state.error != nil { return .error }
