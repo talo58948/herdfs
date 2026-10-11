@@ -148,7 +148,6 @@ fn word(bytes: &[u8], at: usize) -> Result<u32> {
 /// a foreign export id. Every RENAME failure must remain a complete NFSv3 `RENAME3resfail`.
 // contract: M1
 #[test]
-#[ignore = "ROUND91: RENAME with a foreign destination handle returns a truncated failure reply"]
 fn round91_rename_foreign_second_handle_has_a_complete_reply() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
         eprintln!("skipped: set LAB_MOUNT=nfs for the NFS suite");
@@ -178,7 +177,6 @@ fn round91_rename_foreign_second_handle_has_a_complete_reply() -> Result<()> {
 /// request reported as `NOT_SYNC` must not apply the attributes it refused.
 // contract: M1
 #[test]
-#[ignore = "ROUND91: SETATTR applies a size change after reporting a guard mismatch"]
 fn round91_setattr_guard_mismatch_does_not_mutate() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
         eprintln!("skipped: set LAB_MOUNT=nfs for the NFS suite");
@@ -215,7 +213,6 @@ fn round91_setattr_guard_mismatch_does_not_mutate() -> Result<()> {
 /// READLINK and SETATTR pairs. Rejecting an export id must still produce a complete NFSv3 reply.
 // contract: M1
 #[test]
-#[ignore = "ROUND91: SETATTR and READLINK omit their failure bodies for foreign handles"]
 fn round91_foreign_handle_failures_have_complete_bodies() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
         eprintln!("skipped: set LAB_MOUNT=nfs for the NFS suite");
