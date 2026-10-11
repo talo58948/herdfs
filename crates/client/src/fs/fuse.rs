@@ -1,47 +1,22 @@
 //! The `fuser` adapter. Callbacks that may wait on the network hand their work to the tokio
 //! runtime and reply from the task, so one slow download never stalls other operations.
 
+mod directory;
+mod runtime;
+
 use std::time::SystemTime;
-use std::{ffi::OsStr, io, path::Path, sync::Arc};
+use std::{ffi::OsStr, io, path::Path};
 
+use super::answer::{self, inode, open_mode};
+use super::{namespace::AttrChange, xattr};
+use crate::unix_ms;
 use fuser::{
-    BsdFileFlags, Errno, FileHandle, Filesystem, INodeNo, InitFlags, KernelConfig, LockOwner, Notifier,
-    OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
-    ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
+    BsdFileFlags, Errno, FileHandle, Filesystem, INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags,
+    RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
+    ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
-use tokio::runtime::Handle as Runtime;
 
-use super::answer::{self, Answer, inode, open_mode};
-use super::{Space, namespace::AttrChange, xattr};
-use crate::{Result, unix_ms};
-
-pub struct Fuse {
-    space: Arc<Space>,
-    runtime: Runtime,
-}
-
-impl Fuse {
-    pub fn new(space: Arc<Space>, runtime: Runtime) -> Self {
-        Self { space, runtime }
-    }
-    pub fn mounted(space: &Space, notifier: Notifier) {
-        answer::mounted(space, notifier);
-    }
-    fn space(&self) -> Arc<Space> {
-        self.space.clone()
-    }
-
-    /// Runs `work` on the runtime and answers with its value or its error's errno.
-    fn spawn<T>(
-        &self,
-        reply: impl Answer<T> + Send + 'static,
-        work: impl Future<Output = Result<T>> + Send + 'static,
-    ) {
-        self.runtime.spawn(async move {
-            answer::reply(reply, work.await);
-        });
-    }
-}
+pub use runtime::Fuse;
 
 impl Filesystem for Fuse {
     fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> io::Result<()> {
@@ -233,11 +208,13 @@ impl Filesystem for Fuse {
     }
 
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        self.spawn(reply, self.space().opendir(inode(ino)));
+        let space = self.space();
+        let directories = self.directories.clone();
+        self.spawn(reply, async move { directories.open(space, inode(ino)).await });
     }
 
     fn readdir(&self, _req: &Request, _ino: INodeNo, fh: FileHandle, offset: u64, reply: ReplyDirectory) {
-        answer::directory(self.space.readdir(fh.0, offset), reply);
+        self.directories.read(fh.0, offset, reply);
     }
 
     fn releasedir(
@@ -248,7 +225,7 @@ impl Filesystem for Fuse {
         _flags: OpenFlags,
         reply: ReplyEmpty,
     ) {
-        self.space.releasedir(fh.0);
+        self.directories.release(fh.0);
         reply.ok();
     }
 

@@ -3,12 +3,11 @@
 use std::time::Duration;
 
 use fuser::{
-    Errno, FileAttr, FileHandle, FileType, FopenFlags, Generation, INodeNo, Notifier, OpenAccMode, OpenFlags,
-    ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite,
-    ReplyXattr,
+    Errno, FileAttr, FileHandle, FopenFlags, Generation, INodeNo, Notifier, OpenAccMode, OpenFlags,
+    ReplyAttr, ReplyCreate, ReplyData, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, ReplyXattr,
 };
 
-use super::{Attributes, DirectoryEntry, FileKind, Invalidation, OpenMode, Space, TTL};
+use super::{Attributes, FileKind, Invalidation, OpenMode, Space, TTL};
 use crate::Result;
 
 const GENERATION: Generation = Generation(0);
@@ -120,24 +119,6 @@ pub(super) fn mounted(space: &Space, notifier: Notifier) {
             let _ = notifier.delete(INodeNo(parent.0), INodeNo(child.0), &name);
         }
     });
-}
-
-pub(super) fn directory(entries: Result<Vec<DirectoryEntry>>, mut reply: ReplyDirectory) {
-    let entries = match entries {
-        Ok(entries) => entries,
-        Err(err) => return reply.error(Errno::from_i32(err.errno())),
-    };
-    for entry in entries {
-        let kind = match entry.kind {
-            FileKind::File => FileType::RegularFile,
-            FileKind::Directory => FileType::Directory,
-            FileKind::Symlink => FileType::Symlink,
-        };
-        if reply.add(INodeNo(entry.ino.0), entry.next, kind, entry.name) {
-            break;
-        }
-    }
-    reply.ok();
 }
 
 /// Answers an xattr read: its size when asked with size 0, ERANGE when it does not fit.

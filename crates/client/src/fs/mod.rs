@@ -12,6 +12,7 @@ mod inodes;
 mod kernel;
 mod namespace;
 mod nfs;
+#[cfg(target_os = "linux")]
 mod read;
 mod sync;
 #[cfg(target_os = "linux")]
@@ -50,10 +51,6 @@ const PERMISSIONS: u32 = 0o7777;
 /// The longest name POSIX filesystems take, in bytes.
 const MAX_NAME: usize = 255;
 
-/// A directory's entries as readdir reports them.
-#[cfg(target_os = "linux")]
-type Listing = Vec<(InodeNo, FileKind, String)>;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct InodeNo(u64);
 
@@ -81,14 +78,6 @@ pub(crate) struct Attributes {
     gid: u32,
     #[cfg(target_os = "linux")]
     blksize: u32,
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) struct DirectoryEntry {
-    ino: InodeNo,
-    kind: FileKind,
-    name: String,
-    next: u64,
 }
 
 #[cfg(target_os = "linux")]
@@ -140,9 +129,6 @@ pub struct Space {
     /// Opens by entry and process name: how many in a row, and when the last was.
     opens: Mutex<Lru<(EntryId, String), (u32, Instant)>>,
     handles: Mutex<HashMap<u64, Arc<Handle>>>,
-    /// Directory listings taken at opendir, by handle.
-    #[cfg(target_os = "linux")]
-    listings: Mutex<HashMap<u64, Listing>>,
     next_handle: AtomicU64,
     metadata_ttl: Duration,
 }
@@ -178,8 +164,6 @@ impl Space {
             inodes,
             opens: Mutex::default(),
             handles: Mutex::default(),
-            #[cfg(target_os = "linux")]
-            listings: Mutex::default(),
             next_handle: AtomicU64::new(1),
             metadata_ttl: TTL,
         }

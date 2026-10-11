@@ -144,7 +144,7 @@ impl Local {
     }
 
     /// Persists a truncate-only close without letting the live committer publish it yet.
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(target_os = "linux")]
     pub fn defer(&mut self, journal: &Journal, entry: EntryId) -> io::Result<()> {
         self.seal_as(journal, entry, true)
     }

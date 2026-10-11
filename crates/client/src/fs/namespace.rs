@@ -1,8 +1,6 @@
 //! Namespace operations: lookups, attributes, directories and renames.
 
 use std::sync::Arc;
-#[cfg(target_os = "linux")]
-use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, Instant};
 use std::{
     ffi::{OsStr, OsString},
@@ -12,11 +10,7 @@ use std::{
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{Entry, EntryId, ErrorCode};
 
-#[cfg(target_os = "linux")]
-use super::DirectoryEntry;
 use super::{Attributes, InodeNo, MAX_NAME, OpenMode, PERMISSIONS, Space, handles::Handle};
-#[cfg(target_os = "linux")]
-use crate::lock;
 use crate::{Error, Result, journal::Local};
 
 pub struct AttrChange {
@@ -199,22 +193,6 @@ impl Space {
         Ok(())
     }
 
-    /// Lists the directory once, for the readdir calls on this handle to page through.
-    #[cfg(target_os = "linux")]
-    pub async fn opendir(self: Arc<Self>, ino: InodeNo) -> Result<u64> {
-        let asked = Instant::now();
-        let entries = self.list(ino).await?;
-        let listed = |entry| {
-            self.inodes.observe(entry, asked, true);
-            let attr = self.attr(entry, None);
-            (attr.ino, attr.kind, entry.path.name().to_owned())
-        };
-        let listing = entries.iter().map(listed).collect();
-        let handle = self.next_handle.fetch_add(1, Relaxed);
-        lock(&self.listings).insert(handle, listing);
-        Ok(handle)
-    }
-
     pub(super) async fn list(&self, ino: InodeNo) -> Result<Vec<Entry>> {
         let entry = self.entry_id(ino);
         match self.remote.list(entry).await {
@@ -226,29 +204,6 @@ impl Space {
             }
             listed => listed,
         }
-    }
-
-    #[cfg(target_os = "linux")]
-    pub fn readdir(&self, handle: u64, offset: u64) -> Result<Vec<DirectoryEntry>> {
-        let listings = lock(&self.listings);
-        let listing = listings.get(&handle).ok_or(libc::EBADF)?;
-        let offset = usize::try_from(offset).unwrap_or(usize::MAX);
-        Ok(listing
-            .iter()
-            .enumerate()
-            .skip(offset)
-            .map(|(next, (ino, kind, name))| DirectoryEntry {
-                ino: *ino,
-                kind: *kind,
-                name: name.clone(),
-                next: next as u64 + 1,
-            })
-            .collect())
-    }
-
-    #[cfg(target_os = "linux")]
-    pub fn releasedir(&self, handle: u64) {
-        lock(&self.listings).remove(&handle);
     }
 }
 
