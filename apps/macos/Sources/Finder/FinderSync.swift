@@ -16,14 +16,18 @@ final class FinderSync: FIFinderSync, @unchecked Sendable {
     }
 
     override nonisolated func requestBadgeIdentifier(for url: URL) {
-        MainActor.assumeIsolated {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
             requested.insert(url)
             updateBadge(for: url)
         }
     }
 
     override nonisolated func menu(for menuKind: FIMenuKind) -> NSMenu? {
-        MainActor.assumeIsolated { MenuResult(makeMenu(for: menuKind)) }.value
+        if Thread.isMainThread {
+            return MainActor.assumeIsolated { makeMenu(for: menuKind) }
+        }
+        return DispatchQueue.main.sync { MenuResult(makeMenu(for: menuKind)) }.value
     }
 
     private func start() {
