@@ -124,7 +124,6 @@ fn a_slow_write_gets_a_full_idle_second_before_sealing() -> Result<()> {
         "test write was not slow"
     );
     thread::sleep(Duration::from_millis(300));
-    lab.wait_committed("a")?;
     let middle = history_len(&lab, "slow-write")?;
     ensure!(
         middle == before,
