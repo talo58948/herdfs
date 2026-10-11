@@ -12,7 +12,11 @@ final class FinderSync: FIFinderSync, @unchecked Sendable {
 
     override nonisolated init() {
         super.init()
-        MainActor.assumeIsolated { start() }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { start() }
+        } else {
+            DispatchQueue.main.sync { start() }
+        }
     }
 
     override nonisolated func requestBadgeIdentifier(for url: URL) {

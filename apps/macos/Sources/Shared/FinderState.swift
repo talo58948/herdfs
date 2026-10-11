@@ -51,6 +51,10 @@ struct FinderState: Codable, Equatable, Sendable {
     let mounts: [FinderMountState]
 
     static func read() -> FinderState {
+        read(from: url)
+    }
+
+    static func read(from url: URL) -> FinderState {
         guard let data = try? Data(contentsOf: url),
               let state = try? JSONDecoder().decode(FinderState.self, from: data) else {
             return FinderState(token: "", mounts: [])

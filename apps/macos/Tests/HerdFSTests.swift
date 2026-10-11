@@ -153,7 +153,7 @@ final class HerdFSTests: XCTestCase {
 
     func testFinderStateMatchesFlowHerdFSMountCase() throws {
         // contract: U2
-        // Reproduces /Users/example/HerdFS versus /Users/example/herdfs.
+        // A portable alias reproduces Finder and the app naming the same directory differently.
         let parent = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         let mountpoint = parent.appending(path: "HerdFS", directoryHint: .isDirectory)
         let report = mountpoint.appending(path: "lab/report.txt")
@@ -166,11 +166,24 @@ final class HerdFSTests: XCTestCase {
             space: "lab", mountpoint: mountpoint.path, badges: ["lab/report.txt": .kept]
         )])
 
-        let finderURL = parent.appending(path: "herdfs/lab/report.txt")
-        try XCTSkipUnless(FileManager.default.fileExists(atPath: finderURL.path), "requires case-insensitive volume")
+        let alias = parent.appending(path: "herdfs", directoryHint: .isDirectory)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: mountpoint)
+        let finderURL = alias.appending(path: "lab/report.txt")
         let found = state.locate(finderURL)
         XCTAssertEqual(found?.relativePath, "lab/report.txt")
         XCTAssertEqual(found?.mount.badges["lab/report.txt"], .kept)
+    }
+
+    func testFinderStateMissingOrMalformedIsEmpty() throws {
+        // contract: U2
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        let stateURL = directory.appending(path: "state.json")
+        let empty = FinderState(token: "", mounts: [])
+        XCTAssertEqual(FinderState.read(from: stateURL), empty)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("not json".utf8).write(to: stateURL)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        XCTAssertEqual(FinderState.read(from: stateURL), empty)
     }
 
     func testWaitingIsAControlFailure() {
