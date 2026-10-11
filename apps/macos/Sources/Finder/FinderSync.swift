@@ -1,5 +1,6 @@
 import AppKit
 import FinderSync
+import OSLog
 
 @MainActor
 final class FinderSync: FIFinderSync, @unchecked Sendable {
@@ -9,6 +10,8 @@ final class FinderSync: FIFinderSync, @unchecked Sendable {
     private var requested: Set<URL> = []
     private var commandErrors: Set<URL> = []
     private var registryTimer: DispatchSourceTimer?
+    private var refreshing = false
+    private let log = Logger(subsystem: "dev.herdfs.HerdFS", category: "FinderSync")
 
     override nonisolated init() {
         super.init()
@@ -27,6 +30,7 @@ final class FinderSync: FIFinderSync, @unchecked Sendable {
     }
 
     private func start() {
+        log.info("Finder extension started")
         registerBadges()
         refresh()
         let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -80,18 +84,29 @@ final class FinderSync: FIFinderSync, @unchecked Sendable {
         link.host = located.mount.space
         link.path = "/" + located.relativePath
         link.queryItems = [URLQueryItem(name: "action", value: action)]
-        if let url = link.url { NSWorkspace.shared.open(url) }
+        if let url = link.url {
+            log.info("Opening \(action, privacy: .public) link")
+            NSWorkspace.shared.open(url)
+        }
     }
 
     private func refresh() {
-        let next = registry.records()
-        records = next
-        let nextDirectories = Set(records.map { URL(fileURLWithPath: $0.mountpoint) })
-        if nextDirectories != directories {
-            directories = nextDirectories
-            FIFinderSyncController.default().directoryURLs = directories
+        guard !refreshing else { return }
+        refreshing = true
+        Task {
+            defer { refreshing = false }
+            let next = await registry.liveRecords()
+            records = next
+            let nextDirectories = Set(records.map {
+                URL(fileURLWithPath: $0.mountpoint).resolvingSymlinksInPath()
+            })
+            if nextDirectories != directories {
+                directories = nextDirectories
+                FIFinderSyncController.default().directoryURLs = directories
+                log.info("Monitoring \(self.directories.count) live mounts")
+            }
+            requested.forEach(updateBadge)
         }
-        requested.forEach(updateBadge)
     }
 
     private func updateBadge(for url: URL) {
@@ -100,8 +115,12 @@ final class FinderSync: FIFinderSync, @unchecked Sendable {
             return
         }
         Task {
-            let state = try? await ControlClient.file(url, mount: mount)
-            setBadge(state.flatMap(Badge.choose), for: url)
+            do {
+                setBadge(Badge.choose(try await ControlClient.file(url, mount: mount)), for: url)
+            } catch {
+                log.error("Badge request failed: \(error.localizedDescription, privacy: .public)")
+                setBadge(nil, for: url)
+            }
         }
     }
 

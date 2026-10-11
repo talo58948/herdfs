@@ -179,24 +179,26 @@ final class AppModel: ObservableObject {
     }
 
     func open(_ link: URL) {
-        let records = registry.records()
-        guard let link = AppLink.resolve(
-            link,
-            authority: Configuration.authority,
-            registry: registry,
-            records: records
-        ) else { return }
-        switch link.action {
-        case .history: ActionWindows.history(link.path)
-        case .share: ActionWindows.share(link.path)
-        case .copylink:
-            guard let value = link.canonicalURL?.absoluteString else { return }
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(value, forType: .string)
-        case nil:
-            NSWorkspace.shared.activateFileViewerSelecting([
-                URL(fileURLWithPath: link.path.mount.mountpoint).appending(path: link.path.relativePath),
-            ])
+        Task {
+            let records = await registry.liveRecords()
+            guard let link = AppLink.resolve(
+                link,
+                authority: Configuration.authority,
+                registry: registry,
+                records: records
+            ) else { return }
+            switch link.action {
+            case .history: ActionWindows.history(link.path)
+            case .share: ActionWindows.share(link.path)
+            case .copylink:
+                guard let value = link.canonicalURL?.absoluteString else { return }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(value, forType: .string)
+            case nil:
+                NSWorkspace.shared.activateFileViewerSelecting([
+                    URL(fileURLWithPath: link.path.mount.mountpoint).appending(path: link.path.relativePath),
+                ])
+            }
         }
     }
 

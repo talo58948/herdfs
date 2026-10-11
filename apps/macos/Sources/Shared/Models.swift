@@ -1,7 +1,7 @@
 import Foundation
 
 struct MountRecord: Decodable, Equatable, Identifiable, Sendable {
-    let id: String
+    var id: String { socket }
     let space: String
     let authority: String
     let mountpoint: String

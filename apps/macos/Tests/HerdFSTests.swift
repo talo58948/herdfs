@@ -6,6 +6,11 @@ import XCTest
 final class HerdFSTests: XCTestCase {
     func testControlResponsesDecodeDocumentedJSON() throws {
         // contract: U1, U2
+        let mount = try decode(MountRecord.self, """
+        {"space":"s","authority":"https://a","mountpoint":"/p",
+         "socket":"/tmp/control.sock","pid":42}
+        """)
+        XCTAssertEqual(mount.id, "/tmp/control.sock")
         let status = try decode(MountStatus.self, """
         {"ok":true,"space":"s","mountpoint":"/p","connected":true,"round_trip_ms":12,
          "paused":false,"pending":[{"path":"a/b.txt","bytes":1234}],
@@ -51,6 +56,36 @@ final class HerdFSTests: XCTestCase {
         XCTAssertEqual(found?.mount.space, "two")
         XCTAssertEqual(found?.relativePath, "docs/a.txt")
         XCTAssertNil(registry.locate(URL(fileURLWithPath: "/Users/example/HerdFSs/nope"), in: records))
+    }
+
+    func testPathMapsThroughCanonicalAlias() throws {
+        // contract: U2
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let mountpoint = directory.appending(path: "mount", directoryHint: .isDirectory)
+        let alias = directory.appending(path: "alias", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: mountpoint, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: mountpoint)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let registry = MountRegistry(directory: URL(fileURLWithPath: "/unused"))
+        let found = registry.locate(alias.appending(path: "report.txt"), in: [
+            mount(id: "one", space: "one", path: mountpoint.path),
+        ])
+        XCTAssertEqual(found?.relativePath, "report.txt")
+    }
+
+    func testRegistryIgnoresDeadRegistration() async throws {
+        // contract: U1, U2
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let registration = Data("""
+        {"space":"s","authority":"https://a","mountpoint":"/p",
+         "socket":"\(directory.appending(path: "dead.sock").path)","pid":42}
+        """.utf8)
+        try registration.write(to: directory.appending(path: "dead.json"))
+        let records = await MountRegistry(directory: directory).liveRecords()
+        XCTAssertTrue(records.isEmpty)
     }
 
     func testCLIArgumentsSeparateOptionsFromPositionals() throws {
@@ -132,7 +167,7 @@ final class HerdFSTests: XCTestCase {
     }
 
     private func mount(id: String, space: String, path: String) -> MountRecord {
-        MountRecord(id: id, space: space, authority: "https://a", mountpoint: path,
+        MountRecord(space: space, authority: "https://a", mountpoint: path,
                     socket: "/tmp/\(id).sock", pid: 1)
     }
 
