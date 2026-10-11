@@ -40,14 +40,6 @@ jobs:
         run: |
           brew install xcodegen
           xcodegen generate --spec apps/macos/project.yml
-      - name: Test Swift
-        run: |
-          xcodebuild test \
-            -project apps/macos/HerdFS.xcodeproj \
-            -scheme HerdFS \
-            -destination 'platform=macOS' \
-            -derivedDataPath apps/macos/DerivedData \
-            CODE_SIGNING_ALLOWED=NO
       - name: Build and sign app
         run: |
           xcodebuild build \
@@ -70,3 +62,12 @@ jobs:
           name: HerdFS.app
           path: HerdFS.app.zip
           if-no-files-found: error
+      # After the upload, so a failing test still leaves an app to try on a real Mac.
+      - name: Test Swift
+        run: |
+          xcodebuild test \
+            -project apps/macos/HerdFS.xcodeproj \
+            -scheme HerdFS \
+            -destination 'platform=macOS' \
+            -derivedDataPath apps/macos/DerivedData \
+            CODE_SIGNING_ALLOWED=NO
