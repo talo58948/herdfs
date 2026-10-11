@@ -121,7 +121,6 @@ fn access(lab: &Lab, name: &str, movie_header: bool) -> Result<(u64, u64, u64)> 
 /// without the mandatory `mvhd` is not an MP4 index and must use the edge-window fallback.
 // contract: P3, C9
 #[test]
-#[ignore = "ROUND93: MP4 moov without mvhd widens index prefetch"]
 fn round93_mp4_moov_without_movie_header_uses_fallback() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");

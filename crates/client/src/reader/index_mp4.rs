@@ -50,9 +50,10 @@ impl Reader {
         let Some(mut offset) = range.start.checked_add(header_len) else {
             return Ok(false);
         };
+        let mut has_movie_header = false;
         for _ in 0..BOX_PROBES {
             if offset == range.end {
-                return Ok(true);
+                return Ok(has_movie_header);
             }
             let len = BOX_HEADER.min(range.end - offset);
             if len < 8 {
@@ -63,12 +64,13 @@ impl Reader {
                 None if !self.probe_fits(file, offset, len, fetched) => return Ok(false),
                 None => self.read(file, offset, len, Some(fetched)).await?,
             };
-            let Some((_, child, _)) = mp4_box(offset, range.end, &header) else {
+            let Some((kind, child, _)) = mp4_box(offset, range.end, &header) else {
                 return Ok(false);
             };
+            has_movie_header |= kind == *b"mvhd";
             offset = child.end;
         }
-        Ok(offset == range.end)
+        Ok(offset == range.end && has_movie_header)
     }
 
     fn probe_fits(&self, file: &OpenVersion, offset: u64, len: u64, fetched: &AtomicU64) -> bool {

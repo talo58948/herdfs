@@ -30,7 +30,7 @@ fn mp4(gap_kind: &[u8; 4]) -> (Vec<u8>, std::ops::Range<u64>) {
     box_header(&mut bytes, 0, ftyp, b"ftyp");
     box_header(&mut bytes, gap, GAP_LEN, gap_kind);
     box_header(&mut bytes, moov, MOOV_LEN, b"moov");
-    box_header(&mut bytes, moov + 8, MOOV_LEN - 8, b"free");
+    box_header(&mut bytes, moov + 8, MOOV_LEN - 8, b"mvhd");
     box_header(&mut bytes, trail, TRAIL_LEN, b"mdat");
     (bytes, moov as u64..trail as u64)
 }

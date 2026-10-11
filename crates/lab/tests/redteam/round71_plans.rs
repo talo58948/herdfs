@@ -176,7 +176,7 @@ fn mp4(extra_box: bool) -> (Vec<u8>, std::ops::Range<u64>) {
     }
     box_header(&mut bytes, mdat, MDAT_LEN, b"mdat");
     box_header(&mut bytes, moov, MOOV_LEN, b"moov");
-    box_header(&mut bytes, moov + 8, MOOV_LEN - 8, b"free");
+    box_header(&mut bytes, moov + 8, MOOV_LEN - 8, b"mvhd");
     (bytes, moov as u64..(moov + MOOV_LEN) as u64)
 }
 
