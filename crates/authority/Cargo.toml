@@ -17,6 +17,7 @@ jsonwebtoken.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 rusqlite = { workspace = true, features = ["fallible_uint"] }
+rustix = { workspace = true, features = ["process"] }
 rusty-s3 = { workspace = true, features = ["xml"] }
 serde.workspace = true
 serde_json.workspace = true

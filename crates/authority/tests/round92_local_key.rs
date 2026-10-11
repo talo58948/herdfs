@@ -2,37 +2,23 @@
 #![allow(clippy::unwrap_used, reason = "test code")]
 
 use std::fs;
+use std::io::Read;
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::SigningKey;
-use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-
-const PKCS8_PREFIX: &[u8] = &[
-    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
-];
 
 #[derive(Deserialize, Serialize)]
 struct Stored {
     issuer: String,
     secret: String,
-}
-
-#[derive(Serialize)]
-struct Claims<'a> {
-    iss: &'a str,
-    aud: &'static str,
-    sub: &'static str,
-    exp: u64,
-    jti: &'a str,
-    groups: [&'static str; 1],
 }
 
 struct Authority(Child);
@@ -55,14 +41,12 @@ impl Drop for Authority {
 /// freshly generated owner-only key and its normally issued token are the passing controls.
 // contract: S5
 #[tokio::test]
-#[ignore = "ROUND92: an exposed persisted local key is trusted after restart"]
 async fn exposed_local_key_cannot_authorize_forged_groups_after_restart() {
-    let mut accepted = 0;
     for trial in 0..3 {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("authority.db");
         let (authority, listen, base) = start_new(&db).await;
-        let (id, valid) = issue(&db);
+        let valid = issue(&db);
         assert_eq!(rpc(&base, &valid).await.0, StatusCode::OK, "control {trial}");
         authority.stop();
 
@@ -73,16 +57,11 @@ async fn exposed_local_key_cannot_authorize_forged_groups_after_restart() {
         fs::write(&key_path, serde_json::to_vec(&stored).unwrap()).unwrap();
         fs::set_permissions(&key_path, fs::Permissions::from_mode(0o666)).unwrap();
 
-        if let Some((restarted, base)) = try_start(&db, &listen).await {
-            let forged = sign(&stored.issuer, &id, &attacker);
-            let (status, reply) = rpc(&base, &forged).await;
-            let elevated = status == StatusCode::OK && reply["groups"] == json!(["admins"]);
-            accepted += usize::from(elevated);
-            eprintln!("trial {trial}: forged status={status}, reply={reply}");
-            drop(restarted);
-        }
+        let error = refusal(&db, &listen);
+        assert!(error.contains(&key_path.display().to_string()), "{error}");
+        assert!(error.contains("chmod 600"), "{error}");
+        assert!(error.contains("delete it and reissue every token"), "{error}");
     }
-    assert_eq!(accepted, 0, "{accepted}/3 exposed keys authorized forged groups");
 }
 
 fn authority_command(db: &Path, listen: &str) -> Command {
@@ -136,7 +115,7 @@ async fn try_start(db: &Path, listen: &str) -> Option<(Authority, String)> {
     }
 }
 
-fn issue(db: &Path) -> (String, String) {
+fn issue(db: &Path) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_herdfs-authority"))
         .args(["issue-token", "--db"])
         .arg(db)
@@ -148,29 +127,34 @@ fn issue(db: &Path) -> (String, String) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let id = String::from_utf8(output.stderr)
-        .unwrap()
-        .trim()
-        .strip_prefix("token id: ")
-        .unwrap()
-        .to_owned();
-    (id, String::from_utf8(output.stdout).unwrap().trim().to_owned())
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
-fn sign(issuer: &str, id: &str, key: &SigningKey) -> String {
-    let claims = Claims {
-        iss: issuer,
-        aud: "herdfs",
-        sub: "alice",
-        exp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 86_400,
-        jti: id,
-        groups: ["admins"],
-    };
-    let mut header = Header::new(Algorithm::EdDSA);
-    header.kid = Some("local".into());
-    let mut der = Vec::from(PKCS8_PREFIX);
-    der.extend_from_slice(key.as_bytes());
-    jsonwebtoken::encode(&header, &claims, &EncodingKey::from_ed_der(&der)).unwrap()
+fn refusal(db: &Path, listen: &str) -> String {
+    let mut authority = authority_command(db, listen)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(status) = authority.try_wait().unwrap() {
+            assert!(!status.success());
+            let mut error = String::new();
+            authority
+                .stderr
+                .take()
+                .unwrap()
+                .read_to_string(&mut error)
+                .unwrap();
+            return error;
+        }
+        if Instant::now() >= deadline {
+            authority.kill().unwrap();
+            authority.wait().unwrap();
+            panic!("authority accepted exposed key");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 async fn rpc(base: &str, token: &str) -> (StatusCode, Value) {

@@ -1,9 +1,9 @@
 //! The persisted issuer and revocable machine tokens for local mode.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -58,7 +58,7 @@ impl LocalIssuer {
     pub fn open(db: &Path, listen: SocketAddr) -> anyhow::Result<Self> {
         let path = key_path(db)?;
         let issuer = issuer_url(listen);
-        let stored = match fs::read(&path) {
+        let stored = match read_key(&path) {
             Ok(bytes) => {
                 serde_json::from_slice(&bytes).with_context(|| format!("reading {}", path.display()))?
             }
@@ -77,7 +77,7 @@ impl LocalIssuer {
     /// Loads an issuer previously created by a running local authority.
     pub fn load(db: &Path) -> anyhow::Result<Self> {
         let path = key_path(db)?;
-        let bytes = fs::read(&path).with_context(|| {
+        let bytes = read_key(&path).with_context(|| {
             format!(
                 "reading {}; start the authority once with --local-issuer first",
                 path.display()
@@ -220,6 +220,31 @@ fn private_file(path: &Path) -> anyhow::Result<File> {
         .mode(0o600)
         .open(path)
         .with_context(|| format!("creating {}", path.display()))
+}
+
+fn read_key(path: &Path) -> io::Result<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path)?;
+    let reason = if metadata.file_type().is_symlink() {
+        Some("is a symlink")
+    } else if !metadata.file_type().is_file() {
+        Some("is not a regular file")
+    } else if metadata.uid() != rustix::process::geteuid().as_raw() {
+        Some("is not owned by the effective user")
+    } else if metadata.mode() & 0o077 != 0 {
+        Some("has group or other permissions")
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing local issuer key {}: {reason}; after checking it was not replaced, chmod 600 it, or delete it and reissue every token",
+                path.display()
+            ),
+        ));
+    }
+    fs::read(path)
 }
 
 fn key_path(db: &Path) -> anyhow::Result<PathBuf> {
