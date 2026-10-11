@@ -102,6 +102,7 @@ mod round81_control;
 mod round81_plans;
 mod round83_kept;
 mod round85_plans;
+mod round87_plans;
 mod saved_mtime;
 mod scratch_files;
 mod shared_appends;
