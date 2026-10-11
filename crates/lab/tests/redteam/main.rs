@@ -105,6 +105,7 @@ mod round85_plans;
 mod round87_plans;
 mod round89_nfs;
 mod round91_nfs;
+mod round93_plans;
 mod saved_mtime;
 mod scratch_files;
 mod shared_appends;
