@@ -47,6 +47,14 @@ pub(crate) struct Session {
     file: std::fs::File,
 }
 
+/// Result of checking whether a queued session has been cancelled.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum QueuedCancel {
+    NotQueued,
+    Waiting,
+    Cancelled,
+}
+
 impl Agent {
     /// Runs the session and records its terminal status.
     pub(crate) async fn run(&self, session: &Session) -> io::Result<()> {
@@ -117,17 +125,17 @@ pub(crate) async fn queue(mount: &Path, dir: &Path) -> io::Result<()> {
 }
 
 /// Cancels a queued session without waiting for a runner slot.
-pub(crate) async fn cancel_queued(mount: &Path, dir: &Path) -> io::Result<bool> {
+pub(crate) async fn cancel_queued(mount: &Path, dir: &Path) -> io::Result<QueuedCancel> {
     let session = session(mount, dir).await?;
     if read(&session, "status").await?.as_deref().map(str::trim) != Some("queued") {
-        return Ok(false);
+        return Ok(QueuedCancel::NotQueued);
     }
     match open(&session, "cancel", OFlags::RDONLY).await {
         Ok(_) => {
             finish(&session, "queued", "cancelled", false).await?;
-            Ok(true)
+            Ok(QueuedCancel::Cancelled)
         }
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(QueuedCancel::Waiting),
         Err(err) => Err(err),
     }
 }

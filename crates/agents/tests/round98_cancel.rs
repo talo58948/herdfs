@@ -98,7 +98,6 @@ fn cancel_queued(mount: &Path, crowded: bool) -> usize {
 /// present; queued sessions on an uncrowded host are the passing control.
 // contract: A1, A2
 #[test]
-#[ignore = "ROUND98: crowded host directories starve queued cancellation past five seconds"]
 fn crowded_host_does_not_starve_queued_cancellation() {
     let control = tempfile::tempdir().unwrap();
     assert_eq!(cancel_queued(control.path(), false), 3, "uncrowded control");

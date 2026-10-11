@@ -5,7 +5,7 @@
 
 mod session;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,9 +15,9 @@ use anyhow::Context;
 use clap::Parser;
 use tokio::fs;
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
-use session::{Agent, Stamp};
+use session::{Agent, QueuedCancel, Stamp};
 
 #[derive(Parser)]
 struct Args {
@@ -50,6 +50,7 @@ struct Runner {
     slots: Arc<Semaphore>,
     /// Prompt stamps seen by the previous poll, for sessions not started yet.
     seen: HashMap<PathBuf, Stamp>,
+    queued: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 #[tokio::main]
@@ -68,8 +69,13 @@ async fn main() -> anyhow::Result<()> {
         }),
         slots: Arc::new(Semaphore::new(args.max_sessions as usize)),
         seen: HashMap::new(),
+        queued: Arc::new(Mutex::new(HashSet::new())),
     };
     runner.recover().await?;
+    tokio::spawn(watch_queued(
+        runner.agent.mount.clone(),
+        Arc::clone(&runner.queued),
+    ));
     let interval = Duration::from_millis(args.poll_ms.min(1000));
     loop {
         tokio::select! {
@@ -103,12 +109,13 @@ impl Runner {
                 return;
             }
         };
+        let known = self.queued.lock().await.clone();
         let mut pending = HashMap::new();
         for dir in dirs {
             let (stamp, queued) = match session::pending_prompt(&self.agent.mount, &dir).await {
                 Ok(Some(pending)) => pending,
                 Ok(None) => {
-                    if let Err(err) = session::cancel_queued(&self.agent.mount, &dir).await {
+                    if let Err(err) = self.cancel(&dir, known.contains(&dir)).await {
                         log_error(&dir, &err);
                     }
                     continue;
@@ -128,9 +135,10 @@ impl Runner {
                     continue;
                 }
             }
-            match session::cancel_queued(&self.agent.mount, &dir).await {
-                Ok(true) => continue,
-                Ok(false) => {}
+            self.queued.lock().await.insert(dir.clone());
+            match cancel_known(&self.agent.mount, &dir, &self.queued).await {
+                Ok(QueuedCancel::Waiting) => {}
+                Ok(QueuedCancel::NotQueued | QueuedCancel::Cancelled) => continue,
                 Err(err) => {
                     log_error(&dir, &err);
                     pending.insert(dir, stamp);
@@ -146,8 +154,23 @@ impl Runner {
         self.seen = pending;
     }
 
+    async fn cancel(&self, dir: &Path, known: bool) -> io::Result<QueuedCancel> {
+        if known {
+            return cancel_known(&self.agent.mount, dir, &self.queued).await;
+        }
+        let result = session::cancel_queued(&self.agent.mount, dir).await?;
+        if result == QueuedCancel::Waiting {
+            self.queued.lock().await.insert(dir.to_owned());
+        }
+        Ok(result)
+    }
+
     /// Marks the session running and runs it in the background, holding `slot` until it ends.
     async fn start(&self, dir: PathBuf, slot: OwnedSemaphorePermit) {
+        let mut queued = self.queued.lock().await;
+        if !queued.remove(&dir) {
+            return;
+        }
         let session = match session::claim(&self.agent.mount, &dir).await {
             Ok(session) => session,
             Err(err) => {
@@ -155,6 +178,7 @@ impl Runner {
                 return;
             }
         };
+        drop(queued);
         let agent = Arc::clone(&self.agent);
         tokio::spawn(async move {
             if let Err(err) = agent.run(&session).await {
@@ -163,6 +187,35 @@ impl Runner {
             drop(slot);
         });
     }
+}
+
+// A full host-directory scan can outlast A2's cancellation deadline.
+async fn watch_queued(mount: PathBuf, queued: Arc<Mutex<HashSet<PathBuf>>>) {
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let dirs = queued.lock().await.iter().cloned().collect::<Vec<_>>();
+        for dir in dirs {
+            if let Err(err) = cancel_known(&mount, &dir, &queued).await {
+                log_error(&dir, &err);
+            }
+        }
+    }
+}
+
+async fn cancel_known(
+    mount: &Path,
+    dir: &Path,
+    queued: &Mutex<HashSet<PathBuf>>,
+) -> io::Result<QueuedCancel> {
+    let mut queued = queued.lock().await;
+    if !queued.contains(dir) {
+        return Ok(QueuedCancel::NotQueued);
+    }
+    let result = session::cancel_queued(mount, dir).await?;
+    if result != QueuedCancel::Waiting {
+        queued.remove(dir);
+    }
+    Ok(result)
 }
 
 /// The session directories under `host_dir`; none while it does not exist.
