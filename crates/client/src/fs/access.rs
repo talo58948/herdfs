@@ -171,24 +171,3 @@ pub(super) fn process_name(pid: u32) -> String {
         .trim_end()
         .to_owned()
 }
-
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-pub(super) fn process_name(pid: u32) -> String {
-    let Ok(pid) = i32::try_from(pid) else {
-        return String::new();
-    };
-    let mut name = [0_u8; 256];
-    // SAFETY: `name` is writable for the exact length passed to libproc.
-    let read = unsafe { libc::proc_name(pid, name.as_mut_ptr().cast(), name.len() as u32) };
-    if read <= 0 {
-        return String::new();
-    }
-    let end = name.iter().position(|byte| *byte == 0).unwrap_or(name.len());
-    String::from_utf8_lossy(&name[..end]).into_owned()
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(super) fn process_name(_pid: u32) -> String {
-    String::new()
-}

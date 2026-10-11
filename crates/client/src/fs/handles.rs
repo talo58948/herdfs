@@ -118,6 +118,7 @@ impl Space {
 
     /// Seals the handle's writes. Runs on flush, which close(2) waits for, so a write
     /// survives a crash once close returns (C4a).
+    #[cfg(target_os = "linux")]
     pub async fn flush(self: Arc<Self>, fh: u64) -> Result<()> {
         let handle = self.handle(fh)?;
         if !handle.dirty.load(Relaxed) && handle.truncated.load(Relaxed) {
@@ -272,6 +273,7 @@ impl Space {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     fn defer(&self, entry: EntryId) -> Result<()> {
         let deferred =
             tokio::task::block_in_place(|| self.local(entry, |local| local.defer(&self.journal, entry)));

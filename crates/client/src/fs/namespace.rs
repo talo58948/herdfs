@@ -1,6 +1,8 @@
 //! Namespace operations: lookups, attributes, directories and renames.
 
-use std::sync::{Arc, atomic::Ordering::Relaxed};
+use std::sync::Arc;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, Instant};
 use std::{
     ffi::{OsStr, OsString},
@@ -10,8 +12,12 @@ use std::{
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{Entry, EntryId, ErrorCode};
 
-use super::{Attributes, DirectoryEntry, InodeNo, MAX_NAME, OpenMode, PERMISSIONS, Space, handles::Handle};
-use crate::{Error, Result, journal::Local, lock};
+#[cfg(target_os = "linux")]
+use super::DirectoryEntry;
+use super::{Attributes, InodeNo, MAX_NAME, OpenMode, PERMISSIONS, Space, handles::Handle};
+#[cfg(target_os = "linux")]
+use crate::lock;
+use crate::{Error, Result, journal::Local};
 
 pub struct AttrChange {
     pub mode: Option<u32>,
@@ -194,6 +200,7 @@ impl Space {
     }
 
     /// Lists the directory once, for the readdir calls on this handle to page through.
+    #[cfg(target_os = "linux")]
     pub async fn opendir(self: Arc<Self>, ino: InodeNo) -> Result<u64> {
         let asked = Instant::now();
         let entries = self.list(ino).await?;
@@ -221,6 +228,7 @@ impl Space {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub fn readdir(&self, handle: u64, offset: u64) -> Result<Vec<DirectoryEntry>> {
         let listings = lock(&self.listings);
         let listing = listings.get(&handle).ok_or(libc::EBADF)?;
@@ -238,6 +246,7 @@ impl Space {
             .collect())
     }
 
+    #[cfg(target_os = "linux")]
     pub fn releasedir(&self, handle: u64) {
         lock(&self.listings).remove(&handle);
     }

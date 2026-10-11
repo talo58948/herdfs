@@ -14,11 +14,14 @@ mod namespace;
 mod nfs;
 mod read;
 mod sync;
+#[cfg(target_os = "linux")]
 mod xattr;
 
+#[cfg(target_os = "linux")]
+use std::ffi::OsString;
 use std::sync::{Arc, Mutex, atomic::AtomicU64};
 use std::time::{Duration, Instant, SystemTime};
-use std::{collections::HashMap, ffi::OsString, fs::File};
+use std::{collections::HashMap, fs::File};
 
 #[cfg(target_os = "linux")]
 pub use fuse::Fuse;
@@ -48,6 +51,7 @@ const PERMISSIONS: u32 = 0o7777;
 const MAX_NAME: usize = 255;
 
 /// A directory's entries as readdir reports them.
+#[cfg(target_os = "linux")]
 type Listing = Vec<(InodeNo, FileKind, String)>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,9 +79,11 @@ pub(crate) struct Attributes {
     nlink: u32,
     uid: u32,
     gid: u32,
+    #[cfg(target_os = "linux")]
     blksize: u32,
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) struct DirectoryEntry {
     ino: InodeNo,
     kind: FileKind,
@@ -85,6 +91,7 @@ pub(crate) struct DirectoryEntry {
     next: u64,
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) enum Invalidation {
     Attributes(InodeNo),
     Entry {
@@ -134,6 +141,7 @@ pub struct Space {
     opens: Mutex<Lru<(EntryId, String), (u32, Instant)>>,
     handles: Mutex<HashMap<u64, Arc<Handle>>>,
     /// Directory listings taken at opendir, by handle.
+    #[cfg(target_os = "linux")]
     listings: Mutex<HashMap<u64, Listing>>,
     next_handle: AtomicU64,
     metadata_ttl: Duration,
@@ -170,6 +178,7 @@ impl Space {
             inodes,
             opens: Mutex::default(),
             handles: Mutex::default(),
+            #[cfg(target_os = "linux")]
             listings: Mutex::default(),
             next_handle: AtomicU64::new(1),
             metadata_ttl: TTL,
@@ -190,6 +199,7 @@ impl Space {
         self.kernel.entry(ino)
     }
 
+    #[cfg(target_os = "linux")]
     fn mounted(&self, invalidate: impl Fn(Invalidation) + Send + Sync + 'static) {
         self.kernel.mounted(invalidate);
     }
@@ -240,6 +250,7 @@ impl Space {
             nlink: if kind == FileKind::Directory { 2 } else { 1 },
             uid: self.owner.0,
             gid: self.owner.1,
+            #[cfg(target_os = "linux")]
             blksize: 4096,
         }
     }
