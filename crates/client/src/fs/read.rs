@@ -3,7 +3,7 @@ use std::io;
 use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 
-use super::{Space, handles::Handle};
+use super::Space;
 use crate::Result;
 
 impl Space {
