@@ -104,7 +104,7 @@ final class AppModel: ObservableObject {
 
     func mount(_ space: SpaceState) {
         let home = realHomeDirectory()
-        let mountpoint = home.appending(path: "HerdFS/\(space.id)")
+        let mountpoint = expectedMountpoint(space.id)
         let state = home.appending(path: ".config/herdfs/state/\(space.id)")
         let log = state.appending(path: "mount.log")
         do {
@@ -180,7 +180,7 @@ final class AppModel: ObservableObject {
 
     func open(_ link: URL) {
         Task {
-            let records = await registry.liveRecords()
+            let records = await registry.liveRecords().filter(appMount)
             guard let link = AppLink.resolve(
                 link,
                 authority: Configuration.authority,
@@ -204,7 +204,9 @@ final class AppModel: ObservableObject {
 
     private func refreshMounts() async {
         let authority = Configuration.authority
-        let records = registry.records().filter { $0.authority == authority }
+        let records = registry.records().filter {
+            $0.authority == authority && appMount($0)
+        }
         await withTaskGroup(of: (String, MountRecord, MountStatus?).self) { group in
             for record in records where spaces.contains(where: { $0.id == record.space }) {
                 group.addTask {
@@ -231,13 +233,22 @@ final class AppModel: ObservableObject {
 
     private func surfaceMountFailure(spaceID: String, log: URL) {
         let found = registry.records().contains {
-            $0.space == spaceID && $0.authority == Configuration.authority
+            $0.space == spaceID && $0.authority == Configuration.authority && appMount($0)
         }
         guard !found else { return }
         let data = (try? Data(contentsOf: log)) ?? Data()
         let stderr = String(decoding: data.suffix(2_000), as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         fail(stderr.isEmpty ? "Mount did not register; see \(log.path)" : stderr)
+    }
+
+    private func appMount(_ record: MountRecord) -> Bool {
+        record.mountpoint == expectedMountpoint(record.space).path
+            && processPath(record.pid) == CLI.executableURL.standardizedFileURL.path
+    }
+
+    private func expectedMountpoint(_ space: String) -> URL {
+        realHomeDirectory().appending(path: "HerdFS/\(space)")
     }
 
     private func processPath(_ pid: Int32) -> String? {
