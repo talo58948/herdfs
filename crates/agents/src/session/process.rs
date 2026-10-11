@@ -104,10 +104,7 @@ impl Agent {
         Ok(Outcome::Done)
     }
 
-    async fn prepare(
-        &self,
-        session: &Session,
-    ) -> anyhow::Result<(Command, std::fs::File, Prepared)> {
+    async fn prepare(&self, session: &Session) -> anyhow::Result<(Command, std::fs::File, Prepared)> {
         let cwd = self.cwd(session).await?;
         let prompt = open(session, "prompt", OFlags::RDONLY).await?;
         // Caller-writable result names must be cleared before the command can contribute its own.
