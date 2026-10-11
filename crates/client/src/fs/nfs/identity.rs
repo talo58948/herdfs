@@ -42,7 +42,7 @@ impl Identity {
         let (mut state, created, exposed) = match fs::symlink_metadata(&path) {
             Ok(metadata)
                 if metadata.file_type().is_symlink()
-                    || metadata.mode() & 0o044 != 0
+                    || metadata.mode() & 0o077 != 0
                     || metadata.uid() != rustix::process::geteuid().as_raw() =>
             {
                 (State::new(), false, true)
