@@ -26,6 +26,7 @@ final class AppModel: ObservableObject {
     private static let cacheBytes = "10737418240"
     private static let processPathBufferSize = 4_096
     let registry = MountRegistry()
+    let finderToken = UUID().uuidString
     private var started = false
 
     func start() {
@@ -200,7 +201,7 @@ final class AppModel: ObservableObject {
             }
             if next != spaces { spaces = next }
             do {
-                try await FinderStateWriter.write(Array(mounted.values))
+                try await FinderStateWriter.write(Array(mounted.values), token: finderToken)
             } catch {
                 fail("Could not update Finder badges: \(error.localizedDescription)")
             }

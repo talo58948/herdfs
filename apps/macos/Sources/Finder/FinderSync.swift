@@ -4,7 +4,7 @@ import OSLog
 
 @MainActor
 final class FinderSync: FIFinderSync, @unchecked Sendable {
-    private var state = FinderState(mounts: [])
+    private var state = FinderState(token: "", mounts: [])
     private var directories: Set<URL> = []
     private var requested: Set<URL> = []
     private var stateTimer: DispatchSourceTimer?
@@ -63,7 +63,10 @@ final class FinderSync: FIFinderSync, @unchecked Sendable {
         link.scheme = "herdfs"
         link.host = located.mount.space
         link.path = "/" + located.relativePath
-        link.queryItems = [URLQueryItem(name: "action", value: action)]
+        link.queryItems = [
+            URLQueryItem(name: "action", value: action),
+            URLQueryItem(name: "token", value: state.token),
+        ]
         if let url = link.url {
             log.info("Opening \(action, privacy: .public) link")
             NSWorkspace.shared.open(url)

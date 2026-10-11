@@ -3,28 +3,17 @@ import AppKit
 extension AppModel {
     func open(_ url: URL) {
         Task {
-            let records = await registry.liveRecords().filter(appMount)
+            let records = registry.records().filter(appMount)
             guard let link = AppLink.resolve(
                 url,
                 authority: Configuration.authority,
+                token: finderToken,
                 registry: registry,
                 records: records
             ) else { return }
             switch link.action {
-            case .keep, .unpin:
-                guard let action = link.action else { return }
-                do {
-                    let path = URL(fileURLWithPath: link.path.mount.mountpoint)
-                        .appending(path: link.path.relativePath)
-                    try await ControlClient.command(
-                        action == .keep ? "pin" : "unpin",
-                        path: path,
-                        mount: link.path.mount
-                    )
-                    await refreshMounts()
-                } catch {
-                    fail(error.localizedDescription)
-                }
+            case .keep: await control("pin", link.path)
+            case .unpin: await control("unpin", link.path)
             case .history: ActionWindows.history(link.path)
             case .share: ActionWindows.share(link.path)
             case .copylink:
@@ -36,6 +25,16 @@ extension AppModel {
                     URL(fileURLWithPath: link.path.mount.mountpoint).appending(path: link.path.relativePath),
                 ])
             }
+        }
+    }
+
+    private func control(_ op: String, _ path: LocatedPath) async {
+        do {
+            let file = URL(fileURLWithPath: path.mount.mountpoint).appending(path: path.relativePath)
+            try await ControlClient.command(op, path: file, mount: path.mount)
+            await refreshMounts()
+        } catch {
+            fail(error.localizedDescription)
         }
     }
 }

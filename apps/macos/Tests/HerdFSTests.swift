@@ -20,6 +20,7 @@ final class HerdFSTests: XCTestCase {
         XCTAssertEqual(status.pending, [PendingUpload(path: "a/b.txt", bytes: 1234)])
         XCTAssertEqual(status.kept.bytes, 3)
         XCTAssertEqual(status.kept.pins, [KeptPin(path: "a", ready: true)])
+        XCTAssertNil(try decode(KeptUse.self, #"{"bytes":3}"#).pins)
 
         let file = try decode(FileState.self,
             #"{"ok":true,"kept":true,"downloading":false,"pending":false,"error":null}"#)
@@ -75,20 +76,6 @@ final class HerdFSTests: XCTestCase {
         XCTAssertEqual(found?.relativePath, "report.txt")
     }
 
-    func testRegistryIgnoresDeadRegistration() async throws {
-        // contract: U1, U2
-        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let registration = Data("""
-        {"space":"s","authority":"https://a","mountpoint":"/p",
-         "socket":"\(directory.appending(path: "dead.sock").path)","pid":42}
-        """.utf8)
-        try registration.write(to: directory.appending(path: "dead.json"))
-        let records = await MountRegistry(directory: directory).liveRecords()
-        XCTAssertTrue(records.isEmpty)
-    }
-
     func testCLIArgumentsSeparateOptionsFromPositionals() throws {
         // contract: U3
         let command = try CLIArguments(
@@ -112,22 +99,42 @@ final class HerdFSTests: XCTestCase {
             mount(id: "one", space: "one", path: "/Volumes/one"),
             mount(id: "nested", space: "two", path: "/Volumes/one/nested"),
         ]
-        let traversal = try XCTUnwrap(URL(string: "herdfs://one/%2E%2E/secret?action=history"))
-        XCTAssertNil(AppLink.resolve(traversal, authority: "https://a", registry: registry, records: records))
+        for encoded in ["%2E%2E/secret", "..%2Fsecret", "%2Fetc/passwd"] {
+            let traversal = try XCTUnwrap(URL(string: "herdfs://one/\(encoded)?action=history"))
+            XCTAssertNil(AppLink.resolve(
+                traversal, authority: "https://a", token: "launch", registry: registry, records: records
+            ))
+        }
         let nested = try XCTUnwrap(URL(string: "herdfs://one/nested/file?action=share"))
-        XCTAssertNil(AppLink.resolve(nested, authority: "https://a", registry: registry, records: records))
+        XCTAssertNil(AppLink.resolve(
+            nested, authority: "https://a", token: "launch", registry: registry, records: records
+        ))
         let valid = try XCTUnwrap(URL(string: "herdfs://one/docs/file?action=history"))
         XCTAssertEqual(
-            AppLink.resolve(valid, authority: "https://a", registry: registry, records: records)?.path.relativePath,
+            AppLink.resolve(
+                valid, authority: "https://a", token: "launch", registry: registry, records: records
+            )?.path.relativePath,
             "docs/file"
         )
         for action in [LinkAction.keep, .unpin] {
-            let url = try XCTUnwrap(URL(string: "herdfs://one/docs/file?action=\(action.rawValue)"))
+            let bare = try XCTUnwrap(URL(string: "herdfs://one/docs/file?action=\(action.rawValue)"))
+            XCTAssertNil(AppLink.resolve(
+                bare, authority: "https://a", token: "launch", registry: registry, records: records
+            ))
+            let url = try XCTUnwrap(URL(
+                string: "herdfs://one/docs/file?action=\(action.rawValue)&token=launch"
+            ))
             XCTAssertEqual(
-                AppLink.resolve(url, authority: "https://a", registry: registry, records: records)?.action,
+                AppLink.resolve(
+                    url, authority: "https://a", token: "launch", registry: registry, records: records
+                )?.action,
                 action
             )
         }
+        let share = try XCTUnwrap(URL(string: "herdfs://one/docs/file?action=share"))
+        XCTAssertEqual(AppLink.resolve(
+            share, authority: "https://a", token: "launch", registry: registry, records: records
+        )?.action, .share)
     }
 
     func testFinderStateLocatesBadgesWithoutTheMountRegistry() {
@@ -137,7 +144,7 @@ final class HerdFSTests: XCTestCase {
             mountpoint: "/Volumes/one",
             badges: ["docs/file": .kept]
         )
-        let state = FinderState(mounts: [mount])
+        let state = FinderState(token: "launch", mounts: [mount])
         let found = state.locate(URL(fileURLWithPath: "/Volumes/one/docs/file"))
         XCTAssertEqual(found?.relativePath, "docs/file")
         XCTAssertEqual(found?.mount.badges["docs/file"], .kept)
@@ -155,7 +162,7 @@ final class HerdFSTests: XCTestCase {
         )
         try Data().write(to: report)
         defer { try? FileManager.default.removeItem(at: parent) }
-        let state = FinderState(mounts: [FinderMountState(
+        let state = FinderState(token: "launch", mounts: [FinderMountState(
             space: "lab", mountpoint: mountpoint.path, badges: ["lab/report.txt": .kept]
         )])
 
@@ -168,6 +175,27 @@ final class HerdFSTests: XCTestCase {
     func testWaitingIsAControlFailure() {
         // contract: U1, U2
         XCTAssertNotNil(ControlClient.failure(for: .waiting(NWError.posix(.ETIMEDOUT))))
+    }
+
+    func testFinderStateDirectoryRejectsSymlinkAndEscape() throws {
+        // contract: U2
+        let parent = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        let container = parent.appending(path: "container", directoryHint: .isDirectory)
+        let outside = parent.appending(path: "outside", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: container.appending(path: "state"), withDestinationURL: outside
+        )
+        let linkedContainer = parent.appending(path: "linked-container")
+        try FileManager.default.createSymbolicLink(at: linkedContainer, withDestinationURL: container)
+        defer { try? FileManager.default.removeItem(at: parent) }
+
+        XCTAssertThrowsError(try prepareFinderStateDirectory(container.appending(path: "state"), inside: container))
+        XCTAssertThrowsError(try prepareFinderStateDirectory(outside, inside: container))
+        XCTAssertThrowsError(try prepareFinderStateDirectory(
+            linkedContainer.appending(path: "state"), inside: linkedContainer
+        ))
     }
 
     func testControlRequestTimesOut() async throws {

@@ -15,6 +15,7 @@ struct AppLink: Equatable {
     static func resolve(
         _ link: URL,
         authority: String,
+        token: String,
         registry: MountRegistry,
         records: [MountRecord]
     ) -> AppLink? {
@@ -34,6 +35,10 @@ struct AppLink: Equatable {
         let value = components.queryItems?.first(where: { $0.name == "action" })?.value
         let action = value.flatMap(LinkAction.init(rawValue:))
         guard value == nil || action != nil else { return nil }
+        if matchesControlAction(action) {
+            let claimed = components.queryItems?.first(where: { $0.name == "token" })?.value ?? ""
+            guard !token.isEmpty, constantTimeEqual(claimed, token) else { return nil }
+        }
         return AppLink(path: located, action: action)
     }
 
@@ -44,4 +49,8 @@ struct AppLink: Equatable {
         link.path = "/" + path.relativePath
         return link.url
     }
+}
+
+private func matchesControlAction(_ action: LinkAction?) -> Bool {
+    action == .keep || action == .unpin
 }

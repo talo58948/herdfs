@@ -21,7 +21,7 @@ struct CacheUse: Decodable, Equatable, Sendable {
 
 struct KeptUse: Decodable, Equatable, Sendable {
     let bytes: UInt64
-    let pins: [KeptPin]
+    let pins: [KeptPin]?
 }
 
 struct KeptPin: Decodable, Equatable, Sendable {

@@ -24,34 +24,6 @@ struct MountRegistry {
             .compactMap { try? JSONDecoder().decode(MountRecord.self, from: $0) }
     }
 
-    func liveRecords() async -> [MountRecord] {
-        let records = records()
-        var live: [MountRecord] = []
-        var mountpoints: Set<String> = []
-        // Registrations outlive killed mounts; bound their probes below the extension's FD limit.
-        for offset in stride(from: 0, to: records.count, by: 16) {
-            let end = min(offset + 16, records.count)
-            let responsive = await withTaskGroup(of: MountRecord?.self, returning: [MountRecord].self) { group in
-                for record in records[offset..<end] {
-                    group.addTask {
-                        guard (try? await ControlClient.status(record)) != nil else { return nil }
-                        return record
-                    }
-                }
-                var responsive: [MountRecord] = []
-                for await record in group {
-                    if let record { responsive.append(record) }
-                }
-                return responsive
-            }
-            for record in responsive
-            where mountpoints.insert(canonicalFileURL(URL(fileURLWithPath: record.mountpoint)).path).inserted {
-                live.append(record)
-            }
-        }
-        return live
-    }
-
     func locate(_ url: URL, in records: [MountRecord]? = nil) -> LocatedPath? {
         let path = canonicalFileURL(url).pathComponents
         return (records ?? self.records())

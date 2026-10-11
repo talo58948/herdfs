@@ -18,6 +18,7 @@ targets:
     settings:
       base:
         ENABLE_APP_SANDBOX: NO
+        # Static plists declare the URL scheme and Finder extension point that XcodeGen cannot infer.
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Sources/App/Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: dev.herdfs.HerdFS
