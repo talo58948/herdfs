@@ -107,7 +107,12 @@ impl Runner {
         for dir in dirs {
             let (stamp, queued) = match session::pending_prompt(&self.agent.mount, &dir).await {
                 Ok(Some(pending)) => pending,
-                Ok(None) => continue,
+                Ok(None) => {
+                    if let Err(err) = session::cancel_queued(&self.agent.mount, &dir).await {
+                        log_error(&dir, &err);
+                    }
+                    continue;
+                }
                 Err(err) => {
                     log_error(&dir, &err);
                     continue;
