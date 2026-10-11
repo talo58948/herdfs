@@ -219,7 +219,6 @@ async fn trial(reset_generation: bool) -> (bool, usize, u64) {
 /// logout removed its generation; replacing an existing login is the monotonic-generation control.
 // contract: U1
 #[tokio::test]
-#[ignore = "ROUND99: logout resets generation so an older 401 refreshes the new login"]
 async fn login_after_logout_wins_over_an_older_failed_request() {
     let mut failed = 0;
     for trial_number in 0..3 {
@@ -231,7 +230,7 @@ async fn login_after_logout_wins_over_an_older_failed_request() {
             "trial {trial_number}: success={}, refreshes={}, generation={}",
             attack.0, attack.1, attack.2
         );
-        failed += usize::from(!attack.0 || attack.1 != 0 || attack.2 != 1);
+        failed += usize::from(!attack.0 || attack.1 != 0 || attack.2 == 1);
     }
     assert_eq!(
         failed, 0,

@@ -75,7 +75,7 @@ impl Source {
             || refresh_after == Some(None)
             || refresh_after
                 .flatten()
-                .is_some_and(|generation| token.generation > generation)
+                .is_some_and(|generation| token.generation != generation)
         {
             return Ok(stored.access());
         }
@@ -178,7 +178,7 @@ pub(crate) async fn save(path: &Path, token: &TokenFile) -> Result<()> {
 
 fn generation(path: &Path) -> u64 {
     serde_json::from_slice::<TokenFile>(&fs::read(path).unwrap_or_default())
-        .map_or(0, |token| token.generation)
+        .map_or_else(|_| rand::random_range(1..u64::MAX), |token| token.generation)
 }
 
 pub(crate) async fn remove(path: &Path) -> Result<()> {

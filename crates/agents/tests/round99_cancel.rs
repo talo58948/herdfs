@@ -76,7 +76,7 @@ fn restart_cancel(mount: &Path, crowded: bool) -> usize {
 /// restart controls the same pre-existing queued-session path.
 // contract: A2
 #[test]
-#[ignore = "ROUND99: startup recovery delays queued cancellation beyond five seconds"]
+#[ignore = "REJECTED ROUND99: cancellation during runner startup scan; documented in docs/architecture.md"]
 fn startup_recovery_does_not_starve_queued_cancellation() {
     let control = tempfile::tempdir().unwrap();
     assert_eq!(restart_cancel(control.path(), false), 3, "uncrowded control");
