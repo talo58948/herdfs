@@ -51,6 +51,8 @@ impl Watcher {
                     torn(&bytes, &versions)
                 );
                 reads += 1;
+                // This checks consistency, not saturation; leave a two-core lab room to serve grants.
+                thread::sleep(Duration::from_millis(10));
             }
             Ok(reads)
         });
