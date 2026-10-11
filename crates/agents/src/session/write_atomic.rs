@@ -41,7 +41,13 @@ async fn create(session: &Session, name: &str) -> io::Result<Scratch> {
     // The session directory is caller-writable, so the scratch name must be unpredictable.
     let temporary = format!(".{name}.{:032x}.tmp", rand::random::<u128>());
     let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::NONBLOCK;
-    let file = open_at(&session.file, OsStr::new(&temporary), flags | OFlags::CLOEXEC, FILE_MODE).await?;
+    let file = open_at(
+        &session.file,
+        OsStr::new(&temporary),
+        flags | OFlags::CLOEXEC,
+        FILE_MODE,
+    )
+    .await?;
     Ok(Scratch {
         dir: session.file.try_clone()?,
         name: temporary,
