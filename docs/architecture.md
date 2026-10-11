@@ -141,7 +141,7 @@ boundary holds on Linux with its default privileged-port settings; lowering
 macOS lets an unprivileged process bind a reserved port. Consequently, another
 local user account can MOUNT the loopback export, obtain its identity, forge the
 signed-in user's AUTH_SYS uid, and read or write that user's HerdFS drive.
-The NFS client is therefore for single-user Macs. Root and any such local user
+The NFS client is therefore for single-user Macs (CONTRACT M1); the planned FSKit client removes the limit (docs/roadmap.md). Root and any such local user
 still receive only the mounted client's principal and object-store grants
 (S1-S4), not object-store credentials or access granted to another client.
 
