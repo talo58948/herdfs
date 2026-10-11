@@ -25,12 +25,14 @@ pub(super) enum Outcome {
 }
 
 impl Agent {
-    pub(super) async fn execute(&self, session: &Session) -> anyhow::Result<Outcome> {
+    pub(super) async fn execute(&self, session: &Session, ran: &mut bool) -> anyhow::Result<Outcome> {
         let cwd = self.cwd(session).await?;
         let prompt = open(session, "prompt", OFlags::RDONLY).await?;
+        let code_file = result_file(session, "exit_code").await?;
         let output = result_file(session, "output").await?;
         let stdout = result_file(session, "stdout").await?;
         let stderr = result_file(session, "stderr").await?;
+        drop(code_file);
         let stdout_sync = stdout.try_clone().await?;
         let stderr_sync = stderr.try_clone().await?;
         let mut command = Command::new("sh");
@@ -55,6 +57,7 @@ impl Agent {
                 return Err(err);
             }
         };
+        *ran = true;
         drop(cwd);
 
         let child_stdout = child.stdout.take().context("stdout pipe")?;

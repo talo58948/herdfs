@@ -71,7 +71,6 @@ fn results(dir: &Path) -> BTreeMap<&'static str, Vec<u8>> {
 /// clean failures are the controls for the runner-authored contents.
 // contract: A2
 #[test]
-#[ignore = "ROUND90: pre-spawn failures preserve caller-supplied result bytes"]
 fn pre_spawn_failures_replace_caller_supplied_results() {
     let mount = tempfile::tempdir().unwrap();
     let controls: Vec<_> = (0..3)

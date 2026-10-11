@@ -48,12 +48,13 @@ pub(crate) struct Session {
 impl Agent {
     /// Runs the session and records its terminal status.
     pub(crate) async fn run(&self, session: &Session) -> io::Result<()> {
-        let status = match self.execute(session).await {
+        let mut ran = false;
+        let status = match self.execute(session, &mut ran).await {
             Ok(Outcome::Cancelled) => "cancelled".to_owned(),
             Ok(Outcome::Done) => "done".to_owned(),
             Err(err) => format!("failed: {err:#}"),
         };
-        finish(session, "running", &status).await
+        finish(session, "running", &status, ran).await
     }
 
     /// The directory named by the session's `cwd` file, or the mount root without one.
@@ -115,7 +116,7 @@ pub(crate) async fn cancel_queued(mount: &Path, dir: &Path) -> io::Result<bool> 
     let session = session(mount, dir).await?;
     match open(&session, "cancel", OFlags::RDONLY).await {
         Ok(_) => {
-            finish(&session, "queued", "cancelled").await?;
+            finish(&session, "queued", "cancelled", false).await?;
             Ok(true)
         }
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
@@ -139,7 +140,7 @@ pub(crate) async fn recover(mount: &Path, dir: &Path) -> io::Result<()> {
     let status = status.trim();
     if status == "running" || !valid_status(status) {
         running::stop_previous(&session)?;
-        finish(&session, status, "failed: runner restarted").await?;
+        finish(&session, status, "failed: runner restarted", status == "running").await?;
     }
     Ok(())
 }
@@ -166,10 +167,21 @@ async fn write(session: &Session, name: &str, text: &str) -> io::Result<()> {
     write_atomic(session, name, format!("{text}\n").as_bytes()).await
 }
 
-async fn finish(session: &Session, from: &str, status: &str) -> io::Result<()> {
-    let results = ensure_results(session, status).await;
+async fn finish(session: &Session, from: &str, status: &str, keep_results: bool) -> io::Result<()> {
+    let results = if keep_results {
+        ensure_results(session, status).await
+    } else {
+        write_results(session, status).await
+    };
     transition(session, Some(from), status).await?;
     results
+}
+
+async fn write_results(session: &Session, exit_code: &str) -> io::Result<()> {
+    for name in ["stdout", "stderr", "output"] {
+        write_atomic(session, name, b"").await?;
+    }
+    write(session, "exit_code", exit_code).await
 }
 
 async fn ensure_results(session: &Session, exit_code: &str) -> io::Result<()> {
