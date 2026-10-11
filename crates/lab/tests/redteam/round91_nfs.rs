@@ -5,10 +5,11 @@ use herdfs_core::SpacePath;
 use herdfs_core::proto::{Entry, Request, Response};
 use herdfs_lab::{Lab, LabConfig, Profile, SPACE, Strategy};
 
-use crate::nfs_support::{Rpc, opaque};
+use crate::nfs_support::{Rpc, opaque, status};
 
 const NFS3ERR_NOENT: u32 = 2;
 const NFS3ERR_BADHANDLE: u32 = 10_001;
+const NFS3ERR_NOT_SYNC: u32 = 10_002;
 
 fn entry(lab: &Lab, name: &str) -> Result<Entry> {
     let response = lab.rpc(
@@ -31,6 +32,23 @@ fn rename(rpc: &mut Rpc, from: &[u8], to: &[u8]) -> Result<Vec<u8>> {
     opaque(&mut args, to);
     opaque(&mut args, b"destination");
     rpc.call(14, &args)
+}
+
+fn setattr_size(rpc: &mut Rpc, handle: &[u8], size: u64, guarded: bool) -> Result<u32> {
+    let mut args = Vec::new();
+    opaque(&mut args, handle);
+    for word in [0_u32, 0, 0, 1] {
+        args.extend_from_slice(&word.to_be_bytes());
+    }
+    args.extend_from_slice(&size.to_be_bytes());
+    args.extend_from_slice(&0_u32.to_be_bytes());
+    args.extend_from_slice(&0_u32.to_be_bytes());
+    args.extend_from_slice(&u32::from(guarded).to_be_bytes());
+    if guarded {
+        args.extend_from_slice(&0_u32.to_be_bytes());
+        args.extend_from_slice(&0_u32.to_be_bytes());
+    }
+    status(&rpc.call(2, &args)?)
 }
 
 fn decode_rename_failure(reply: &[u8], status: u32) -> Result<()> {
@@ -110,5 +128,42 @@ fn round91_rename_foreign_second_handle_has_a_complete_reply() -> Result<()> {
         failures += usize::from(!complete);
     }
     assert_eq!(failures, 0, "truncated RENAME failure replies, of 3");
+    Ok(())
+}
+
+/// An unguarded size change controls three changes carrying a deliberately stale ctime guard. A
+/// request reported as `NOT_SYNC` must not apply the attributes it refused.
+// contract: M1
+#[test]
+#[ignore = "ROUND91: SETATTR applies a size change after reporting a guard mismatch"]
+fn round91_setattr_guard_mismatch_does_not_mutate() -> Result<()> {
+    if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
+        eprintln!("skipped: set LAB_MOUNT=nfs for the NFS suite");
+        return Ok(());
+    }
+    let lab = Lab::start(LabConfig::default().client("a", "alice", &[], Profile::Lan, Strategy::Stream))?;
+    let mut rpc = Rpc::open(lab.client_dir("a"))?;
+
+    std::fs::write(lab.mount_path("a").join("setattr-control"), b"control")?;
+    let control = rpc.handle(entry(&lab, "setattr-control")?.id);
+    ensure!(setattr_size(&mut rpc, &control, 0, false)? == 0);
+    ensure!(
+        rpc.getattr(&control)?.1 == Some(0),
+        "unguarded SETATTR control did not apply"
+    );
+
+    let mut failures = 0;
+    for trial in 0..3 {
+        let name = format!("guarded-setattr-{trial}");
+        std::fs::write(lab.mount_path("a").join(&name), b"before")?;
+        let handle = rpc.handle(entry(&lab, &name)?.id);
+        let result = setattr_size(&mut rpc, &handle, 0, true)?;
+        ensure!(result == NFS3ERR_NOT_SYNC, "trial {trial} guard was not rejected");
+        let size = rpc.getattr(&handle)?.1;
+        let changed = size == Some(0);
+        eprintln!("trial {trial}: rejected SETATTR changed size={changed}, observed={size:?}");
+        failures += usize::from(changed);
+    }
+    assert_eq!(failures, 0, "rejected SETATTR requests that mutated files, of 3");
     Ok(())
 }
