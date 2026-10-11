@@ -57,11 +57,15 @@ final class FinderSync: FIFinderSync, @unchecked Sendable {
         return menu
     }
 
-    @objc private func keepDownloaded() { open(action: "keep") }
-    @objc private func unpin() { open(action: "unpin") }
-    @objc private func copyLink() { open(action: "copylink") }
-    @objc private func versionHistory() { open(action: "history") }
-    @objc private func share() { open(action: "share") }
+    @objc nonisolated private func keepDownloaded() { openOnMain(action: "keep") }
+    @objc nonisolated private func unpin() { openOnMain(action: "unpin") }
+    @objc nonisolated private func copyLink() { openOnMain(action: "copylink") }
+    @objc nonisolated private func versionHistory() { openOnMain(action: "history") }
+    @objc nonisolated private func share() { openOnMain(action: "share") }
+
+    private nonisolated func openOnMain(action: String) {
+        DispatchQueue.main.async { [weak self] in self?.open(action: action) }
+    }
 
     private func open(action: String) {
         let controller = FIFinderSyncController.default()
