@@ -31,8 +31,6 @@ pub(super) enum Execution {
 }
 
 struct Prepared {
-    command: Command,
-    cwd: std::fs::File,
     output: File,
     stdout: File,
     stderr: File,
@@ -42,14 +40,15 @@ struct Prepared {
 
 impl Agent {
     pub(super) async fn execute(&self, session: &Session) -> Execution {
-        let prepared = match self.prepare(session).await {
+        let (command, cwd, prepared) = match self.prepare(session).await {
             Ok(prepared) => prepared,
             Err(err) => return Execution::NotStarted(err),
         };
-        let (child, running) = match start::spawn(prepared.command, session, &prepared.cwd) {
+        let (child, running) = match start::spawn(command, session, &cwd) {
             Ok(started) => started,
             Err(err) => return Execution::NotStarted(err),
         };
+        drop(cwd);
         Execution::Started(self.supervise(session, child, running, prepared).await)
     }
 
@@ -61,7 +60,6 @@ impl Agent {
         running: anyhow::Result<Running>,
         prepared: Prepared,
     ) -> anyhow::Result<Outcome> {
-        drop(prepared.cwd);
         let group = child.id().context("child has no pid")?;
         let running = match running {
             Ok(running) => running,
@@ -106,7 +104,10 @@ impl Agent {
         Ok(Outcome::Done)
     }
 
-    async fn prepare(&self, session: &Session) -> anyhow::Result<Prepared> {
+    async fn prepare(
+        &self,
+        session: &Session,
+    ) -> anyhow::Result<(Command, std::fs::File, Prepared)> {
         let cwd = self.cwd(session).await?;
         let prompt = open(session, "prompt", OFlags::RDONLY).await?;
         // Caller-writable result names must be cleared before the command can contribute its own.
@@ -126,15 +127,17 @@ impl Agent {
             .stdin(prompt.into_std().await)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        Ok(Prepared {
+        Ok((
             command,
             cwd,
-            output,
-            stdout,
-            stderr,
-            stdout_sync,
-            stderr_sync,
-        })
+            Prepared {
+                output,
+                stdout,
+                stderr,
+                stdout_sync,
+                stderr_sync,
+            },
+        ))
     }
 }
 
