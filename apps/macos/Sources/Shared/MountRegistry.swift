@@ -25,12 +25,11 @@ struct MountRegistry {
     }
 
     func locate(_ url: URL, in records: [MountRecord]? = nil) -> LocatedPath? {
-        let path = canonicalFileURL(url).pathComponents
         return (records ?? self.records())
             .compactMap { record -> (MountRecord, [String])? in
-                let root = canonicalFileURL(URL(fileURLWithPath: record.mountpoint)).pathComponents
-                guard path.starts(with: root) else { return nil }
-                return (record, Array(path.dropFirst(root.count)))
+                let root = URL(fileURLWithPath: record.mountpoint)
+                guard let path = relativeFilePath(url, below: root) else { return nil }
+                return (record, path)
             }
             .min { $0.1.count < $1.1.count }
             .map { LocatedPath(mount: $0.0, relativePath: $0.1.joined(separator: "/")) }

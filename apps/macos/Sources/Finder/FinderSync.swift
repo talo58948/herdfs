@@ -12,18 +12,26 @@ final class FinderSync: FIFinderSync, @unchecked Sendable {
 
     override nonisolated init() {
         super.init()
-        MainActor.assumeIsolated { start() }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { start() }
+        } else {
+            DispatchQueue.main.sync { start() }
+        }
     }
 
     override nonisolated func requestBadgeIdentifier(for url: URL) {
-        MainActor.assumeIsolated {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
             requested.insert(url)
             updateBadge(for: url)
         }
     }
 
     override nonisolated func menu(for menuKind: FIMenuKind) -> NSMenu? {
-        MainActor.assumeIsolated { MenuResult(makeMenu(for: menuKind)) }.value
+        if Thread.isMainThread {
+            return MainActor.assumeIsolated { MenuResult(makeMenu(for: menuKind)) }.value
+        }
+        return DispatchQueue.main.sync { MenuResult(makeMenu(for: menuKind)) }.value
     }
 
     private func start() {
@@ -49,16 +57,21 @@ final class FinderSync: FIFinderSync, @unchecked Sendable {
         return menu
     }
 
-    @objc private func keepDownloaded() { open(action: "keep") }
-    @objc private func unpin() { open(action: "unpin") }
-    @objc private func copyLink() { open(action: "copylink") }
-    @objc private func versionHistory() { open(action: "history") }
-    @objc private func share() { open(action: "share") }
+    @objc nonisolated private func keepDownloaded() { openOnMain(action: "keep") }
+    @objc nonisolated private func unpin() { openOnMain(action: "unpin") }
+    @objc nonisolated private func copyLink() { openOnMain(action: "copylink") }
+    @objc nonisolated private func versionHistory() { openOnMain(action: "history") }
+    @objc nonisolated private func share() { openOnMain(action: "share") }
 
-    private func open(action: String) {
+    private nonisolated func openOnMain(action: String) {
+        // Finder reports the selection only while the action runs.
         let controller = FIFinderSyncController.default()
-        guard let url = controller.selectedItemURLs()?.first ?? controller.targetedURL(),
-              let located = state.locate(url) else { return }
+        guard let url = controller.selectedItemURLs()?.first ?? controller.targetedURL() else { return }
+        DispatchQueue.main.async { [weak self] in self?.open(action: action, url: url) }
+    }
+
+    private func open(action: String, url: URL) {
+        guard let located = state.locate(url) else { return }
         var link = URLComponents()
         link.scheme = "herdfs"
         link.host = located.mount.space
