@@ -1,5 +1,5 @@
 use std::ffi::OsStr;
-use std::io::{self, ErrorKind};
+use std::io;
 
 use rustix::fs::{AtFlags, OFlags};
 use tokio::fs::File;
@@ -7,8 +7,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::{FILE_MODE, Session, open_at};
 
-const CREATE_ATTEMPTS: usize = 8;
-
+/// A uniquely named file beside its target, removed unless renamed into place.
 struct Scratch {
     dir: std::fs::File,
     name: String,
@@ -39,33 +38,14 @@ pub(super) async fn write_atomic(session: &Session, name: &str, contents: &[u8])
 }
 
 async fn create(session: &Session, name: &str) -> io::Result<Scratch> {
-    let dir = session.file.try_clone()?;
-    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL;
-    for _ in 0..CREATE_ATTEMPTS {
-        // The session directory is caller-writable, so scratch names must be unpredictable.
-        let temporary = format!(".{name}.{:032x}.tmp", rand::random::<u128>());
-        let opened = open_at(
-            &session.file,
-            OsStr::new(&temporary),
-            flags | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            FILE_MODE,
-        )
-        .await;
-        match opened {
-            Ok(file) => {
-                return Ok(Scratch {
-                    dir,
-                    name: temporary,
-                    file,
-                    renamed: false,
-                });
-            }
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::new(
-        ErrorKind::AlreadyExists,
-        "could not create a unique session scratch file",
-    ))
+    // The session directory is caller-writable, so the scratch name must be unpredictable.
+    let temporary = format!(".{name}.{:032x}.tmp", rand::random::<u128>());
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::NONBLOCK;
+    let file = open_at(&session.file, OsStr::new(&temporary), flags | OFlags::CLOEXEC, FILE_MODE).await?;
+    Ok(Scratch {
+        dir: session.file.try_clone()?,
+        name: temporary,
+        file,
+        renamed: false,
+    })
 }
