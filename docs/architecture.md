@@ -109,6 +109,7 @@ herdfs-agents --mount DIR --host NAME --command 'codex exec --full-auto' [--max-
 
 Agents sessions live in `/.agents/<host>/<session>/`. The session holds `prompt` (and an optional `cwd` relative to the mount); write the prompt under another name and rename it atomically to `prompt` (C7), or write it from another host, where it becomes visible on close (C2). The runner writes `status` (`running`, `done`, `failed: <reason>`) and `output`. Other hosts see `output` when the session ends, because a file becomes visible to them on close.
 Permission to spawn a session is write access at its session directory, and a grant on the host directory covers every session below it.
+After the runner starts, cancelling a queued session takes effect once its startup scan of the host directory finishes; the 5 s bound of A2 applies from then.
 A2's never-back rule covers the runner's own transitions; a principal able to rewrite `status` already has A1 permission to spawn sessions; likewise, such a principal can replace or obstruct the result files the runner writes.
 
 Client observability: `getfattr -n user.herdfs.stats MOUNT` returns JSON counters: `bytes_fetched`, `chunks_fetched`, `cache_hits`, `grants`, `commits`, `pending_commits`, `decisions` per plan setting, `jev_answers`, `jev_unsure`, `jev_errors`, and `round_trip_ms` to the authority. `herdfs explain PATH` reads `user.herdfs.plan` from the file and prints the latest access's settings, source, Jev confidence when present, and fetched bytes.

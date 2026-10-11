@@ -75,7 +75,7 @@ impl Source {
             || refresh_after == Some(None)
             || refresh_after
                 .flatten()
-                .is_some_and(|generation| token.generation > generation)
+                .is_some_and(|generation| token.generation != generation)
         {
             return Ok(stored.access());
         }
@@ -176,9 +176,10 @@ pub(crate) async fn save(path: &Path, token: &TokenFile) -> Result<()> {
     write(path, token, generation(path)).map(drop)
 }
 
+/// The stored generation, or a random start far below `u64::MAX` so a new login never repeats an old one.
 fn generation(path: &Path) -> u64 {
     serde_json::from_slice::<TokenFile>(&fs::read(path).unwrap_or_default())
-        .map_or(0, |token| token.generation)
+        .map_or_else(|_| rand::random_range(1..1 << 62), |token| token.generation)
 }
 
 pub(crate) async fn remove(path: &Path) -> Result<()> {
