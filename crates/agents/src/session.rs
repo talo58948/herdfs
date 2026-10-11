@@ -5,6 +5,7 @@
 
 mod process;
 mod running;
+mod write_atomic;
 
 use std::ffi::OsStr;
 use std::io::{self, ErrorKind};
@@ -14,9 +15,10 @@ use std::time::SystemTime;
 use anyhow::{Context, bail};
 use rustix::fs::{Mode, OFlags};
 use tokio::fs::{self, File};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 
 use process::{Execution, Outcome};
+use write_atomic::write_atomic;
 
 const OUTSIDE_MOUNT: &str = "cwd outside mount";
 const DIR_FLAGS: OFlags = OFlags::RDONLY
@@ -201,20 +203,6 @@ async fn ensure_result(session: &Session, name: &str, contents: &[u8]) -> io::Re
         Err(err) if err.kind() == ErrorKind::NotFound => write_atomic(session, name, contents).await,
         Err(err) => Err(err),
     }
-}
-
-async fn write_atomic(session: &Session, name: &str, contents: &[u8]) -> io::Result<()> {
-    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC;
-    let temporary = format!(".{name}.tmp");
-    let mut file = open(session, &temporary, flags).await?;
-    file.write_all(contents).await?;
-    file.sync_all().await?;
-    let dir = session.file.try_clone()?;
-    let name = name.to_owned();
-    tokio::task::spawn_blocking(move || rustix::fs::renameat(&dir, temporary, &dir, name))
-        .await
-        .map_err(io::Error::other)??;
-    Ok(())
 }
 
 /// A session file's text, or `None` if it does not exist.

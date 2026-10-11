@@ -9,6 +9,7 @@ publish.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 libc.workspace = true
+rand.workspace = true
 rustix = { workspace = true, features = ["pipe"] }
 tokio.workspace = true
 

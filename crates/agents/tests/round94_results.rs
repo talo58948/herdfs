@@ -72,7 +72,6 @@ fn results(dir: &Path) -> BTreeMap<&'static str, Vec<u8>> {
 /// results; identical failures without the collision are the passing controls.
 // contract: A2
 #[test]
-#[ignore = "ROUND94: caller-controlled scratch names preserve spoofed terminal results"]
 fn terminal_sessions_replace_results_despite_scratch_name_collisions() {
     let mount = tempfile::tempdir().unwrap();
     let controls: Vec<_> = (0..3)
