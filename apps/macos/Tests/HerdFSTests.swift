@@ -167,6 +167,7 @@ final class HerdFSTests: XCTestCase {
         )])
 
         let finderURL = parent.appending(path: "herdfs/lab/report.txt")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: finderURL.path), "requires case-insensitive volume")
         let found = state.locate(finderURL)
         XCTAssertEqual(found?.relativePath, "lab/report.txt")
         XCTAssertEqual(found?.mount.badges["lab/report.txt"], .kept)
