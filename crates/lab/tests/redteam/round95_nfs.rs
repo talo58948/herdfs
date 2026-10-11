@@ -61,7 +61,6 @@ fn empty_non_eof(reply: &[u8]) -> Result<bool> {
 /// in the offered reply budget. The server must return TOOSMALL instead of a non-advancing page.
 // contract: M1
 #[test]
-#[ignore = "ROUND95: READDIRPLUS returns an empty non-EOF page when one entry cannot fit"]
 fn round95_readdirplus_rejects_a_budget_too_small_for_one_entry() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
         eprintln!("skipped: set LAB_MOUNT=nfs for the NFS suite");
