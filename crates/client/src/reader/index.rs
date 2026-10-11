@@ -11,6 +11,10 @@ use crate::version::OpenVersion;
 
 use super::Reader;
 
+#[path = "index_mp4.rs"]
+mod mp4;
+use mp4::mp4_header;
+
 /// The first-window prefetch and small read-ahead are two chunks (about 2 MiB at the average
 /// chunk size): enough to hide one round trip without dominating a short access.
 const FIRST_CHUNKS: usize = 2;
@@ -117,46 +121,6 @@ impl Reader {
             offset = end;
         }
         Ok(offset == directory.range.end)
-    }
-
-    async fn mp4(
-        &self,
-        file: &OpenVersion,
-        first: Vec<u8>,
-        fetched: &AtomicU64,
-    ) -> Result<Option<Range<u64>>> {
-        let (mut offset, size, mut header) = (0, file.version.size, first);
-        for remaining in (0..BOX_PROBES).rev() {
-            let Some((kind, range)) = mp4_box(offset, size, &header) else {
-                return Ok(None);
-            };
-            if kind == *b"moov" {
-                let indices = file.overlapping(range.start, range.end - range.start);
-                return Ok(self.fits_index_fetch(file, indices, fetched).then_some(range));
-            }
-            offset = range.end;
-            if offset >= size || remaining == 0 {
-                return Ok(None);
-            }
-            let len = BOX_HEADER.min(size - offset);
-            let cached = self.cached_range(file, offset, len);
-            header = match cached {
-                Some(header) => header,
-                // A lone ftyp claim is not enough to widen an unknown file's fallback.
-                None if range.start == 0 => return Ok(None),
-                None => {
-                    let probe = file.overlapping(offset, len);
-                    let chunks = file.version.chunks.len();
-                    let last = chunks.saturating_sub(FIRST_CHUNKS);
-                    let fallback = (0..chunks.min(FIRST_CHUNKS)).chain(last..chunks);
-                    if !self.fits_index_fetch(file, probe.chain(fallback), fetched) {
-                        return Ok(None);
-                    }
-                    self.read(file, offset, len, Some(fetched)).await?
-                }
-            };
-        }
-        Ok(None)
     }
 
     fn cached_range(&self, file: &OpenVersion, off: u64, len: u64) -> Option<Vec<u8>> {
@@ -267,24 +231,6 @@ fn zip_entry_len(header: &[u8]) -> Option<u64> {
     let extra = u16::from_le_bytes(header.get(30..32)?.try_into().ok()?);
     let comment = u16::from_le_bytes(header.get(32..34)?.try_into().ok()?);
     Some(ZIP_ENTRY_HEADER + u64::from(name) + u64::from(extra) + u64::from(comment))
-}
-
-fn mp4_header(header: &[u8], size: u64) -> bool {
-    mp4_box(0, size, header).is_some_and(|(kind, range)| kind == *b"ftyp" && range.end >= 16)
-}
-
-fn mp4_box(offset: u64, parent_end: u64, header: &[u8]) -> Option<([u8; 4], Range<u64>)> {
-    let kind = header.get(4..8)?.try_into().ok()?;
-    let short = u32::from_be_bytes(header.get(..4)?.try_into().ok()?);
-    let len = match short {
-        0 => parent_end.checked_sub(offset)?,
-        1 => u64::from_be_bytes(header.get(8..16)?.try_into().ok()?),
-        len => u64::from(len),
-    };
-    let header_len = if short == 1 { 16 } else { 8 };
-    let end = offset.checked_add(len)?;
-    (len >= header_len && (kind != *b"moov" || len <= MAX_INDEX_REGION) && end <= parent_end)
-        .then_some((kind, offset..end))
 }
 
 #[cfg(test)]

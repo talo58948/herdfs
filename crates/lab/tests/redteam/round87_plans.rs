@@ -117,7 +117,6 @@ fn access(lab: &Lab, name: &str, valid: bool) -> Result<(u64, u64, u64)> {
 /// than its header. Invalid indexes must use the documented first/last-window fallback.
 // contract: P3, C9
 #[test]
-#[ignore = "ROUND87: malformed MP4 moov children widen index prefetch"]
 fn round87_invalid_remote_mp4_moov_uses_fallback() -> Result<()> {
     if let Some(reason) = herdfs_lab::missing_binaries() {
         eprintln!("skipped: {reason}");
