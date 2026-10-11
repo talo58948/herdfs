@@ -1,16 +1,23 @@
+import Darwin
 import Foundation
 
 func canonicalFileURL(_ url: URL) -> URL {
     let standardized = url.standardizedFileURL
-    if let path = (try? standardized.resourceValues(forKeys: [.canonicalPathKey]))?.canonicalPath {
+    if let path = realPath(standardized.path) {
         return URL(fileURLWithPath: path, isDirectory: standardized.hasDirectoryPath)
     }
     let parent = standardized.deletingLastPathComponent()
-    if let path = (try? parent.resourceValues(forKeys: [.canonicalPathKey]))?.canonicalPath {
+    if let path = realPath(parent.path) {
         return URL(fileURLWithPath: path, isDirectory: true)
             .appending(path: standardized.lastPathComponent)
     }
     return standardized.resolvingSymlinksInPath()
+}
+
+private func realPath(_ path: String) -> String? {
+    guard let resolved = realpath(path, nil) else { return nil }
+    defer { free(resolved) }
+    return String(cString: resolved)
 }
 
 struct FinderState: Codable, Equatable, Sendable {
