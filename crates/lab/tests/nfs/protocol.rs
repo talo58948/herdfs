@@ -5,7 +5,7 @@ use anyhow::Result;
 
 use super::{NFS_PROGRAM, NFS_VERSION};
 
-pub(super) fn rpc_header(xid: u32, procedure: u32, auth: u32) -> Vec<u8> {
+pub(crate) fn rpc_header(xid: u32, procedure: u32, auth: u32) -> Vec<u8> {
     let mut out = Vec::new();
     for word in [xid, 0, 2, NFS_PROGRAM, NFS_VERSION, procedure, auth] {
         out.extend_from_slice(&word.to_be_bytes());
@@ -23,7 +23,7 @@ pub(super) fn rpc_header(xid: u32, procedure: u32, auth: u32) -> Vec<u8> {
     out
 }
 
-pub(super) fn send_record(stream: &mut TcpStream, call: &[u8]) -> Result<()> {
+pub(crate) fn send_record(stream: &mut TcpStream, call: &[u8]) -> Result<()> {
     stream.write_all(&((call.len() as u32) | (1 << 31)).to_be_bytes())?;
     stream.write_all(call)?;
     Ok(())

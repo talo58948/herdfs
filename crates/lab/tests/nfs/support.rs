@@ -4,9 +4,9 @@ use std::path::Path;
 use anyhow::{Context, Result, ensure};
 use herdfs_core::proto::EntryId;
 
-mod protocol;
+pub(crate) mod protocol;
 mod reply;
-mod socket;
+pub(crate) mod socket;
 
 use protocol::{read_record, rpc_header, send_record};
 use reply::Reply;
