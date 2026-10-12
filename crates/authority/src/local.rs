@@ -1,7 +1,7 @@
 //! The persisted issuer and revocable machine tokens for local mode.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
@@ -223,10 +223,18 @@ fn private_file(path: &Path) -> anyhow::Result<File> {
 }
 
 fn read_key(path: &Path) -> io::Result<Vec<u8>> {
-    let metadata = fs::symlink_metadata(path)?;
-    let reason = if metadata.file_type().is_symlink() {
-        Some("is a symlink")
-    } else if !metadata.file_type().is_file() {
+    let mut file = match rustix::fs::openat(
+        rustix::fs::CWD,
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    ) {
+        Ok(file) => File::from(file),
+        Err(rustix::io::Errno::LOOP) => return Err(refuse_key(path, "is a symlink")),
+        Err(error) => return Err(io::Error::from_raw_os_error(error.raw_os_error())),
+    };
+    let metadata = file.metadata()?;
+    let reason = if !metadata.file_type().is_file() {
         Some("is not a regular file")
     } else if metadata.uid() != rustix::process::geteuid().as_raw() {
         Some("is not owned by the effective user")
@@ -236,15 +244,21 @@ fn read_key(path: &Path) -> io::Result<Vec<u8>> {
         None
     };
     if let Some(reason) = reason {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!(
-                "refusing local issuer key {}: {reason}; after checking it was not replaced, chmod 600 it, or delete it and reissue every token",
-                path.display()
-            ),
-        ));
+        return Err(refuse_key(path, reason));
     }
-    fs::read(path)
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn refuse_key(path: &Path, reason: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "refusing local issuer key {}: {reason}; after checking it was not replaced, chmod 600 it, or delete it and reissue every token",
+            path.display()
+        ),
+    )
 }
 
 fn key_path(db: &Path) -> anyhow::Result<PathBuf> {

@@ -123,7 +123,6 @@ fn raced_load(trial: usize) -> bool {
 /// symlink swapped into a writable parent; stable regular-file and symlink cases are controls.
 // contract: S5
 #[test]
-#[ignore = "ROUND103: local issuer key validation and reading race across different files"]
 fn local_issuer_does_not_follow_a_symlink_swapped_after_validation() {
     let mut forged = 0;
     for trial in 0..3 {
