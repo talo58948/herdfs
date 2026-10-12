@@ -4,7 +4,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::thread::sleep;
+use std::sync::{Arc, Barrier};
+use std::thread::{self, sleep};
 use std::time::{Duration, Instant};
 
 const HOST: &str = "box";
@@ -15,11 +16,15 @@ struct Runner(Child);
 impl Runner {
     fn start(mount: &Path) -> Self {
         let command = "while [ ! -f \"$HERDFS_SESSION_DIR/release\" ]; do sleep 0.05; done";
+        Self::with_command(mount, command, 1)
+    }
+
+    fn with_command(mount: &Path, command: &str, max_sessions: usize) -> Self {
         let child = Command::new(env!("CARGO_BIN_EXE_herdfs-agents"))
             .arg("--mount")
             .arg(mount)
             .args(["--host", HOST, "--command", command])
-            .args(["--poll-ms", "1", "--max-sessions", "1"])
+            .args(["--poll-ms", "1", "--max-sessions", &max_sessions.to_string()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -140,4 +145,76 @@ fn simultaneous_queued_cancels_meet_the_five_second_bound() {
         delayed.iter().all(|count| *count == 0),
         "delayed queued sessions in three trials: {delayed:?}"
     );
+}
+
+/// A queued cancellation and a claim must commit one complete outcome: either the command never
+/// starts and leaves empty results, or its successful output remains attached to `done`.
+// contract: A2
+#[test]
+fn cancel_racing_start_keeps_the_winning_results() {
+    const BLOCKERS: usize = 32;
+    const RACED: usize = 200;
+
+    let mount = tempfile::tempdir().unwrap();
+    let blockers: Vec<_> = (0..BLOCKERS)
+        .map(|index| session(mount.path(), &format!("blocker-{index:02}")))
+        .collect();
+    let command = "case \"$HERDFS_SESSION_DIR\" in \
+        */blocker-*) while [ ! -f \"$HERDFS_SESSION_DIR/release\" ]; do sleep 0.01; done ;; \
+        *) printf 'real output\\n' ;; esac";
+    let _runner = Runner::with_command(mount.path(), command, BLOCKERS);
+    for blocker in &blockers {
+        wait_status(blocker, "running", Duration::from_secs(10));
+    }
+
+    let raced: Vec<_> = (0..RACED)
+        .map(|index| session(mount.path(), &format!("raced-{index:03}")))
+        .collect();
+    wait_queued(&raced);
+    let barrier = Arc::new(Barrier::new(3));
+    thread::scope(|scope| {
+        let release_barrier = Arc::clone(&barrier);
+        let blockers = &blockers;
+        scope.spawn(move || {
+            release_barrier.wait();
+            for blocker in blockers {
+                fs::write(blocker.join("release"), "").unwrap();
+            }
+        });
+        let cancel_barrier = Arc::clone(&barrier);
+        let raced = &raced;
+        scope.spawn(move || {
+            cancel_barrier.wait();
+            write_cancels(raced);
+        });
+        barrier.wait();
+    });
+
+    for dir in &raced {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match status(dir).as_deref() {
+                Some("cancelled") => {
+                    assert_eq!(fs::read(dir.join("exit_code")).unwrap(), b"cancelled\n");
+                    for name in ["stdout", "stderr", "output"] {
+                        assert_eq!(fs::read(dir.join(name)).unwrap(), b"", "{}", dir.display());
+                    }
+                    break;
+                }
+                Some("done") => {
+                    assert_eq!(fs::read(dir.join("exit_code")).unwrap(), b"0\n");
+                    assert_eq!(fs::read(dir.join("stdout")).unwrap(), b"real output\n");
+                    assert_eq!(fs::read(dir.join("stderr")).unwrap(), b"");
+                    assert_eq!(fs::read(dir.join("output")).unwrap(), b"real output\n");
+                    break;
+                }
+                observed => assert!(
+                    Instant::now() < deadline,
+                    "{} remained {observed:?}",
+                    dir.display()
+                ),
+            }
+            sleep(Duration::from_millis(10));
+        }
+    }
 }

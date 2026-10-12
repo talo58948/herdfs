@@ -121,7 +121,8 @@ pub(crate) async fn pending_prompt(mount: &Path, dir: &Path) -> io::Result<Optio
 /// Marks a newly discovered session `queued`.
 pub(crate) async fn queue(mount: &Path, dir: &Path) -> io::Result<()> {
     let session = session(mount, dir).await?;
-    transition(&session, None, "queued").await
+    let _lock = lock_transition(&session).await?;
+    transition_unlocked(&session, None, "queued").await
 }
 
 /// Cancels a queued session without waiting for a runner slot.
@@ -143,7 +144,8 @@ pub(crate) async fn cancel_queued(mount: &Path, dir: &Path) -> io::Result<Queued
 /// Moves a queued session to `running`, once its directory proves to be inside the host's.
 pub(crate) async fn claim(mount: &Path, dir: &Path) -> io::Result<Session> {
     let session = session(mount, dir).await?;
-    transition(&session, Some("queued"), "running").await?;
+    let _lock = lock_transition(&session).await?;
+    transition_unlocked(&session, Some("queued"), "running").await?;
     Ok(session)
 }
 
@@ -165,15 +167,18 @@ fn valid_status(status: &str) -> bool {
     matches!(status, "queued" | "running" | "done" | "cancelled") || status.starts_with("failed: ")
 }
 
-async fn transition(session: &Session, from: Option<&str>, status: &str) -> io::Result<()> {
-    let _lock = lock_transition(session).await?;
-    let current = read(session, "status").await?;
-    if current.as_deref().map(str::trim) != from {
+async fn transition_unlocked(session: &Session, from: Option<&str>, status: &str) -> io::Result<()> {
+    check_transition(session, from, status).await?;
+    write_status(session, status).await
+}
+
+async fn check_transition(session: &Session, from: Option<&str>, status: &str) -> io::Result<()> {
+    if read(session, "status").await?.as_deref().map(str::trim) != from {
         return Err(io::Error::other(format!(
             "status changed before transition to {status}"
         )));
     }
-    write_status(session, status).await
+    Ok(())
 }
 
 async fn write_status(session: &Session, status: &str) -> io::Result<()> {
@@ -185,12 +190,14 @@ async fn write(session: &Session, name: &str, text: &str) -> io::Result<()> {
 }
 
 async fn finish(session: &Session, from: &str, status: &str, keep_results: bool) -> io::Result<()> {
+    let _lock = lock_transition(session).await?;
+    check_transition(session, Some(from), status).await?;
     let results = if keep_results {
         ensure_results(session, status).await
     } else {
         write_results(session, status).await
     };
-    transition(session, Some(from), status).await?;
+    write_status(session, status).await?;
     results
 }
 
