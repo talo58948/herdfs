@@ -227,7 +227,10 @@ fn read_key(path: &Path) -> io::Result<Vec<u8>> {
         rustix::fs::CWD,
         path,
         // NONBLOCK so a planted FIFO cannot hang startup; the regular-file check below then refuses it.
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     ) {
         Ok(file) => File::from(file),
