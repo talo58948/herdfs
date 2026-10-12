@@ -18,7 +18,7 @@ use tokio::fs::{self, File};
 use tokio::io::AsyncReadExt;
 
 use process::{Execution, Outcome};
-use write_atomic::write_atomic;
+use write_atomic::{lock_transition, write_atomic};
 
 const OUTSIDE_MOUNT: &str = "cwd outside mount";
 const DIR_FLAGS: OFlags = OFlags::RDONLY
@@ -166,6 +166,7 @@ fn valid_status(status: &str) -> bool {
 }
 
 async fn transition(session: &Session, from: Option<&str>, status: &str) -> io::Result<()> {
+    let _lock = lock_transition(session).await?;
     let current = read(session, "status").await?;
     if current.as_deref().map(str::trim) != from {
         return Err(io::Error::other(format!(

@@ -1,11 +1,11 @@
 use std::ffi::OsStr;
 use std::io;
 
-use rustix::fs::{AtFlags, OFlags};
+use rustix::fs::{AtFlags, FlockOperation, Mode, OFlags, flock};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
-use super::{FILE_MODE, Session, open_at};
+use super::{DIR_FLAGS, FILE_MODE, Session, open_at};
 
 /// A uniquely named file beside its target, removed unless renamed into place.
 struct Scratch {
@@ -21,6 +21,18 @@ impl Drop for Scratch {
             let _ = rustix::fs::unlinkat(&self.dir, &self.name, AtFlags::empty());
         }
     }
+}
+
+pub(super) async fn lock_transition(session: &Session) -> io::Result<std::fs::File> {
+    let anchor = session.file.try_clone()?;
+    tokio::task::spawn_blocking(move || {
+        // A fresh open description releases the flock when the returned guard drops.
+        let dir: std::fs::File = rustix::fs::openat(&anchor, ".", DIR_FLAGS, Mode::empty())?.into();
+        flock(&dir, FlockOperation::LockExclusive).map_err(io::Error::from)?;
+        Ok(dir)
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 pub(super) async fn write_atomic(session: &Session, name: &str, contents: &[u8]) -> io::Result<()> {

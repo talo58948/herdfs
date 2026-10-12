@@ -134,7 +134,6 @@ fn trial(number: usize) -> usize {
 /// accepted sessions are cancelled at once; three-session queues are the passing controls.
 // contract: A2
 #[test]
-#[ignore = "ROUND103: serial queued cancellation exceeds five seconds under accepted load"]
 fn simultaneous_queued_cancels_meet_the_five_second_bound() {
     let delayed: Vec<_> = (0..3).map(trial).collect();
     assert!(

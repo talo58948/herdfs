@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+futures.workspace = true
 libc.workspace = true
 rand.workspace = true
 rustix = { workspace = true, features = ["pipe"] }
