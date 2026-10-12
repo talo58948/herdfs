@@ -107,7 +107,6 @@ fn entry(lab: &Lab, name: &str) -> Result<Entry> {
 /// COMMITs are in progress. Every pair must replay one execution and return the same success.
 // contract: M1
 #[test]
-#[ignore = "ROUND102: all-in-progress replay saturation re-executes duplicate mutations"]
 fn round102_in_progress_replay_saturation_keeps_duplicate_mutations_idempotent() -> Result<()> {
     if std::env::var("LAB_MOUNT").as_deref() != Ok("nfs") {
         eprintln!("skipped: set LAB_MOUNT=nfs for the NFS suite");

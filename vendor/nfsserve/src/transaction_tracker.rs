@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use tokio::sync::futures::{Notified, OwnedNotified};
 use tokio::sync::Notify;
 
 const MAX_TRANSACTIONS: usize = 4_096;
@@ -11,16 +12,23 @@ const MAX_TRANSACTIONS: usize = 4_096;
 pub struct TransactionTracker {
     retention_period: Duration,
     transactions: Mutex<HashMap<(u32, RequestChecksum, IpAddr), TransactionState>>,
+    capacity: Notify,
 }
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub(crate) struct RequestChecksum(pub(crate) u64);
+
+enum Wait<'a> {
+    Capacity(Notified<'a>),
+    Transaction(OwnedNotified, Duration),
+}
 
 impl TransactionTracker {
     pub fn new(retention_period: Duration) -> Self {
         Self {
             retention_period,
             transactions: Mutex::new(HashMap::new()),
+            capacity: Notify::new(),
         }
     }
 
@@ -30,7 +38,7 @@ impl TransactionTracker {
     pub async fn begin(&self, xid: u32, checksum: RequestChecksum, client_addr: IpAddr) -> Begin {
         let key = (xid, checksum, client_addr);
         loop {
-            let (notified, wait) = {
+            let wait = 'locked: {
                 let mut transactions = self
                     .transactions
                     .lock()
@@ -50,7 +58,7 @@ impl TransactionTracker {
                             })
                             .min_by_key(|(_, finished)| *finished);
                         let Some((oldest, _)) = oldest else {
-                            return Begin::New;
+                            break 'locked Wait::Capacity(self.capacity.notified());
                         };
                         transactions.remove(&oldest);
                     }
@@ -75,10 +83,15 @@ impl TransactionTracker {
                         }
                     },
                 };
-                (finished.0.notified_owned(), finished.1)
+                Wait::Transaction(finished.0.notified_owned(), finished.1)
             };
-            if tokio::time::timeout(wait, notified).await.is_err() {
-                return Begin::Drop;
+            match wait {
+                Wait::Capacity(notified) => notified.await,
+                Wait::Transaction(notified, timeout) => {
+                    if tokio::time::timeout(timeout, notified).await.is_err() {
+                        return Begin::Drop;
+                    }
+                }
             }
         }
     }
@@ -112,6 +125,7 @@ impl TransactionTracker {
                 transactions.remove(&key);
             }
             finished.notify_waiters();
+            self.capacity.notify_waiters();
         }
     }
 
@@ -212,15 +226,21 @@ mod tests {
 
     // contract: M1
     #[tokio::test]
-    async fn all_in_progress_requests_do_not_grow_the_tracker_without_bound() {
-        let tracker = TransactionTracker::new(Duration::from_secs(60));
+    async fn a_new_request_waits_when_all_requests_are_in_progress() {
+        let tracker = Arc::new(TransactionTracker::new(Duration::from_secs(60)));
         for xid in 0..MAX_TRANSACTIONS as u32 {
             assert!(matches!(tracker.begin(xid, request(), client()).await, Begin::New));
         }
-        assert!(matches!(
-            tracker.begin(MAX_TRANSACTIONS as u32, request(), client()).await,
-            Begin::New
-        ));
+
+        let mut waiting = tokio::spawn({
+            let tracker = tracker.clone();
+            async move { tracker.begin(MAX_TRANSACTIONS as u32, request(), client()).await }
+        });
+        assert!(tokio::time::timeout(Duration::from_millis(10), &mut waiting)
+            .await
+            .is_err());
+        tracker.mark_processed(0, request(), client(), vec![0]);
+        assert!(matches!(waiting.await.unwrap(), Begin::New));
         assert_eq!(tracker.transactions.lock().unwrap().len(), MAX_TRANSACTIONS);
     }
 
