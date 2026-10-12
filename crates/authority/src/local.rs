@@ -226,12 +226,13 @@ fn read_key(path: &Path) -> io::Result<Vec<u8>> {
     let mut file = match rustix::fs::openat(
         rustix::fs::CWD,
         path,
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        // NONBLOCK so a planted FIFO cannot hang startup; the regular-file check below then refuses it.
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     ) {
         Ok(file) => File::from(file),
         Err(rustix::io::Errno::LOOP) => return Err(refuse_key(path, "is a symlink")),
-        Err(error) => return Err(io::Error::from_raw_os_error(error.raw_os_error())),
+        Err(error) => return Err(error.into()),
     };
     let metadata = file.metadata()?;
     let reason = if !metadata.file_type().is_file() {
