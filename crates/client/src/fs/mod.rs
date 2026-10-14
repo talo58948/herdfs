@@ -27,10 +27,10 @@ use std::{collections::HashMap, fs::File};
 #[cfg(target_os = "linux")]
 pub use fuse::Fuse;
 use handles::Handle;
+use herdfs_core::proto::{Entry, EntryId, Kind};
 pub use inodes::Inodes;
 pub use kernel::Kernel;
 pub(crate) use nfs::{Identity, Nfs};
-use herdfs_core::proto::{Entry, EntryId, Kind};
 use tokio::sync::watch;
 
 use crate::{

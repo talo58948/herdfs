@@ -11,8 +11,8 @@ use anyhow::Context;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::SigningKey;
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header};
 use herdfs_core::proto;
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 

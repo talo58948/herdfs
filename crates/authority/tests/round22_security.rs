@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use http::Lab;
 use herdfs_authority::{Authority, server::Server};
 use herdfs_core::ChunkId;
+use http::Lab;
 use reqwest::Url;
 use rusty_s3::{Bucket, Credentials, UrlStyle};
 use serde_json::json;

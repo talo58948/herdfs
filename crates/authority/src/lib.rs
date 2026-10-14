@@ -14,11 +14,11 @@ mod versions;
 use std::path::Path;
 
 pub use collect::{Collected, Policy};
-pub use local::{Issued, LocalIssuer};
 use herdfs_core::{
     ChunkId, ChunkRef,
     proto::{self, ErrorCode, Kind, Perm, Request, Response},
 };
+pub use local::{Issued, LocalIssuer};
 use rusqlite::Connection;
 
 /// An authenticated caller.

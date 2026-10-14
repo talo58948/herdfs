@@ -12,9 +12,9 @@ mod http;
 use std::{sync::Arc, time::Duration};
 
 use axum::http::StatusCode;
-use http::{Lab, now_ms};
 use herdfs_authority::Policy;
 use herdfs_core::ChunkId;
+use http::{Lab, now_ms};
 use serde_json::{Value, json};
 
 const NOTHING_KEPT: Policy = Policy {

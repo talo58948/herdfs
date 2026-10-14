@@ -4,9 +4,9 @@
 mod http;
 
 use axum::http::StatusCode;
-use http::{Lab, now_ms};
 use herdfs_authority::Policy;
 use herdfs_core::ChunkId;
+use http::{Lab, now_ms};
 use serde_json::json;
 use std::time::Duration;
 

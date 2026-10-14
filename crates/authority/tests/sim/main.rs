@@ -31,12 +31,12 @@ use std::{
 };
 
 use choose::Rng;
-use model::Model;
 use herdfs_authority::{Authority, Outcome, Principal};
 use herdfs_core::{
     ChunkRef, SpacePath,
     proto::{EntryId, ErrorCode, Perm, Request},
 };
+use model::Model;
 use tempfile::TempDir;
 
 const STEPS: usize = 150;

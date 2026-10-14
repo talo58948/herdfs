@@ -9,8 +9,8 @@
 mod http;
 
 use axum::http::StatusCode;
-use http::Lab;
 use herdfs_core::ChunkId;
+use http::Lab;
 use serde_json::{Value, json};
 
 /// Uploads `bytes` as `token` for the commit named by `request_id`, sent as written.

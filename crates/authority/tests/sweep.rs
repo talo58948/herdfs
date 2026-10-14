@@ -6,9 +6,9 @@ mod http;
 use std::{sync::Arc, time::Duration};
 
 use axum::http::StatusCode;
-use http::{Lab, Stored, now_ms};
 use herdfs_authority::Policy;
 use herdfs_core::ChunkId;
+use http::{Lab, Stored, now_ms};
 use serde_json::json;
 
 fn key(chunk: &[u8]) -> String {

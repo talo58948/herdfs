@@ -26,12 +26,7 @@ async fn the_binary_serves_health_with_the_documented_flags() {
             "http://s3.lab:9",
         ])
         .args(["--s3-bucket", "herdfs", "--s3-region", "us-east-1"])
-        .args([
-            "--oidc-issuer",
-            "http://127.0.0.1:9",
-            "--oidc-audience",
-            "herdfs",
-        ])
+        .args(["--oidc-issuer", "http://127.0.0.1:9", "--oidc-audience", "herdfs"])
         .envs([("AWS_ACCESS_KEY_ID", "key"), ("AWS_SECRET_ACCESS_KEY", "secret")])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -73,12 +68,7 @@ fn the_binary_refuses_a_grace_shorter_than_the_url_safety_bounds() {
                 "http://s3.lab:9",
             ])
             .args(["--s3-bucket", "herdfs", "--s3-region", "us-east-1"])
-            .args([
-                "--oidc-issuer",
-                "http://127.0.0.1:9",
-                "--oidc-audience",
-                "herdfs",
-            ])
+            .args(["--oidc-issuer", "http://127.0.0.1:9", "--oidc-audience", "herdfs"])
             .args(flags)
             .envs([("AWS_ACCESS_KEY_ID", "key"), ("AWS_SECRET_ACCESS_KEY", "secret")])
             .stderr(Stdio::null())

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, ensure};
 use herdfs_core::SpacePath;
 use herdfs_core::proto::{Perm, Request};
-use herdfs_lab::{ADMIN, Lab, LabConfig, Profile, SPACE, Strategy, mounted, herdfs_command};
+use herdfs_lab::{ADMIN, Lab, LabConfig, Profile, SPACE, Strategy, herdfs_command, mounted};
 
 use super::support;
 

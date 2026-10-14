@@ -4,10 +4,10 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use herdfs_lab::{BadToken, Lab, LabConfig, Links, Profile, Strategy};
 use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
-use herdfs_lab::{BadToken, Lab, LabConfig, Links, Profile, Strategy};
 use serde_json::{Value, json};
 
 fn near_and_far() -> Result<Lab> {

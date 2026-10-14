@@ -62,10 +62,7 @@ fn wait_registered(mountpoint: &Path, pid: u32) -> Result<()> {
 }
 
 fn status(path: &Path) -> Result<std::process::Output> {
-    Ok(herdfs_command()?
-        .args(["--json", "status"])
-        .arg(path)
-        .output()?)
+    Ok(herdfs_command()?.args(["--json", "status"]).arg(path).output()?)
 }
 
 fn replacement(lab: &Lab, root: &Path) -> Result<Process> {

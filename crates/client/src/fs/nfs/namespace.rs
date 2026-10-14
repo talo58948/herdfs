@@ -264,12 +264,7 @@ impl Nfs {
             return error.into();
         }
         for dir in dirs {
-            if let Err(error) = self
-                .space
-                .remote
-                .locate(herdfs_core::proto::EntryId(*dir))
-                .await
-            {
+            if let Err(error) = self.space.remote.locate(herdfs_core::proto::EntryId(*dir)).await {
                 return Self::stale(error);
             }
         }

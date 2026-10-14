@@ -20,9 +20,9 @@ use axum::{
     response::IntoResponse,
     routing::{get, put},
 };
-use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use herdfs_authority::{Authority, server::Server};
 use herdfs_core::ChunkId;
+use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use reqwest::Url;
 use rusty_s3::{Bucket, Credentials, UrlStyle};
 use serde_json::{Value, json};
@@ -169,9 +169,8 @@ impl Lab {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("authority.db");
         let authority = Authority::open(&db).unwrap();
-        let bucket = |url: &str| {
-            Bucket::new(Url::parse(url).unwrap(), UrlStyle::Path, "herdfs", "us-east-1").unwrap()
-        };
+        let bucket =
+            |url: &str| Bucket::new(Url::parse(url).unwrap(), UrlStyle::Path, "herdfs", "us-east-1").unwrap();
         let credentials = Credentials::new("key", "secret");
         let server = Server::new(
             authority,
@@ -201,9 +200,8 @@ impl Lab {
     }
 
     pub fn restarted_server(&self) -> Arc<Server> {
-        let bucket = |url: &str| {
-            Bucket::new(Url::parse(url).unwrap(), UrlStyle::Path, "herdfs", "us-east-1").unwrap()
-        };
+        let bucket =
+            |url: &str| Bucket::new(Url::parse(url).unwrap(), UrlStyle::Path, "herdfs", "us-east-1").unwrap();
         Arc::new(Server::new(
             Authority::open(&self.db).unwrap(),
             bucket(&self.s3),

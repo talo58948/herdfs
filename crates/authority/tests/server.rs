@@ -8,8 +8,8 @@
 mod http;
 
 use axum::http::StatusCode;
-use http::{Lab, PUBLIC_S3, now_ms};
 use herdfs_core::{ChunkId, chunk::MAX_CHUNK};
+use http::{Lab, PUBLIC_S3, now_ms};
 use serde_json::{Value, json};
 
 #[tokio::test]
