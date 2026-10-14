@@ -21,9 +21,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          repository: talo58948/herdfs-www
+          repository: talo58948/herdfs-web
           ref: main
-          ssh-key: ${{ secrets.HERDFS_WWW_DEPLOY_KEY }}
+          ssh-key: ${{ secrets.HERDFS_WEB_DEPLOY_KEY }}
       - name: Update the pinned docs commit
         env:
           HERDFS_SHA: ${{ github.sha }}
