@@ -2,8 +2,9 @@
 
 An open, pluggable shared filesystem: clients for Linux (FUSE) and macOS (loopback NFS, single-user Macs), one authority, any S3-compatible bucket.
 
-- [Documentation](https://herdfs-www.vercel.app/docs)
-- `CONTRACT.md`: what v0.1 promises.
-- `docs/architecture.md`: how it works.
-- `docs/verification.md`: how it is proven.
-- `docs/roadmap.md`: what is planned, such as a native macOS client (FSKit) once the Apple Developer Program is in place.
+- [Website](https://herdfs.dev)
+- [Documentation](https://docs.herdfs.dev)
+- [Source](https://github.com/talo58948/herdfs)
+- [`CONTRACT.md`](CONTRACT.md): what v0.1 promises.
+- [`docs/architecture.md`](docs/architecture.md): how it works.
+- [`docs/roadmap.md`](docs/roadmap.md): what is planned.
