@@ -73,13 +73,9 @@ Access token format: JWT
 Include audience: On
 ```
 
-Clerk includes `aud` only when the authorization request, code exchange and every refresh carry the same RFC 8707 `resource`, which must be an absolute URI. Run the authority and log in with the same URI:
+Clerk includes `aud` only when the authorization request, code exchange and every refresh carry the same RFC 8707 `resource`, which must be an absolute URI. Start the authority as above with `--oidc-issuer https://<instance>.clerk.accounts.dev --oidc-audience https://your-domain.example` in place of `--local-issuer`, and log in with the same URI:
 
 ```sh
-./target/release/herdfs-authority \
-  --oidc-issuer https://<instance>.clerk.accounts.dev \
-  --oidc-audience https://your-domain.example
-
 ./target/release/herdfs login \
   --issuer https://<instance>.clerk.accounts.dev \
   --client-id <public-client-id> \
