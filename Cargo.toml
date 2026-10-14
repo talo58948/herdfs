@@ -7,6 +7,8 @@ exclude = ["vendor/nfsserve"]
 edition = "2024"
 license = "Apache-2.0"
 publish = false
+repository = "https://github.com/talo58948/herdfs"
+homepage = "https://herdfs.dev"
 
 [workspace.dependencies]
 herdfs-client = { path = "crates/client" }
