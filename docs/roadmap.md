@@ -16,6 +16,6 @@ The plan, when it does:
 
 - A Swift FSKit module over the client's shared `Space` core (the same core the FUSE and NFS adapters use), through a small C ABI. The NFS client stays as the fallback for unsigned builds.
 - M1 and M2 shrink to "on macOS without the FSKit extension"; with it, C1–C15 and P1 hold as on Linux.
-- Verification: the full lab over FSKit on a macOS CI host, plus the Finder checklist in `macOS test tooling`.
+- Verification: the full lab over FSKit, plus automated Finder integration coverage.
 
 Tracked in the repository's issues as "Native macOS client (FSKit)".

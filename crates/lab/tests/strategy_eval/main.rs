@@ -1,4 +1,4 @@
-//! R5 (docs/verification.md): Jev against the fixed deciders and the rule, scored by regret
+//! Jev against the fixed deciders and the rule, scored by regret
 //! against the measured best strategy. Jev is asked about each case with the client's own
 //! question. Reads the AI Gateway key from `~/.config/herdfs/ai-gateway-key`, and writes the
 //! table to `results/strategy_eval.json`.

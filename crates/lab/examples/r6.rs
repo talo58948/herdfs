@@ -1,4 +1,4 @@
-//! Ring R6 helpers for `scripts/wan`.
+//! Wide-area test helpers.
 //!
 //! `r6 issuer DIR USER...` runs the lab's OIDC issuer for a real authority: it writes
 //! `DIR/USER.token` for each user, prints `issuer=URL`, and serves until killed.

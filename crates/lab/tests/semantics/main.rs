@@ -1,4 +1,4 @@
-//! Ring R3, scenarios U5–U10 of `docs/verification.md`: the semantics users rely on, checked
+//! Scenarios U5–U10: the semantics users rely on, checked
 //! through real mounts. Each test starts its own lab and skips until the binaries are built.
 
 mod support;

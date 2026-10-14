@@ -1,7 +1,7 @@
 name: Linux
 
 on:
-  # Manual only: builds and tests run on the CI host (CI); this is a fallback.
+  # Manual only.
   workflow_dispatch:
 
 permissions:
