@@ -4,6 +4,12 @@ use serde::Deserialize;
 use super::{TokenFile, expiry};
 use crate::{Error, Result};
 
+const USER_AGENT: &str = concat!("herdfs/", env!("CARGO_PKG_VERSION"));
+
+pub(crate) fn client_builder() -> reqwest::ClientBuilder {
+    Client::builder().user_agent(USER_AGENT)
+}
+
 #[derive(Deserialize)]
 struct TokenResponse {
     access_token: String,
@@ -33,6 +39,9 @@ pub(crate) async fn exchange(
         .iter()
         .find_map(|(name, value)| (*name == "client_id").then(|| (*value).to_owned()))
         .ok_or_else(|| Error::Protocol("token exchange omitted client_id".into()))?;
+    let resource = form
+        .iter()
+        .find_map(|(name, value)| (*name == "resource").then(|| (*value).to_owned()));
     Ok(TokenFile {
         generation: 0,
         access_token: response.access_token,
@@ -40,5 +49,6 @@ pub(crate) async fn exchange(
         expires_at: expiry(response.expires_in),
         client_id,
         token_endpoint: endpoint.to_owned(),
+        resource,
     })
 }

@@ -36,7 +36,7 @@ impl Remote {
         token_file: PathBuf,
         resolve: &[(String, IpAddr)],
     ) -> Result<Self> {
-        let builder = reqwest::Client::builder()
+        let builder = token::client_builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(READ_TIMEOUT);
         // reqwest ignores this port and keeps the URL's.

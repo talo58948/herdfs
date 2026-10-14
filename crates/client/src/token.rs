@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use crate::{Error, Result};
 
 mod exchange;
-pub(crate) use exchange::exchange;
+pub(crate) use exchange::{client_builder, exchange};
 
 const REFRESH_MARGIN: Duration = Duration::from_secs(30);
 
@@ -29,6 +29,8 @@ pub(crate) struct TokenFile {
     expires_at: u64,
     client_id: String,
     token_endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resource: Option<String>,
 }
 
 pub(crate) struct Source {
@@ -79,11 +81,14 @@ impl Source {
         {
             return Ok(stored.access());
         }
-        let form = [
+        let mut form = vec![
             ("grant_type", "refresh_token"),
             ("refresh_token", token.refresh_token.as_str()),
             ("client_id", token.client_id.as_str()),
         ];
+        if let Some(resource) = &token.resource {
+            form.push(("resource", resource));
+        }
         let expires_at = token.expires_at;
         let generation = token.generation;
         drop(token_lock);
