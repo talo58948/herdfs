@@ -4,11 +4,15 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
 use axum::{
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    http::{
+        HeaderMap, StatusCode,
+        header::{AUTHORIZATION, USER_AGENT},
+    },
     response::Response as HttpResponse,
 };
 use herdfs_core::proto::Request;
@@ -69,6 +73,54 @@ async fn login_exchange_needs_a_refresh_token() -> anyhow::Result<()> {
         panic!("exchange without a refresh token succeeded")
     };
     assert!(error.to_string().contains("issuer returned no refresh token"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn refresh_sends_resource_and_user_agent_only_as_stored() -> anyhow::Result<()> {
+    // contract: U1, S5
+    for resource in [Some("https://your-domain.example"), None] {
+        let request = Arc::new(Mutex::new(None));
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let capture = Arc::clone(&request);
+        let app = Router::new().route(
+            "/",
+            post(move |headers: HeaderMap, body: Bytes| {
+                let capture = Arc::clone(&capture);
+                async move {
+                    *capture.lock().await = Some((headers, String::from_utf8_lossy(&body).into_owned()));
+                    Json(json!({
+                        "access_token": "fresh",
+                        "refresh_token": "next-refresh",
+                        "expires_in": 60
+                    }))
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let (dir, path) = token_file(0)?;
+        let mut stored = read_login(&path)?;
+        stored.token_endpoint = endpoint;
+        stored.resource = resource.map(str::to_owned);
+        write(&path, &stored, stored.generation)?;
+        Source::new(path)?.access(&client_builder().build()?).await?;
+
+        let Some((headers, body)) = request.lock().await.take() else {
+            anyhow::bail!("refresh request was not received")
+        };
+        assert_eq!(
+            headers.get(USER_AGENT).and_then(|value| value.to_str().ok()),
+            Some(concat!("herdfs/", env!("CARGO_PKG_VERSION")))
+        );
+        let form = reqwest::Url::parse(&format!("http://localhost/?{body}"))?;
+        let sent = form
+            .query_pairs()
+            .find_map(|(name, value)| (name == "resource").then(|| value.into_owned()));
+        assert_eq!(sent.as_deref(), resource);
+        drop(dir);
+    }
     Ok(())
 }
 
@@ -214,6 +266,7 @@ fn token_file(expires_in: u64) -> anyhow::Result<(tempfile::TempDir, PathBuf)> {
             expires_at: expiry(expires_in),
             client_id: "client".into(),
             token_endpoint: "http://unused".into(),
+            resource: None,
         },
         0,
     )?;

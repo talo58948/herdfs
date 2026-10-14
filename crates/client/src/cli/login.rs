@@ -25,6 +25,9 @@ pub(super) struct LoginArgs {
     /// Public OIDC client id.
     #[arg(long)]
     client_id: String,
+    /// Resource URI requested for the access token.
+    #[arg(long)]
+    resource: Option<String>,
     /// Loopback callback port; 0 asks the operating system for a random port.
     #[arg(long, default_value_t = 53682)]
     redirect_port: u16,
@@ -41,7 +44,10 @@ struct Discovery {
 pub(super) async fn login(args: &LoginArgs, json: bool) -> anyhow::Result<()> {
     let token_file = args.token.path()?;
     let issuer = args.issuer.trim_end_matches('/');
-    let discovery = reqwest::get(format!("{issuer}/.well-known/openid-configuration"))
+    let http = token::client_builder().build()?;
+    let discovery = http
+        .get(format!("{issuer}/.well-known/openid-configuration"))
+        .send()
         .await?
         .error_for_status()?
         .json::<Discovery>()
@@ -61,6 +67,9 @@ pub(super) async fn login(args: &LoginArgs, json: bool) -> anyhow::Result<()> {
         ("code_challenge", challenge.as_str()),
         ("code_challenge_method", "S256"),
     ]);
+    if let Some(resource) = &args.resource {
+        authorize.query_pairs_mut().append_pair("resource", resource);
+    }
     if json {
         eprintln!("{authorize}");
     } else {
@@ -71,14 +80,16 @@ pub(super) async fn login(args: &LoginArgs, json: bool) -> anyhow::Result<()> {
     let (mut callback, code) = tokio::time::timeout(Duration::from_secs(300), callback(&listener, &state))
         .await
         .context("timed out waiting for the OIDC callback")??;
-    let form = [
+    let mut form = vec![
         ("grant_type", "authorization_code"),
         ("code", code.as_str()),
         ("redirect_uri", redirect.as_str()),
         ("client_id", args.client_id.as_str()),
         ("code_verifier", verifier.as_str()),
     ];
-    let http = reqwest::Client::new();
+    if let Some(resource) = &args.resource {
+        form.push(("resource", resource));
+    }
     let token = token::exchange(&http, &discovery.token_endpoint, &form, None).await?;
     token::save(&token_file, &token).await?;
     reply(&mut callback, "200 OK", "herdfs signed in\n").await?;

@@ -64,17 +64,23 @@ Use `--redirect-port PORT` only when that exact URI is also registered; `--redir
 
 ### Clerk hosted example
 
-Create a Clerk public client with PKCE and set these values in the Clerk application:
+Create a public OAuth application in Clerk with PKCE and set:
 
 ```text
 Redirect URI: http://127.0.0.1:53682/callback
 Scopes: openid offline_access
-Issuer: https://<clerk-issuer>
-Client ID: <clerk-public-client-id>
-Audience: <clerk-jwt-audience>
+Access token format: JWT
+Include audience: On
 ```
 
-Run the authority with `--oidc-issuer https://<clerk-issuer> --oidc-audience <clerk-jwt-audience>`, then pass the issuer and client ID to `herdfs login` as in the generic example.
+Clerk includes `aud` only when the authorization request, code exchange and every refresh carry the same RFC 8707 `resource`, which must be an absolute URI. Start the authority as above with `--oidc-issuer https://<instance>.clerk.accounts.dev --oidc-audience https://your-domain.example` in place of `--local-issuer`, and log in with the same URI:
+
+```sh
+./target/release/herdfs login \
+  --issuer https://<instance>.clerk.accounts.dev \
+  --client-id <public-client-id> \
+  --resource https://your-domain.example
+```
 
 ## Create and mount
 
