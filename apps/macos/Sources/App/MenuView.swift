@@ -66,6 +66,10 @@ struct MenuView: View {
                 TextField("herdfs", text: $model.clientID)
             }
             GridRow {
+                Text("Resource")
+                TextField("https://your-domain.example", text: $model.resource)
+            }
+            GridRow {
                 HStack {
                     Spacer()
                     Button("Save settings") { model.saveConfiguration() }

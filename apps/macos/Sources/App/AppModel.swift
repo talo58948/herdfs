@@ -16,6 +16,7 @@ final class AppModel: ObservableObject {
     @Published var authority = Configuration.authority
     @Published var issuer = Configuration.issuer
     @Published var clientID = Configuration.clientID
+    @Published var resource = Configuration.resource
     @Published private(set) var spaces: [SpaceState] = []
     @Published private(set) var busy = false
     @Published var error: String?
@@ -57,9 +58,11 @@ final class AppModel: ObservableObject {
         authority = authority.trimmingCharacters(in: .whitespacesAndNewlines)
         issuer = issuer.trimmingCharacters(in: .whitespacesAndNewlines)
         clientID = clientID.trimmingCharacters(in: .whitespacesAndNewlines)
+        resource = resource.trimmingCharacters(in: .whitespacesAndNewlines)
         Configuration.authority = authority
         Configuration.issuer = issuer
         Configuration.clientID = clientID
+        Configuration.resource = resource
         Task { await refreshSpaces() }
     }
 
@@ -71,9 +74,9 @@ final class AppModel: ObservableObject {
         busy = true
         Task {
             do {
-                let command = try CLIArguments("login", options: [
-                    "--issuer", issuer, "--client-id", clientID,
-                ])
+                var options = ["--issuer", issuer, "--client-id", clientID]
+                if !resource.isEmpty { options += ["--resource", resource] }
+                let command = try CLIArguments("login", options: options)
                 _ = try await CLI.run(command)
                 await refreshSpaces()
             } catch {

@@ -15,4 +15,9 @@ struct Configuration {
         get { UserDefaults.standard.string(forKey: "clientID") ?? "" }
         set { UserDefaults.standard.set(newValue, forKey: "clientID") }
     }
+
+    static var resource: String {
+        get { UserDefaults.standard.string(forKey: "resource") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "resource") }
+    }
 }

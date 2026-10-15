@@ -6,7 +6,7 @@ For complete local-issuer, generic OIDC and Clerk configurations, see [Self-host
 
 ## Prerequisites
 
-- Linux with FUSE support, access to `/dev/fuse`, and `fusermount3` for unmounting. macOS support is in progress.
+- Linux with FUSE support, access to `/dev/fuse`, and `fusermount3` for unmounting. macOS is supported through the [menu-bar app](architecture.md#macos-loopback-nfs) on single-user Macs.
 - A Rust toolchain with Cargo.
 - An existing bucket in an S3-compatible store. You need its internal endpoint, the endpoint clients can reach, region, access key and secret key.
 - An OIDC issuer with discovery and JWKS documents. Its signed JWTs must contain `iss`, `sub`, `aud` and `exp`; `aud` must match `--oidc-audience`. An optional `groups` array supplies group principals.
