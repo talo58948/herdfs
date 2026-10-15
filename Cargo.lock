@@ -913,6 +913,111 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "herdfs-agents"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "libc",
+ "rand 0.10.3",
+ "rustix",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "herdfs-authority"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "blake3",
+ "clap",
+ "ed25519-dalek",
+ "herdfs-core",
+ "jsonwebtoken",
+ "rand 0.10.3",
+ "reqwest",
+ "rusqlite",
+ "rustix",
+ "rusty-s3",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "herdfs-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "clap",
+ "fuser",
+ "futures",
+ "herdfs-core",
+ "libc",
+ "nfsserve",
+ "rand 0.10.3",
+ "reqwest",
+ "rustix",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "xattr",
+]
+
+[[package]]
+name = "herdfs-core"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "fastcdc",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "herdfs-lab"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "herdfs-client",
+ "herdfs-core",
+ "jsonwebtoken",
+ "libc",
+ "rand 0.10.3",
+ "reqwest",
+ "rustix",
+ "rusty-s3",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "xattr",
+]
+
+[[package]]
 name = "hkdf"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1592,109 +1697,6 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
-
-[[package]]
-name = "herdfs-agents"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "libc",
- "rustix",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "herdfs-authority"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.22.1",
- "blake3",
- "clap",
- "ed25519-dalek",
- "jsonwebtoken",
- "herdfs-core",
- "rand 0.10.3",
- "reqwest",
- "rusqlite",
- "rustix",
- "rusty-s3",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "herdfs-client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "bytes",
- "clap",
- "fuser",
- "futures",
- "libc",
- "nfsserve",
- "herdfs-core",
- "rand 0.10.3",
- "reqwest",
- "rustix",
- "security-framework",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "subtle",
- "tempfile",
- "thiserror",
- "time",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "xattr",
-]
-
-[[package]]
-name = "herdfs-core"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "fastcdc",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "herdfs-lab"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.22.1",
- "jsonwebtoken",
- "libc",
- "herdfs-client",
- "herdfs-core",
- "rand 0.10.3",
- "reqwest",
- "rustix",
- "rusty-s3",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "tokio",
- "xattr",
-]
 
 [[package]]
 name = "openssl-probe"
